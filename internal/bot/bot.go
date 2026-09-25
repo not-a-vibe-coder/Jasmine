@@ -7,10 +7,12 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -131,7 +133,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	isOwner := b.cfg.IsOwner(msg.From.UserName)
+	isOwner := b.cfg.IsOwner(msg.From.UserName) || b.cfg.IsOwner(msg.From.FirstName)
 	isPrivate := msg.Chat.IsPrivate()
 
 	// Log message in memory store
@@ -159,6 +161,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	b.handleNLPAndChat(ctx, msg, cleanPrompt, username, isOwner)
 }
 
+var shippWordRegex = regexp.MustCompile(`(?i)\bshipp\b`)
+
 func (b *Bot) isAddressedToBot(msg *tgbotapi.Message) bool {
 	// Reply to bot's own message
 	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
@@ -167,13 +171,16 @@ func (b *Bot) isAddressedToBot(msg *tgbotapi.Message) bool {
 		}
 	}
 
-	// Bot mentioned in message
-	textLower := strings.ToLower(msg.Text)
-	botUserLower := strings.ToLower(b.api.Self.UserName)
-	if strings.Contains(textLower, "@"+botUserLower) {
-		return true
+	// Bot username mentioned (e.g. @Shipp0Bot)
+	if b.api != nil && b.api.Self.UserName != "" {
+		botUserLower := strings.ToLower(b.api.Self.UserName)
+		if strings.Contains(strings.ToLower(msg.Text), "@"+botUserLower) {
+			return true
+		}
 	}
-	if strings.HasPrefix(textLower, "shipp") {
+
+	// Word "shipp" anywhere in the message as a distinct word
+	if shippWordRegex.MatchString(msg.Text) {
 		return true
 	}
 
@@ -186,13 +193,14 @@ func (b *Bot) cleanPrompt(text string) string {
 		cleaned = strings.ReplaceAll(cleaned, "@"+b.api.Self.UserName, "")
 		cleaned = strings.ReplaceAll(cleaned, "@"+strings.ToLower(b.api.Self.UserName), "")
 	}
-	cleaned = strings.TrimSpace(cleaned)
-	if strings.HasPrefix(strings.ToLower(cleaned), "shipp") {
-		cleaned = strings.TrimSpace(cleaned[5:])
-		cleaned = strings.TrimPrefix(cleaned, ",")
-		cleaned = strings.TrimPrefix(cleaned, ":")
+	cleaned = shippWordRegex.ReplaceAllString(cleaned, "")
+	cleaned = strings.TrimFunc(cleaned, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(",:!?-.", r)
+	})
+	if cleaned == "" {
+		return text
 	}
-	return strings.TrimSpace(cleaned)
+	return cleaned
 }
 
 func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner bool) {

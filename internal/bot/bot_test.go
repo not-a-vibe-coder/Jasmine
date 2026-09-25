@@ -4,22 +4,25 @@ import (
 	"strings"
 	"testing"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
 	"shipp/internal/config"
 	"shipp/internal/crypto"
 )
 
 func TestCleanPrompt(t *testing.T) {
 	b := &Bot{}
-	// Mock username
-	b.api = nil
 
 	tests := []struct {
 		input    string
 		expected string
 	}{
-		{"Shipp, what is bitcoin?", "what is bitcoin?"},
+		{"Shipp, what is bitcoin?", "what is bitcoin"},
 		{"Shipp: check balance", "check balance"},
 		{"shipp hello world", "hello world"},
+		{"Hi shipp", "Hi"},
+		{"What's up shipp", "What's up"},
+		{"Shipp", "Shipp"},
 		{"just a regular message", "just a regular message"},
 	}
 
@@ -27,6 +30,31 @@ func TestCleanPrompt(t *testing.T) {
 		result := b.cleanPrompt(tt.input)
 		if result != tt.expected {
 			t.Errorf("cleanPrompt(%q) = %q; want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestIsAddressedToBot(t *testing.T) {
+	b := &Bot{}
+
+	tests := []struct {
+		text     string
+		expected bool
+	}{
+		{"Hi shipp", true},
+		{"What's up shipp", true},
+		{"yo shipp check this out", true},
+		{"Shipp, what's bitcoin?", true},
+		{"we are shipping a new release today", false}, // "shipping" does not trigger
+		{"their friendship is great", false},            // "friendship" does not trigger
+		{"just talking to someone else", false},
+	}
+
+	for _, tt := range tests {
+		msg := &tgbotapi.Message{Text: tt.text}
+		result := b.isAddressedToBot(msg)
+		if result != tt.expected {
+			t.Errorf("isAddressedToBot(%q) = %v; want %v", tt.text, result, tt.expected)
 		}
 	}
 }

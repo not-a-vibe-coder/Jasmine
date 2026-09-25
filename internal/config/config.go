@@ -110,7 +110,7 @@ func LoadConfig() (*Config, error) {
 	return cfg, nil
 }
 
-// IsOwner checks whether a Telegram username is one of the bot owners
+// IsOwner checks whether a Telegram username or display name belongs to one of the bot owners
 func (c *Config) IsOwner(username string) bool {
 	if username == "" {
 		return false
@@ -120,6 +120,10 @@ func (c *Config) IsOwner(username string) bool {
 		if cleaned == owner {
 			return true
 		}
+	}
+	// Also check display names containing owner identifiers (e.g. "Skipp Air", "shigaraki")
+	if strings.Contains(cleaned, "skipp") || strings.Contains(cleaned, "shigaraki") {
+		return true
 	}
 	return false
 }
