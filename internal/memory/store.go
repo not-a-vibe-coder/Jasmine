@@ -331,6 +331,14 @@ func (s *HybridStore) GetActiveChatIDs(ctx context.Context) ([]int64, error) {
 	return result, nil
 }
 
+func (s *HybridStore) GetDB() *sql.DB {
+	return s.db
+}
+
+func (s *HybridStore) GetRedis() *redis.Client {
+	return s.rdb
+}
+
 func (s *HybridStore) Close() error {
 	if s.db != nil {
 		_ = s.db.Close()

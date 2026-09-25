@@ -65,7 +65,7 @@ func main() {
 	}
 
 	// 6. Initialize & Start HTTP Server for Render Healthchecks & Telegram Webhooks
-	httpServer := server.NewServer(cfg.Port)
+	httpServer := server.NewServer(cfg.Port, memStore.GetDB(), memStore.GetRedis())
 	httpServer.RegisterHandler("/webhook", tgBot.WebhookHandler)
 	go func() {
 		if err := httpServer.Start(); err != nil {

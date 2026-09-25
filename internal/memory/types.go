@@ -2,7 +2,10 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type Message struct {
@@ -19,5 +22,7 @@ type Store interface {
 	SaveSummary(ctx context.Context, chatID int64, summary string) error
 	GetSummary(ctx context.Context, chatID int64) (string, error)
 	GetActiveChatIDs(ctx context.Context) ([]int64, error)
+	GetDB() *sql.DB
+	GetRedis() *redis.Client
 	Close() error
 }
