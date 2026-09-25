@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,11 +21,12 @@ import (
 )
 
 type Bot struct {
-	api    *tgbotapi.BotAPI
-	cfg    *config.Config
-	ai     *ai.Client
-	memory memory.Store
-	crypto *crypto.Service
+	api         *tgbotapi.BotAPI
+	cfg         *config.Config
+	ai          *ai.Client
+	memory      memory.Store
+	crypto      *crypto.Service
+	updatesChan chan tgbotapi.Update
 
 	// Proactive settings per chat
 	proactiveMu       sync.RWMutex
@@ -51,16 +53,47 @@ func NewBot(
 		ai:                aiClient,
 		memory:            memStore,
 		crypto:            cryptoSvc,
+		updatesChan:       make(chan tgbotapi.Update, 100),
 		proactiveDisabled: make(map[int64]bool),
 		lastProactiveTime: make(map[int64]time.Time),
 	}, nil
 }
 
-func (b *Bot) Start(ctx context.Context) error {
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 30
+func (b *Bot) WebhookHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var update tgbotapi.Update
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	b.updatesChan <- update
+	w.WriteHeader(http.StatusOK)
+}
 
-	updates := b.api.GetUpdatesChan(u)
+func (b *Bot) Start(ctx context.Context) error {
+	var updates tgbotapi.UpdatesChannel
+
+	if b.cfg.WebhookURL != "" {
+		log.Printf("[Bot] Configuring Webhook at %s", b.cfg.WebhookURL)
+		wh, err := tgbotapi.NewWebhook(b.cfg.WebhookURL)
+		if err != nil {
+			return fmt.Errorf("failed to create webhook config: %w", err)
+		}
+		if _, err := b.api.Request(wh); err != nil {
+			return fmt.Errorf("failed to register webhook: %w", err)
+		}
+		updates = b.updatesChan
+		log.Printf("[Bot] Webhook registered successfully with Telegram")
+	} else {
+		log.Printf("[Bot] WebhookURL not configured. Clearing any existing webhook and using Long Polling...")
+		_, _ = b.api.Request(tgbotapi.DeleteWebhookConfig{})
+		u := tgbotapi.NewUpdate(0)
+		u.Timeout = 30
+		updates = b.api.GetUpdatesChan(u)
+	}
 
 	// Start background proactive messaging engine
 	go b.runProactiveEngine(ctx)

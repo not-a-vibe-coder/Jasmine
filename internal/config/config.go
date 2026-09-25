@@ -45,8 +45,9 @@ type Config struct {
 	GithubPAT      string
 	GithubUsername string
 
-	// Server
-	Port string
+	// Server & Webhook
+	Port       string
+	WebhookURL string
 }
 
 func LoadConfig() (*Config, error) {
@@ -76,6 +77,7 @@ func LoadConfig() (*Config, error) {
 		GithubPAT:           os.Getenv("GITHUB_PAT"),
 		GithubUsername:      os.Getenv("GITHUB_USERNAME"),
 		Port:                os.Getenv("PORT"),
+		WebhookURL:          os.Getenv("WEBHOOK_URL"),
 	}
 
 	if cfg.Port == "" {

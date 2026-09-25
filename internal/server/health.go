@@ -10,6 +10,7 @@ import (
 
 type Server struct {
 	httpServer *http.Server
+	mux        *http.ServeMux
 }
 
 func NewServer(port string) *Server {
@@ -34,7 +35,12 @@ func NewServer(port string) *Server {
 			ReadTimeout:  10 * time.Second,
 			WriteTimeout: 10 * time.Second,
 		},
+		mux: mux,
 	}
+}
+
+func (s *Server) RegisterHandler(pattern string, handler http.HandlerFunc) {
+	s.mux.HandleFunc(pattern, handler)
 }
 
 func (s *Server) Start() error {

@@ -58,19 +58,20 @@ func main() {
 	aiClient := ai.NewClient(cfg.GroqAPIKey, cfg.GroqModel, cfg.Owners)
 	log.Printf("[Main] AI Client initialized with Groq model: %s", cfg.GroqModel)
 
-	// 5. Initialize & Start HTTP Server for Render Healthchecks
+	// 5. Initialize Telegram Bot
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc)
+	if err != nil {
+		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
+	}
+
+	// 6. Initialize & Start HTTP Server for Render Healthchecks & Telegram Webhooks
 	httpServer := server.NewServer(cfg.Port)
+	httpServer.RegisterHandler("/webhook", tgBot.WebhookHandler)
 	go func() {
 		if err := httpServer.Start(); err != nil {
 			log.Printf("[Main] HTTP server exited: %v", err)
 		}
 	}()
-
-	// 6. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc)
-	if err != nil {
-		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
-	}
 
 	// 7. Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
