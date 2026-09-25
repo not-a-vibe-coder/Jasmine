@@ -117,6 +117,23 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "web_search",
+				Description: "Search the live internet for real-time information, breaking news, current world leaders, elections, market events, and facts beyond training cutoff. Always use when asked about current facts.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "The search query (e.g. 'current president of Uruguay', 'president of Venezuela')",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		},
 	}
 }
 
@@ -144,7 +161,8 @@ Core Personality & Rules:
 3. You have native crypto superpowers on Solana (SVM) and EVM (Base, Ethereum, Arbitrum, BNB).
 4. If the user asks for your wallet address, balances, sending funds, summarizing the chat, or clearing context, you MUST trigger the corresponding tool.
 5. If someone who is NOT an owner asks you to send crypto, decline with witty banter (e.g., "nice try, only @skipp_dev and @shigarakiXBT can touch the vault").
-6. Maintain context and banter with group members. You can use light crypto/dev slang when appropriate (anon, gm, lfg, wagmi, cooked) without overdoing it.`, ownersStr, roleNote)
+6. Maintain context and banter with group members. You can use light crypto/dev slang when appropriate (anon, gm, lfg, wagmi, cooked) without overdoing it.
+7. You have access to real-time live internet search via the 'web_search' tool. ALWAYS trigger 'web_search' whenever asked about current events, world leaders, news, market trends, sports, or anything where facts may have updated. NEVER claim your knowledge has a cutoff or say you don't have real-time access when you can simply search the web.`, ownersStr, roleNote)
 }
 
 type AIResponse struct {

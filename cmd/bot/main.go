@@ -13,6 +13,7 @@ import (
 	"shipp/internal/config"
 	"shipp/internal/crypto"
 	"shipp/internal/memory"
+	"shipp/internal/search"
 	"shipp/internal/server"
 )
 
@@ -54,12 +55,15 @@ func main() {
 	svmAddr, evmAddr := cryptoSvc.GetAddresses()
 	log.Printf("[Main] Crypto Service initialized | SVM: %s | EVM: %s", svmAddr, evmAddr)
 
-	// 4. Initialize AI Client
+	// 4. Initialize AI Client & Search Service
 	aiClient := ai.NewClient(cfg.GroqAPIKey, cfg.GroqModel, cfg.Owners)
 	log.Printf("[Main] AI Client initialized with Groq model: %s", cfg.GroqModel)
 
+	searchSvc := search.NewService(cfg.TavilyAPIKey)
+	log.Printf("[Main] Web Search Service initialized (DuckDuckGo + Wikipedia active)")
+
 	// 5. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc)
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}

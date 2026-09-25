@@ -38,6 +38,7 @@ func TestToolsDefinition(t *testing.T) {
 		"send_crypto":        false,
 		"summarize_context":  false,
 		"clear_context":      false,
+		"web_search":         false,
 	}
 
 	for _, tool := range tools {

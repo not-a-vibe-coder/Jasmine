@@ -20,6 +20,7 @@ import (
 	"shipp/internal/config"
 	"shipp/internal/crypto"
 	"shipp/internal/memory"
+	"shipp/internal/search"
 )
 
 type Bot struct {
@@ -28,6 +29,7 @@ type Bot struct {
 	ai          *ai.Client
 	memory      memory.Store
 	crypto      *crypto.Service
+	search      *search.Service
 	updatesChan chan tgbotapi.Update
 
 	// Proactive settings per chat
@@ -41,6 +43,7 @@ func NewBot(
 	aiClient *ai.Client,
 	memStore memory.Store,
 	cryptoSvc *crypto.Service,
+	searchSvc *search.Service,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
@@ -55,6 +58,7 @@ func NewBot(
 		ai:                aiClient,
 		memory:            memStore,
 		crypto:            cryptoSvc,
+		search:            searchSvc,
 		updatesChan:       make(chan tgbotapi.Update, 100),
 		proactiveDisabled: make(map[int64]bool),
 		lastProactiveTime: make(map[int64]time.Time),
@@ -238,6 +242,20 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 	case "/proactive":
 		b.handleProactiveCommand(msg, parts[1:], isOwner)
 
+	case "/search":
+		query := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]))
+		if query == "" {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/search <query>` (e.g. `/search president of Uruguay`)")
+			return
+		}
+		b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
+		res, err := b.search.Search(ctx, query)
+		if err != nil {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "Search query failed.")
+			return
+		}
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("🔍 **Search Results for '%s':**\n\n%s", query, res))
+
 	default:
 		// Unknown slash command
 	}
@@ -337,6 +355,21 @@ func (b *Bot) executeToolCall(
 	case "clear_context":
 		_ = b.memory.ClearContext(ctx, chatID)
 		return "🧹 Context and memory have been wiped clean for this chat. Clean slate!"
+
+	case "web_search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		q := strings.TrimSpace(args.Query)
+		if q == "" {
+			return "No search query provided."
+		}
+		res, err := b.search.Search(ctx, q)
+		if err != nil {
+			return fmt.Sprintf("Search error: %v", err)
+		}
+		return res
 
 	default:
 		return "Unknown action."

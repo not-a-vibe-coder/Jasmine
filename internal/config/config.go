@@ -45,6 +45,9 @@ type Config struct {
 	GithubPAT      string
 	GithubUsername string
 
+	// Search
+	TavilyAPIKey string
+
 	// Server & Webhook
 	Port       string
 	WebhookURL string
@@ -76,6 +79,7 @@ func LoadConfig() (*Config, error) {
 		MonadRPCURL:         os.Getenv("MONAD_RPC_URL"),
 		GithubPAT:           os.Getenv("GITHUB_PAT"),
 		GithubUsername:      os.Getenv("GITHUB_USERNAME"),
+		TavilyAPIKey:        os.Getenv("TAVILY_API_KEY"),
 		Port:                os.Getenv("PORT"),
 		WebhookURL:          os.Getenv("WEBHOOK_URL"),
 	}
