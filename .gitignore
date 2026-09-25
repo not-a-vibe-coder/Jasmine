@@ -1,0 +1,17 @@
+# Environment
+.env
+*.env
+!.env.example
+
+# Binaries
+bin/
+shipp
+main
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

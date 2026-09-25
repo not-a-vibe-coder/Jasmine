@@ -1,0 +1,397 @@
+package ai
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"shipp/internal/memory"
+)
+
+const DefaultGroqURL = "https://api.groq.com/openai/v1/chat/completions"
+
+type Client struct {
+	apiKey     string
+	model      string
+	owners     []string
+	httpClient *http.Client
+	tools      []ToolDefinition
+}
+
+func NewClient(apiKey, model string, owners []string) *Client {
+	if model == "" {
+		model = "qwen/qwen3.8-27b"
+	}
+	c := &Client{
+		apiKey:     apiKey,
+		model:      model,
+		owners:     owners,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+	}
+	c.tools = c.buildTools()
+	return c
+}
+
+func (c *Client) buildTools() []ToolDefinition {
+	return []ToolDefinition{
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "get_wallet_address",
+				Description: "Get the bot's deposit wallet addresses for receiving crypto on Solana (SVM) and EVM chains (Base, Ethereum, Arbitrum, BNB). Use whenever user asks for deposit address, wallet address, or where to send funds.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"chain": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional chain name: solana, evm, base, ethereum, arbitrum, bnb",
+						},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "get_balances",
+				Description: "Check the bot's current live crypto balances across Solana and EVM chains. Use whenever user asks about balance, money, funds, or holdings.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"chain": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional specific chain: solana, base, ethereum, arbitrum, bnb",
+						},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "send_crypto",
+				Description: "Send crypto (SOL on Solana, or ETH/BNB on EVM chains: base, ethereum, arbitrum, bnb) to a recipient address. This can only be executed by bot owners.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"chain": map[string]interface{}{
+							"type":        "string",
+							"description": "The chain to transfer on: solana, base, ethereum, arbitrum, bnb",
+						},
+						"recipient": map[string]interface{}{
+							"type":        "string",
+							"description": "The destination wallet address (Solana base58 or EVM 0x... address)",
+						},
+						"amount": map[string]interface{}{
+							"type":        "number",
+							"description": "The amount of tokens to send (e.g. 0.05)",
+						},
+					},
+					"required": []string{"chain", "recipient", "amount"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "summarize_context",
+				Description: "Summarize recent conversation history and key points in the chat. Use whenever user asks for a recap, summary, or what happened earlier.",
+				Parameters: map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "clear_context",
+				Description: "Clear or reset the conversational memory/context of the bot for this chat. Use whenever user asks to reset memory, forget history, or start fresh.",
+				Parameters: map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+	}
+}
+
+func (c *Client) systemPrompt(senderUsername string, isOwner bool) string {
+	ownersStr := strings.Join(c.owners, ", @")
+	if ownersStr != "" {
+		ownersStr = "@" + ownersStr
+	}
+
+	roleNote := fmt.Sprintf("Current speaker is @%s.", senderUsername)
+	if isOwner {
+		roleNote += " This user is one of your OWNERS/CREATORS. You have high respect for them."
+	} else {
+		roleNote += " This user is a group member (not an owner). They can chat and check balances/addresses, but CANNOT authorize sending crypto."
+	}
+
+	return fmt.Sprintf(`You are Shipp (@Shipp0Bot), a sharp, witty, highly intelligent personal AI companion built for Telegram group chats and private chats.
+
+Your owners and creators are %s.
+%s
+
+Core Personality & Rules:
+1. Speak naturally like a smart, cool friend in the group chat. Do NOT sound like an AI assistant or corporate customer service.
+2. Keep responses concise, punchy, and relevant. Avoid generic filler and preamble.
+3. You have native crypto superpowers on Solana (SVM) and EVM (Base, Ethereum, Arbitrum, BNB).
+4. If the user asks for your wallet address, balances, sending funds, summarizing the chat, or clearing context, you MUST trigger the corresponding tool.
+5. If someone who is NOT an owner asks you to send crypto, decline with witty banter (e.g., "nice try, only @skipp_dev and @shigarakiXBT can touch the vault").
+6. Maintain context and banter with group members. You can use light crypto/dev slang when appropriate (anon, gm, lfg, wagmi, cooked) without overdoing it.`, ownersStr, roleNote)
+}
+
+type AIResponse struct {
+	Content   string
+	ToolCalls []ToolCall
+}
+
+func (c *Client) GenerateReply(
+	ctx context.Context,
+	senderUsername string,
+	isOwner bool,
+	history []memory.Message,
+	currentPrompt string,
+	summary string,
+) (*AIResponse, error) {
+	var msgs []ChatMessage
+
+	// System prompt
+	msgs = append(msgs, ChatMessage{
+		Role:    "system",
+		Content: c.systemPrompt(senderUsername, isOwner),
+	})
+
+	// Add summary if available
+	if summary != "" {
+		msgs = append(msgs, ChatMessage{
+			Role:    "system",
+			Content: fmt.Sprintf("[Past Chat Summary Context]: %s", summary),
+		})
+	}
+
+	// Add history
+	for _, h := range history {
+		role := h.Role
+		if role != "user" && role != "assistant" && role != "system" {
+			role = "user"
+		}
+		prefix := ""
+		if h.Sender != "" && role == "user" {
+			prefix = fmt.Sprintf("@%s: ", h.Sender)
+		}
+		msgs = append(msgs, ChatMessage{
+			Role:    role,
+			Content: prefix + h.Content,
+		})
+	}
+
+	// Add current prompt
+	currContent := currentPrompt
+	if senderUsername != "" {
+		currContent = fmt.Sprintf("@%s: %s", senderUsername, currentPrompt)
+	}
+	msgs = append(msgs, ChatMessage{
+		Role:    "user",
+		Content: currContent,
+	})
+
+	reqBody := ChatCompletionRequest{
+		Model:       c.model,
+		Messages:    msgs,
+		Tools:       c.tools,
+		ToolChoice:  "auto",
+		Temperature: 0.7,
+		MaxTokens:   500,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(resp.Choices) == 0 {
+		return &AIResponse{Content: "..." }, nil
+	}
+
+	choice := resp.Choices[0]
+	return &AIResponse{
+		Content:   choice.Message.Content,
+		ToolCalls: choice.Message.ToolCalls,
+	}, nil
+}
+
+func (c *Client) GenerateToolFollowup(
+	ctx context.Context,
+	senderUsername string,
+	isOwner bool,
+	originalPrompt string,
+	toolName string,
+	toolCallID string,
+	toolResult string,
+) (string, error) {
+	msgs := []ChatMessage{
+		{
+			Role:    "system",
+			Content: c.systemPrompt(senderUsername, isOwner),
+		},
+		{
+			Role:    "user",
+			Content: originalPrompt,
+		},
+		{
+			Role: "assistant",
+			ToolCalls: []ToolCall{
+				{
+					ID:   toolCallID,
+					Type: "function",
+					Function: FunctionCall{
+						Name: toolName,
+					},
+				},
+			},
+		},
+		{
+			Role:       "tool",
+			Name:       toolName,
+			ToolCallID: toolCallID,
+			Content:    toolResult,
+		},
+	}
+
+	reqBody := ChatCompletionRequest{
+		Model:       c.model,
+		Messages:    msgs,
+		Temperature: 0.6,
+		MaxTokens:   300,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		// Fallback to presenting tool result directly
+		return toolResult, nil
+	}
+
+	if len(resp.Choices) > 0 && resp.Choices[0].Message.Content != "" {
+		return resp.Choices[0].Message.Content, nil
+	}
+
+	return toolResult, nil
+}
+
+func (c *Client) SummarizeChat(ctx context.Context, messages []memory.Message) (string, error) {
+	if len(messages) == 0 {
+		return "No recent messages to summarize.", nil
+	}
+
+	var sb strings.Builder
+	for _, m := range messages {
+		sender := m.Sender
+		if sender == "" {
+			sender = m.Role
+		}
+		sb.WriteString(fmt.Sprintf("%s: %s\n", sender, m.Content))
+	}
+
+	prompt := fmt.Sprintf(`Summarize the following group chat conversation concisely. Focus on the main topics discussed, decisions made, crypto references, or funny moments. Keep it punchy and clear:
+
+%s`, sb.String())
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: "You are an expert at concise, insightful group chat summarization."},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0.5,
+		MaxTokens:   350,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) > 0 {
+		return resp.Choices[0].Message.Content, nil
+	}
+	return "No summary generated.", nil
+}
+
+func (c *Client) GenerateProactiveMessage(ctx context.Context, recentMessages []memory.Message) (string, error) {
+	var contextSnippet string
+	if len(recentMessages) > 0 {
+		var sb strings.Builder
+		for _, m := range recentMessages {
+			sender := m.Sender
+			if sender == "" {
+				sender = m.Role
+			}
+			sb.WriteString(fmt.Sprintf("%s: %s\n", sender, m.Content))
+		}
+		contextSnippet = sb.String()
+	}
+
+	prompt := `You are Shipp (@Shipp0Bot), dropping a spontaneous, natural message into your group chat.
+Be witty, observant, and chill. You can talk about what people were just saying, ask what everyone's cooking/building today, drop a quick crypto observation, or just start a fun conversation.
+Keep it short (1-2 sentences max). Do NOT introduce yourself or say "Hey guys, as an AI...". Sound like an actual human friend in the GC.`
+
+	if contextSnippet != "" {
+		prompt += fmt.Sprintf("\n\nRecent chat context:\n%s", contextSnippet)
+	}
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: "You are Shipp, a sharp personal AI companion in a Telegram group chat."},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0.85,
+		MaxTokens:   150,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) > 0 {
+		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+	}
+	return "yo, what is everyone building today?", nil
+}
+
+func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionRequest) (*ChatCompletionResponse, error) {
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", DefaultGroqURL, bytes.NewBuffer(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var chatResp ChatCompletionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return nil, err
+	}
+
+	if chatResp.Error != nil {
+		return nil, fmt.Errorf("groq api error: %s (%s)", chatResp.Error.Message, chatResp.Error.Type)
+	}
+
+	return &chatResp, nil
+}
