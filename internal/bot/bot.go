@@ -356,10 +356,24 @@ func (b *Bot) handleNLPAndChat(
 	// 2. Fetch past summary if available
 	summary, _ := b.memory.GetSummary(ctx, chatID)
 
+	lowerPrompt := strings.ToLower(prompt)
+
+	// 2a. Pre-AI dispatch: if the prompt has a GitHub URL + edit verb, skip the LLM and
+	//     call github_edit_file directly to avoid clarification loops.
+	if isOwner {
+		if b.trySmartDispatch(ctx, msg, prompt, lowerPrompt, username, isOwner, history) {
+			return
+		}
+	}
+
 	// 3. Ask AI with tool declarations
 	aiResp, err := b.ai.GenerateReply(ctx, username, isOwner, history, prompt, summary)
 	if err != nil {
 		log.Printf("[Bot] AI generate error: %v", err)
+		// Even on rate-limit / error, still try interceptors so merge/edit commands aren't lost.
+		if isOwner && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, "") {
+			return
+		}
 		b.sendReply(chatID, msg.MessageID, b.getRandomChatFallback())
 		return
 	}
@@ -383,9 +397,78 @@ func (b *Bot) handleNLPAndChat(
 
 	// 5. Intercept hallucinated git actions or explicit push/merge commands that bypassed tool calls
 	replyText := strings.TrimSpace(aiResp.Content)
-	lowerReply := strings.ToLower(replyText)
-	lowerPrompt := strings.ToLower(prompt)
+	if isOwner && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, replyText) {
+		return
+	}
 
+	if replyText == "" {
+		replyText = b.getRandomEmptyAck()
+	}
+
+	b.sendReply(chatID, msg.MessageID, replyText)
+	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", replyText)
+}
+
+// trySmartDispatch fires github_edit_file directly when the prompt has a GitHub URL + an edit verb,
+// bypassing the LLM to prevent "I need the repo name" clarification loops.
+func (b *Bot) trySmartDispatch(
+	ctx context.Context,
+	msg *tgbotapi.Message,
+	prompt, lowerPrompt, username string,
+	isOwner bool,
+	history []memory.Message,
+) bool {
+	editVerbs := []string{
+		"update", "edit", "change", "rephrase", "rewrite", "modify",
+		"fix the description", "update the description", "update the readme",
+	}
+	hasEditVerb := false
+	for _, v := range editVerbs {
+		if strings.Contains(lowerPrompt, v) {
+			hasEditVerb = true
+			break
+		}
+	}
+	if !hasEditVerb {
+		return false
+	}
+
+	// Only fire when the GitHub URL is in THIS prompt (not just history), so we're confident
+	repo := extractRepoFromHistory(nil, prompt)
+	if repo == "" {
+		return false
+	}
+
+	log.Printf("[Bot] SmartDispatch: edit+URL detected in prompt, executing github_edit_file on %s", repo)
+	pushToMain := strings.Contains(lowerPrompt, "push to main") ||
+		strings.Contains(lowerPrompt, "straight to main") ||
+		strings.Contains(lowerPrompt, "push straight")
+	argsJSON, _ := json.Marshal(map[string]interface{}{
+		"repo":         repo,
+		"path":         "README.md",
+		"instruction":  prompt,
+		"push_to_main": pushToMain,
+	})
+	toolResult := b.executeToolCall(ctx, msg.Chat.ID, "github_edit_file", string(argsJSON), username, isOwner)
+	b.sendReply(msg.Chat.ID, msg.MessageID, toolResult)
+	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+	return true
+}
+
+// tryInterceptAction catches hallucinated push/merge text claims or explicit commands that the LLM
+// responded to without calling the actual tool. Also runs on AI error so rate limits don't lose commands.
+func (b *Bot) tryInterceptAction(
+	ctx context.Context,
+	msg *tgbotapi.Message,
+	prompt, lowerPrompt, username string,
+	isOwner bool,
+	history []memory.Message,
+	replyText string,
+) bool {
+	chatID := msg.Chat.ID
+	lowerReply := strings.ToLower(replyText)
+
+	// Push / edit interception
 	isPushOrEditRequest := strings.Contains(lowerPrompt, "push to main") ||
 		strings.Contains(lowerPrompt, "push straight") ||
 		strings.Contains(lowerPrompt, "rephrase it and push") ||
@@ -395,12 +478,11 @@ func (b *Bot) handleNLPAndChat(
 		strings.Contains(lowerReply, "pushed directly") ||
 		(strings.Contains(lowerReply, "opened pr") && !strings.Contains(lowerReply, "want me to open a pr"))
 
-	if isOwner && (isPushOrEditRequest || isClaimingPushed) {
+	if isPushOrEditRequest || isClaimingPushed {
 		recoveredRepo := extractRepoFromHistory(history, prompt)
 		if recoveredRepo != "" {
 			log.Printf("[Bot] Intercepted push without tool execution. Executing github_edit_file on %s", recoveredRepo)
 			pushToMain := strings.Contains(lowerPrompt, "main") || strings.Contains(lowerReply, "main")
-			filePath := "README.md"
 			instruction := prompt
 			for i := len(history) - 1; i >= 0; i-- {
 				if history[i].Role == "user" && !strings.Contains(strings.ToLower(history[i].Content), "push to main") {
@@ -410,18 +492,21 @@ func (b *Bot) handleNLPAndChat(
 			}
 			argsJSON, _ := json.Marshal(map[string]interface{}{
 				"repo":         recoveredRepo,
-				"path":         filePath,
+				"path":         "README.md",
 				"instruction":  instruction,
 				"push_to_main": pushToMain,
 			})
 			toolResult := b.executeToolCall(ctx, chatID, "github_edit_file", string(argsJSON), username, isOwner)
-			replyText = toolResult
+			b.sendReply(chatID, msg.MessageID, toolResult)
+			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+			return true
 		}
 	}
 
-	isMergeRequest := strings.Contains(lowerPrompt, "merge it") || strings.Contains(lowerPrompt, "merge pr")
+	// Merge interception — catches "merge", "merge it", "merge pr", "merge the pr", etc.
+	isMergeRequest := strings.Contains(lowerPrompt, "merge")
 	isClaimingMerged := strings.Contains(lowerReply, "merged pr") || strings.Contains(lowerReply, "merged pull request")
-	if isOwner && (isMergeRequest || isClaimingMerged) {
+	if isMergeRequest || isClaimingMerged {
 		recoveredRepo := extractRepoFromHistory(history, prompt)
 		if recoveredRepo != "" {
 			prNum := extractPRNumber(history, prompt)
@@ -432,18 +517,16 @@ func (b *Bot) handleNLPAndChat(
 					"pr_number": prNum,
 				})
 				toolResult := b.executeToolCall(ctx, chatID, "github_merge_pr", string(argsJSON), username, isOwner)
-				replyText = toolResult
+				b.sendReply(chatID, msg.MessageID, toolResult)
+				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+				return true
 			}
 		}
 	}
 
-	if replyText == "" {
-		replyText = b.getRandomEmptyAck()
-	}
-
-	b.sendReply(chatID, msg.MessageID, replyText)
-	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", replyText)
+	return false
 }
+
 
 func (b *Bot) executeToolCall(
 	ctx context.Context,
