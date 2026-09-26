@@ -310,7 +310,7 @@ func (c *Client) GenerateToolFollowup(
 		Model:       c.model,
 		Messages:    msgs,
 		Temperature: 0.6,
-		MaxTokens:   300,
+		MaxTokens:   600,
 	}
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
