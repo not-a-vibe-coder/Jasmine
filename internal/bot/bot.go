@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,9 +21,12 @@ import (
 	"shipp/internal/ai"
 	"shipp/internal/config"
 	"shipp/internal/crypto"
+	"shipp/internal/docparser"
 	"shipp/internal/memory"
+	"shipp/internal/price"
 	"shipp/internal/search"
 	"shipp/internal/token"
+	"shipp/internal/vision"
 )
 
 type Bot struct {
@@ -32,6 +37,8 @@ type Bot struct {
 	crypto      *crypto.Service
 	search      *search.Service
 	token       *token.Service
+	price       *price.Service
+	vision      *vision.Service
 	updatesChan chan tgbotapi.Update
 
 	// Proactive settings per chat
@@ -47,6 +54,8 @@ func NewBot(
 	cryptoSvc *crypto.Service,
 	searchSvc *search.Service,
 	tokenSvc *token.Service,
+	priceSvc *price.Service,
+	visionSvc *vision.Service,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
@@ -63,6 +72,8 @@ func NewBot(
 		crypto:            cryptoSvc,
 		search:            searchSvc,
 		token:             tokenSvc,
+		price:             priceSvc,
+		vision:            visionSvc,
 		updatesChan:       make(chan tgbotapi.Update, 100),
 		proactiveDisabled: make(map[int64]bool),
 		lastProactiveTime: make(map[int64]time.Time),
@@ -136,7 +147,23 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	if username == "" {
 		username = msg.From.FirstName
 	}
+
+	// 0. Handle Photos
+	if len(msg.Photo) > 0 {
+		b.handlePhotoMessage(ctx, msg)
+		return
+	}
+
+	// 0b. Handle Documents (.md, .pdf, .docx, images)
+	if msg.Document != nil {
+		b.handleDocumentMessage(ctx, msg)
+		return
+	}
+
 	text := strings.TrimSpace(msg.Text)
+	if text == "" && msg.Caption != "" {
+		text = strings.TrimSpace(msg.Caption)
+	}
 	if text == "" {
 		return
 	}
@@ -209,16 +236,21 @@ func (b *Bot) isAddressedToBot(msg *tgbotapi.Message) bool {
 		}
 	}
 
+	checkText := msg.Text
+	if checkText == "" && msg.Caption != "" {
+		checkText = msg.Caption
+	}
+
 	// Bot username mentioned (e.g. @Shipp0Bot)
 	if b.api != nil && b.api.Self.UserName != "" {
 		botUserLower := strings.ToLower(b.api.Self.UserName)
-		if strings.Contains(strings.ToLower(msg.Text), "@"+botUserLower) {
+		if strings.Contains(strings.ToLower(checkText), "@"+botUserLower) {
 			return true
 		}
 	}
 
 	// Word "shipp" anywhere in the message as a distinct word
-	if shippWordRegex.MatchString(msg.Text) {
+	if shippWordRegex.MatchString(checkText) {
 		return true
 	}
 
@@ -381,12 +413,16 @@ func (b *Bot) executeToolCall(
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
 		chain := strings.ToLower(strings.TrimSpace(args.Chain))
+		prices := b.price.GetPrices(ctx)
+
 		if chain == "sol" || chain == "solana" || chain == "svm" {
 			bal, err := b.crypto.GetSVMBalance(ctx)
 			if err != nil {
 				return "Solana balance is currently unavailable."
 			}
-			return fmt.Sprintf("Solana balance: %s SOL", bal.Text('f', 4))
+			fVal, _ := bal.Float64()
+			usd := price.ConvertToUSD(fVal, "SOL", prices)
+			return fmt.Sprintf("Solana balance: %s SOL (~%s USD)", crypto.FormatTokenAmount(bal), price.FormatUSD(usd))
 		} else if chain != "" && chain != "all" {
 			bal, err := b.crypto.GetEVMBalance(ctx, chain)
 			if err != nil {
@@ -400,15 +436,31 @@ func (b *Bot) executeToolCall(
 			if chain == "rh" || chain == "robinhood" {
 				displayName = "Robinhood"
 			}
-			return fmt.Sprintf("%s balance: %s %s", displayName, bal.Text('f', 4), symbol)
+			fVal, _ := bal.Float64()
+			usd := price.ConvertToUSD(fVal, symbol, prices)
+			return fmt.Sprintf("%s balance: %s %s (~%s USD)", displayName, crypto.FormatTokenAmount(bal), symbol, price.FormatUSD(usd))
 		}
 
 		balances, err := b.crypto.GetAllBalances(ctx)
 		if err != nil {
 			return "Failed to fetch balances."
 		}
-		return fmt.Sprintf("Balances: Solana: %s, Base: %s, Robinhood: %s, Arbitrum: %s, Ethereum: %s, BNB: %s",
-			balances.Solana, balances.Base, balances.Robinhood, balances.Arbitrum, balances.Ethereum, balances.BNB)
+		solUSD := price.ConvertToUSD(balances.SolanaVal, "SOL", prices)
+		baseUSD := price.ConvertToUSD(balances.BaseVal, "ETH", prices)
+		rhUSD := price.ConvertToUSD(balances.RhVal, "ETH", prices)
+		arbUSD := price.ConvertToUSD(balances.ArbVal, "ETH", prices)
+		ethUSD := price.ConvertToUSD(balances.EthVal, "ETH", prices)
+		bnbUSD := price.ConvertToUSD(balances.BnbVal, "BNB", prices)
+		totalUSD := solUSD + baseUSD + rhUSD + arbUSD + ethUSD + bnbUSD
+
+		return fmt.Sprintf("Balances: Solana: %s (%s), Base: %s (%s), Robinhood: %s (%s), Arbitrum: %s (%s), Ethereum: %s (%s), BNB: %s (%s). Total Portfolio Net Worth: %s USD",
+			balances.Solana, price.FormatUSD(solUSD),
+			balances.Base, price.FormatUSD(baseUSD),
+			balances.Robinhood, price.FormatUSD(rhUSD),
+			balances.Arbitrum, price.FormatUSD(arbUSD),
+			balances.Ethereum, price.FormatUSD(ethUSD),
+			balances.BNB, price.FormatUSD(bnbUSD),
+			price.FormatUSD(totalUSD))
 
 	case "send_crypto":
 		var args ai.SendCryptoArgs
@@ -734,21 +786,179 @@ func (b *Bot) formatBalanceMessage(ctx context.Context) string {
 		return "⚠️ Failed to fetch wallet balances. Please try again in a moment."
 	}
 
+	prices := b.price.GetPrices(ctx)
+	solUSD := price.ConvertToUSD(balances.SolanaVal, "SOL", prices)
+	baseUSD := price.ConvertToUSD(balances.BaseVal, "ETH", prices)
+	rhUSD := price.ConvertToUSD(balances.RhVal, "ETH", prices)
+	arbUSD := price.ConvertToUSD(balances.ArbVal, "ETH", prices)
+	ethUSD := price.ConvertToUSD(balances.EthVal, "ETH", prices)
+	bnbUSD := price.ConvertToUSD(balances.BnbVal, "BNB", prices)
+	totalUSD := solUSD + baseUSD + rhUSD + arbUSD + ethUSD + bnbUSD
+
 	return fmt.Sprintf(`💰 **Live Wallet Balances**
 
-🟣 **Solana:** %s
-🔵 **Base:** %s
-🟢 **Robinhood:** %s
-🔷 **Arbitrum:** %s
-💠 **Ethereum:** %s
-🟡 **BNB Chain:** %s`,
-		balances.Solana,
-		balances.Base,
-		balances.Robinhood,
-		balances.Arbitrum,
-		balances.Ethereum,
-		balances.BNB,
+🟣 **Solana:** %s (%s)
+🔵 **Base:** %s (%s)
+🟢 **Robinhood:** %s (%s)
+🔷 **Arbitrum:** %s (%s)
+💠 **Ethereum:** %s (%s)
+🟡 **BNB Chain:** %s (%s)
+
+💵 **Total Net Worth:** ~%s USD`,
+		balances.Solana, price.FormatUSD(solUSD),
+		balances.Base, price.FormatUSD(baseUSD),
+		balances.Robinhood, price.FormatUSD(rhUSD),
+		balances.Arbitrum, price.FormatUSD(arbUSD),
+		balances.Ethereum, price.FormatUSD(ethUSD),
+		balances.BNB, price.FormatUSD(bnbUSD),
+		price.FormatUSD(totalUSD),
 	)
+}
+
+func (b *Bot) handlePhotoMessage(ctx context.Context, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	isPrivate := msg.Chat.IsPrivate()
+	shouldRespond := isPrivate || b.isAddressedToBot(msg) || msg.Caption != ""
+	if !shouldRespond {
+		return
+	}
+
+	photos := msg.Photo
+	if len(photos) == 0 {
+		return
+	}
+
+	b.sendChatAction(chatID, tgbotapi.ChatTyping)
+
+	// Pick highest resolution photo
+	bestPhoto := photos[len(photos)-1]
+
+	fileURL, err := b.api.GetFileDirectURL(bestPhoto.FileID)
+	if err != nil {
+		log.Printf("[Bot] Failed to get photo URL: %v", err)
+		b.sendReply(chatID, msg.MessageID, "failed to download that image from Telegram.")
+		return
+	}
+
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		log.Printf("[Bot] Failed to download photo: %v", err)
+		b.sendReply(chatID, msg.MessageID, "failed to retrieve image bytes.")
+		return
+	}
+	defer resp.Body.Close()
+
+	imgBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		b.sendReply(chatID, msg.MessageID, "error reading image content.")
+		return
+	}
+
+	cleanCaption := b.cleanPrompt(msg.Caption)
+	analysis, err := b.vision.AnalyzeImage(ctx, imgBytes, "image/jpeg", cleanCaption)
+	if err != nil || analysis == "" {
+		analysis = "I took a look, but couldn't make out what's in that picture."
+	}
+
+	b.sendReply(chatID, msg.MessageID, analysis)
+	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", analysis)
+}
+
+func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	isPrivate := msg.Chat.IsPrivate()
+	shouldRespond := isPrivate || b.isAddressedToBot(msg) || msg.Caption != ""
+	if !shouldRespond {
+		return
+	}
+
+	doc := msg.Document
+	if doc == nil {
+		return
+	}
+
+	mime := strings.ToLower(doc.MimeType)
+	ext := strings.ToLower(filepath.Ext(doc.FileName))
+
+	// Check if sent as an uncompressed image file
+	if strings.HasPrefix(mime, "image/") || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" {
+		b.sendChatAction(chatID, tgbotapi.ChatTyping)
+		fileURL, err := b.api.GetFileDirectURL(doc.FileID)
+		if err != nil {
+			b.sendReply(chatID, msg.MessageID, "failed to get image link.")
+			return
+		}
+		resp, err := http.Get(fileURL)
+		if err != nil {
+			b.sendReply(chatID, msg.MessageID, "failed to download image file.")
+			return
+		}
+		defer resp.Body.Close()
+		imgBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			b.sendReply(chatID, msg.MessageID, "failed to read image file.")
+			return
+		}
+		cleanCaption := b.cleanPrompt(msg.Caption)
+		analysis, err := b.vision.AnalyzeImage(ctx, imgBytes, mime, cleanCaption)
+		if err != nil || analysis == "" {
+			analysis = "Couldn't parse that image file."
+		}
+		b.sendReply(chatID, msg.MessageID, analysis)
+		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", analysis)
+		return
+	}
+
+	// Document types: .md, .pdf, .docx, .txt, .csv, .json
+	if ext != ".md" && ext != ".pdf" && ext != ".docx" && ext != ".txt" && ext != ".csv" && ext != ".json" {
+		if isPrivate {
+			b.sendReply(chatID, msg.MessageID, fmt.Sprintf("I support document analysis for `.md`, `.pdf`, and `.docx` (or `.txt`/`.json`). `%s` isn't supported yet.", doc.FileName))
+		}
+		return
+	}
+
+	// 15MB file size limit
+	if doc.FileSize > 15*1024*1024 {
+		b.sendReply(chatID, msg.MessageID, "That document is too large! Please send a file under 15MB.")
+		return
+	}
+
+	b.sendChatAction(chatID, tgbotapi.ChatTyping)
+
+	fileURL, err := b.api.GetFileDirectURL(doc.FileID)
+	if err != nil {
+		b.sendReply(chatID, msg.MessageID, "Couldn't fetch file from Telegram.")
+		return
+	}
+
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		b.sendReply(chatID, msg.MessageID, "Failed to download document.")
+		return
+	}
+	defer resp.Body.Close()
+
+	docBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		b.sendReply(chatID, msg.MessageID, "Failed to read document content.")
+		return
+	}
+
+	extractedText, err := docparser.ParseDocument(doc.FileName, docBytes)
+	if err != nil || strings.TrimSpace(extractedText) == "" {
+		b.sendReply(chatID, msg.MessageID, fmt.Sprintf("Couldn't extract text from `%s`: %v", doc.FileName, err))
+		return
+	}
+
+	cleanCaption := b.cleanPrompt(msg.Caption)
+	analysis, err := b.ai.AnalyzeDocument(ctx, doc.FileName, extractedText, cleanCaption)
+	if err != nil || analysis == "" {
+		b.sendReply(chatID, msg.MessageID, "I extracted the document text, but couldn't generate the analysis.")
+		return
+	}
+
+	b.sendReply(chatID, msg.MessageID, analysis)
+	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", analysis)
 }
 
 func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {

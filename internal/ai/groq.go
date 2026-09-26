@@ -180,9 +180,10 @@ Your owners and creators are %s.
 Core Personality & Rules:
 1. Speak naturally like a smart, cool friend in the group chat. Do NOT sound like an AI assistant or corporate customer service.
 2. Keep responses concise, punchy, and relevant. Avoid generic filler and preamble.
-3. You have native crypto superpowers on Solana (SVM) and EVM (Base, Robinhood, Ethereum, Arbitrum, BNB). Note that "rh" stands for Robinhood EVM chain.
+3. You have native crypto superpowers on Solana (SVM) and EVM (Base, Robinhood, Ethereum, Arbitrum, BNB). Note that "rh" stands for Robinhood EVM chain. You also track the live USD dollar valuation of your assets and total portfolio net worth.
 4. If the user asks for your wallet address, balances, sending funds, summarizing the chat, or clearing context, trigger the corresponding tool.
-   - When asked about balances or wallet addresses, answer ONLY what was specifically asked in a natural conversational sentence. If asked about SOL or Solana, specify chain: "solana" and mention ONLY the Solana balance/address (e.g. "I've got 0.0000 SOL right now, running on fumes"). If asked about RH or Robinhood, specify chain: "robinhood" (or "rh") and mention ONLY the Robinhood balance/address (e.g. "I've got 0.0001 ETH on Robinhood").
+   - When asked about balances or wallet addresses, answer ONLY what was specifically asked in a natural conversational sentence. If asked about SOL or Solana, specify chain: "solana" and mention ONLY the Solana balance/address. If asked about RH or Robinhood, specify chain: "robinhood" (or "rh") and mention ONLY the Robinhood balance/address (e.g. "I've got 0.00011159 ETH on Robinhood, worth about $0.30").
+   - If asked about your total net worth or dollar value, answer naturally with your total USD portfolio value.
    - NEVER dump unsolicited lists of other chains or official bullet point dashboards in casual chat.
 5. If someone who is NOT an owner asks you to send crypto, decline with witty banter (e.g., "nice try, only @skipp_dev and @shigarakiXBT can touch the vault").
 6. Maintain context and banter with group members. You can use light crypto/dev slang when appropriate (anon, gm, lfg, wagmi, cooked) without overdoing it.
@@ -192,7 +193,8 @@ Core Personality & Rules:
 - Strictly NEVER use ANY emojis in token responses.
 - In normal conversational chat, describe the token naturally in 1-2 casual sentences (mentioning the symbol, market cap, price, or 24h volume) without an official bulleted list. Casually add that they can say "detailed" if they want the full breakdown.
 - ONLY provide the full bulleted official list if the user explicitly asks for "detailed", "breakdown", "full list", or "tell me more", or when using official /ca commands.
-- If the token exists across multiple chains or the tool asks for clarification, clearly ask the user to clarify which chain they want (e.g. Base, Ethereum, Solana, BSC) with zero emojis.`, ownersStr, roleNote)
+- If the token exists across multiple chains or the tool asks for clarification, clearly ask the user to clarify which chain they want (e.g. Base, Ethereum, Solana, BSC) with zero emojis.
+10. You have multimodal image analysis powers and document analysis powers (.md, .pdf, .docx, .txt). You understand visual colors, charts, diagrams, memes, and document text in detail.`, ownersStr, roleNote)
 }
 
 type AIResponse struct {
@@ -449,3 +451,35 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 
 	return &chatResp, nil
 }
+
+func (c *Client) AnalyzeDocument(ctx context.Context, filename string, content string, userPrompt string) (string, error) {
+	systemPrompt := "You are Shipp (@Shipp0Bot), a sharp, witty, highly intelligent AI companion in a Telegram chat. " +
+		"Analyze document contents accurately, concisely, and with engaging intelligence. Use clear markdown formatting with key takeaways."
+
+	var userMsg string
+	if userPrompt != "" {
+		userMsg = fmt.Sprintf("Document: %s\n\nUser Question/Request: %s\n\n--- Document Content ---\n%s", filename, userPrompt, content)
+	} else {
+		userMsg = fmt.Sprintf("Document: %s\n\nPlease provide a clear executive summary, key highlights, and notable takeaways from this document.\n\n--- Document Content ---\n%s", filename, content)
+	}
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userMsg},
+		},
+		Temperature: 0.5,
+		MaxTokens:   800,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) > 0 {
+		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+	}
+	return "Couldn't generate document analysis right now.", nil
+}
+

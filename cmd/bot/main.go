@@ -13,9 +13,11 @@ import (
 	"shipp/internal/config"
 	"shipp/internal/crypto"
 	"shipp/internal/memory"
+	"shipp/internal/price"
 	"shipp/internal/search"
 	"shipp/internal/server"
 	"shipp/internal/token"
+	"shipp/internal/vision"
 )
 
 func main() {
@@ -67,8 +69,14 @@ func main() {
 	tokenSvc := token.NewService(cfg.CodexIOAPIKey)
 	log.Printf("[Main] Token CA Analytics Service initialized (DexScreener + Codex.io active)")
 
+	priceSvc := price.NewService()
+	log.Printf("[Main] Price Service initialized (CoinGecko Simple Price + Cache active)")
+
+	visionSvc := vision.NewService(cfg.GeminiAPIKey)
+	log.Printf("[Main] Vision Service initialized (Gemini Flash Multimodal active)")
+
 	// 5. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc)
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}

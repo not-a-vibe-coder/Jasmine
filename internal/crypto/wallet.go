@@ -30,12 +30,18 @@ type ChainInfo struct {
 }
 
 type Balances struct {
-	Solana    string `json:"solana"`
-	Base      string `json:"base"`
-	Ethereum  string `json:"ethereum"`
-	Arbitrum  string `json:"arbitrum"`
-	BNB       string `json:"bnb"`
-	Robinhood string `json:"robinhood"`
+	Solana    string  `json:"solana"`
+	Base      string  `json:"base"`
+	Ethereum  string  `json:"ethereum"`
+	Arbitrum  string  `json:"arbitrum"`
+	BNB       string  `json:"bnb"`
+	Robinhood string  `json:"robinhood"`
+	SolanaVal float64 `json:"solana_val"`
+	BaseVal   float64 `json:"base_val"`
+	EthVal    float64 `json:"eth_val"`
+	ArbVal    float64 `json:"arb_val"`
+	BnbVal    float64 `json:"bnb_val"`
+	RhVal     float64 `json:"rh_val"`
 }
 
 type Service struct {
@@ -172,6 +178,28 @@ func (s *Service) GetAddresses() (svm string, evm string) {
 	return s.svmPubKey, s.evmPubKey
 }
 
+// FormatTokenAmount formats crypto token balances cleanly without truncating small values (e.g. 0.00011159 ETH).
+func FormatTokenAmount(val *big.Float) string {
+	if val == nil {
+		return "0.0000"
+	}
+	f, _ := val.Float64()
+	if f == 0 {
+		return "0.0000"
+	}
+	// Up to 8 decimal places
+	s := val.Text('f', 8)
+	if strings.Contains(s, ".") {
+		parts := strings.Split(s, ".")
+		dec := strings.TrimRight(parts[1], "0")
+		for len(dec) < 4 {
+			dec += "0"
+		}
+		return parts[0] + "." + dec
+	}
+	return s + ".0000"
+}
+
 func (s *Service) GetAllBalances(ctx context.Context) (*Balances, error) {
 	b := &Balances{}
 
@@ -180,7 +208,8 @@ func (s *Service) GetAllBalances(ctx context.Context) (*Balances, error) {
 	if err != nil {
 		b.Solana = "Unavailable"
 	} else {
-		b.Solana = fmt.Sprintf("%s SOL", solVal.Text('f', 4))
+		b.Solana = fmt.Sprintf("%s SOL", FormatTokenAmount(solVal))
+		b.SolanaVal, _ = solVal.Float64()
 	}
 
 	// Base
@@ -188,7 +217,8 @@ func (s *Service) GetAllBalances(ctx context.Context) (*Balances, error) {
 	if err != nil {
 		b.Base = "Unavailable"
 	} else {
-		b.Base = fmt.Sprintf("%s ETH", baseVal.Text('f', 4))
+		b.Base = fmt.Sprintf("%s ETH", FormatTokenAmount(baseVal))
+		b.BaseVal, _ = baseVal.Float64()
 	}
 
 	// Ethereum
@@ -196,7 +226,8 @@ func (s *Service) GetAllBalances(ctx context.Context) (*Balances, error) {
 	if err != nil {
 		b.Ethereum = "Unavailable"
 	} else {
-		b.Ethereum = fmt.Sprintf("%s ETH", ethVal.Text('f', 4))
+		b.Ethereum = fmt.Sprintf("%s ETH", FormatTokenAmount(ethVal))
+		b.EthVal, _ = ethVal.Float64()
 	}
 
 	// Arbitrum
@@ -204,7 +235,8 @@ func (s *Service) GetAllBalances(ctx context.Context) (*Balances, error) {
 	if err != nil {
 		b.Arbitrum = "Unavailable"
 	} else {
-		b.Arbitrum = fmt.Sprintf("%s ETH", arbVal.Text('f', 4))
+		b.Arbitrum = fmt.Sprintf("%s ETH", FormatTokenAmount(arbVal))
+		b.ArbVal, _ = arbVal.Float64()
 	}
 
 	// BNB
@@ -212,7 +244,8 @@ func (s *Service) GetAllBalances(ctx context.Context) (*Balances, error) {
 	if err != nil {
 		b.BNB = "Unavailable"
 	} else {
-		b.BNB = fmt.Sprintf("%s BNB", bnbVal.Text('f', 4))
+		b.BNB = fmt.Sprintf("%s BNB", FormatTokenAmount(bnbVal))
+		b.BnbVal, _ = bnbVal.Float64()
 	}
 
 	// Robinhood
@@ -220,7 +253,8 @@ func (s *Service) GetAllBalances(ctx context.Context) (*Balances, error) {
 	if err != nil {
 		b.Robinhood = "Unavailable"
 	} else {
-		b.Robinhood = fmt.Sprintf("%s ETH", rhVal.Text('f', 4))
+		b.Robinhood = fmt.Sprintf("%s ETH", FormatTokenAmount(rhVal))
+		b.RhVal, _ = rhVal.Float64()
 	}
 
 	return b, nil

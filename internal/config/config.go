@@ -45,9 +45,10 @@ type Config struct {
 	GithubPAT      string
 	GithubUsername string
 
-	// Search & Analytics
+	// Search & Analytics & Vision
 	TavilyAPIKey   string
 	CodexIOAPIKey  string
+	GeminiAPIKey   string
 
 	// Server & Webhook
 	Port       string
@@ -82,6 +83,7 @@ func LoadConfig() (*Config, error) {
 		GithubUsername:      os.Getenv("GITHUB_USERNAME"),
 		TavilyAPIKey:        os.Getenv("TAVILY_API_KEY"),
 		CodexIOAPIKey:       os.Getenv("CODEX_IO_API_KEY"),
+		GeminiAPIKey:        os.Getenv("GEMINI_API_KEY"),
 		Port:                os.Getenv("PORT"),
 		WebhookURL:          os.Getenv("WEBHOOK_URL"),
 	}
