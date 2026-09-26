@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -472,14 +473,18 @@ Operational Superpowers & Tools:
    - Extract repo slug (e.g. 'DavidNzube101/shipp') from chat history when not explicitly repeated.
 10. Email Superpowers:
     - Outbound address is 'shipp@bot.davidnzube.xyz', receiving inbox is 'shippzero@atomicmail.io'.
-    - Trigger 'send_email' when confirmed by owners.
+    - Trigger 'send_email' when asked by owners or in multi-step workflows. If a recipient is an email address (contains @ and a domain like .com), ALWAYS use 'send_email', NEVER 'send_dm'.
 11. Ephemeral Sandbox Runner:
     - Trigger 'run_sandbox_task' when asked to execute bash commands, run test suites, execute python/node/bash scripts, scrape data, or audit repositories. Runs in an isolated Linux runner asynchronously.
 12. Direct Telegram Messaging:
-    - Trigger 'send_dm' when owners ask you to message, text, or ping someone in DM.
+    - Trigger 'send_dm' when owners ask you to message, text, or ping someone in DM. Only use for Telegram usernames, never email addresses.
 13. Group Forum Topics:
     - If 'get_group_topics' returns a list of forum topics, you are aware of those project threads and can reference them naturally in conversation.
-14. HARD FORMATTING CONSTRAINTS:
+14. Autonomous Multi-Step Chaining (Prompt Chaining):
+    - When a user request requires multiple steps (e.g. 'check token X and email it to Y', 'convert balance and send', 'search news and email summary'), execute all steps in sequence autonomously.
+    - NEVER guess, invent, or hallucinate tool data in text. Always execute step 1 first (e.g. call 'analyze_token' to get real live metrics), wait for the live tool result, and THEN execute step 2 (e.g. call 'send_email' with the live data).
+    - NEVER leak raw XML tags like <toolcall> or <function=...>. Tools are invoked strictly via function calls.
+15. HARD FORMATTING CONSTRAINTS:
     - Strictly ZERO emojis anywhere. No exceptions.
     - Strictly NO em dashes ('—') or en dashes ('–'). Use commas, periods, colons, or simple hyphens (' - ').
     - Strictly NO bulky tables or unsolicited bulleted lists.
@@ -489,6 +494,220 @@ Operational Superpowers & Tools:
 type AIResponse struct {
 	Content   string
 	ToolCalls []ToolCall
+}
+
+// ToolExecutor is a callback the bot passes into RunAgenticLoop.
+// It executes a named tool with its JSON arguments and returns the raw result string.
+type ToolExecutor func(toolName, arguments string) string
+
+// AgenticResult is returned by RunAgenticLoop once all chaining is done.
+type AgenticResult struct {
+	FinalText   string   // the last conversational reply from the AI
+	ToolsUsed   []string // names of tools called during the loop
+	Iterations  int
+}
+
+// NormalizeToolCall standardizes tool names and parameter keys that may vary across models.
+// It also intelligently redirects send_dm to send_email when the recipient is an email address.
+func NormalizeToolCall(toolName, arguments string) (string, string) {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	name = strings.ReplaceAll(name, "-", "_")
+	name = strings.TrimPrefix(name, "functions.")
+
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		args = make(map[string]interface{})
+	}
+
+	// Normalize tool names
+	switch name {
+	case "senddm", "send_dm", "dm":
+		name = "send_dm"
+	case "sendemail", "send_email", "email":
+		name = "send_email"
+	case "analyzetoken", "analyze_token", "token_analysis":
+		name = "analyze_token"
+	case "getbalances", "get_balances", "balances", "balance":
+		name = "get_balances"
+	case "getwalletaddress", "get_wallet_address", "wallet_address":
+		name = "get_wallet_address"
+	case "convertcrypto", "convert_crypto":
+		name = "convert_crypto"
+	case "sendcrypto", "send_crypto":
+		name = "send_crypto"
+	case "websearch", "web_search", "search":
+		name = "web_search"
+	case "githubinspectproject", "github_inspect_project":
+		name = "github_inspect_project"
+	case "githubeditfile", "github_edit_file":
+		name = "github_edit_file"
+	case "githubmergepr", "github_merge_pr":
+		name = "github_merge_pr"
+	case "runsandboxtask", "run_sandbox_task":
+		name = "run_sandbox_task"
+	case "getgrouptopics", "get_group_topics":
+		name = "get_group_topics"
+	}
+
+	// Smart routing: if send_dm target is an email address, it MUST be send_email
+	// (Telegram bots cannot direct-message an email address)
+	if name == "send_dm" {
+		recipient, _ := args["recipient"].(string)
+		if recipient == "" {
+			recipient, _ = args["recipientemail"].(string)
+		}
+		if recipient == "" {
+			recipient, _ = args["recipient_email"].(string)
+		}
+		if recipient == "" {
+			recipient, _ = args["to"].(string)
+		}
+		if strings.Contains(recipient, "@") && strings.Contains(recipient, ".") {
+			name = "send_email"
+			args["to"] = recipient
+			if _, ok := args["body"]; !ok {
+				if msg, exists := args["message"]; exists {
+					args["body"] = msg
+				}
+			}
+			if _, ok := args["subject"]; !ok {
+				args["subject"] = "Update from Shipp"
+			}
+		}
+	}
+
+	// Parameter aliases for send_email
+	if name == "send_email" {
+		if _, ok := args["to"]; !ok {
+			for _, k := range []string{"recipient", "recipientemail", "recipient_email", "email", "target"} {
+				if v, exists := args[k]; exists && v != "" {
+					args["to"] = v
+					break
+				}
+			}
+		}
+		if _, ok := args["body"]; !ok {
+			for _, k := range []string{"message", "content", "text"} {
+				if v, exists := args[k]; exists && v != "" {
+					args["body"] = v
+					break
+				}
+			}
+		}
+		if _, ok := args["subject"]; !ok || args["subject"] == "" {
+			args["subject"] = "Update from Shipp"
+		}
+	}
+
+	// Parameter aliases for send_dm
+	if name == "send_dm" {
+		if _, ok := args["recipient"]; !ok {
+			for _, k := range []string{"to", "username", "target", "user"} {
+				if v, exists := args[k]; exists && v != "" {
+					args["recipient"] = v
+					break
+				}
+			}
+		}
+		if _, ok := args["message"]; !ok {
+			for _, k := range []string{"body", "content", "text"} {
+				if v, exists := args[k]; exists && v != "" {
+					args["message"] = v
+					break
+				}
+			}
+		}
+	}
+
+	// Parameter aliases for analyze_token
+	if name == "analyze_token" {
+		if _, ok := args["address"]; !ok {
+			for _, k := range []string{"ca", "token", "contract", "token_address", "mint"} {
+				if v, exists := args[k]; exists && v != "" {
+					args["address"] = v
+					break
+				}
+			}
+		}
+	}
+
+	normBytes, _ := json.Marshal(args)
+	return name, string(normBytes)
+}
+
+// parseXMLToolCalls detects when a model leaks tool calls as XML text instead of JSON function calls.
+// Handles both JSON-inside-tags (<tool_call>{"name":"...","arguments":{...}}</tool_call>)
+// and tag-based format (<toolcall><function=senddm><parameter=...></function></toolcall>).
+func parseXMLToolCalls(content string) ([]ToolCall, bool) {
+	lower := strings.ToLower(content)
+	if !strings.Contains(lower, "<toolcall") && !strings.Contains(lower, "<tool_call") && !strings.Contains(lower, "<function") {
+		return nil, false
+	}
+
+	var calls []ToolCall
+	callID := 0
+
+	// 1. Check for JSON format inside <tool_call>...</tool_call> or <toolcall>...</toolcall>
+	reJSON := regexp.MustCompile(`(?s)<(?:toolcall|tool_call)[^>]*>(.*?)</(?:toolcall|tool_call)>`)
+	matches := reJSON.FindAllStringSubmatch(content, -1)
+	for _, m := range matches {
+		inner := strings.TrimSpace(m[1])
+		if strings.HasPrefix(inner, "{") && strings.HasSuffix(inner, "}") {
+			var rawCall struct {
+				Name      string                 `json:"name"`
+				Arguments map[string]interface{} `json:"arguments"`
+			}
+			if err := json.Unmarshal([]byte(inner), &rawCall); err == nil && rawCall.Name != "" {
+				callID++
+				argsBytes, _ := json.Marshal(rawCall.Arguments)
+				normName, normArgs := NormalizeToolCall(rawCall.Name, string(argsBytes))
+				calls = append(calls, ToolCall{
+					ID:   fmt.Sprintf("xml_tc_%d", callID),
+					Type: "function",
+					Function: FunctionCall{
+						Name:      normName,
+						Arguments: normArgs,
+					},
+				})
+			}
+		}
+	}
+
+	if len(calls) > 0 {
+		return calls, true
+	}
+
+	// 2. Check for tag-based format: <function=NAME>...</function> or <function name="NAME">...</function>
+	reFunc := regexp.MustCompile(`(?si)<function(?:=|\s+name=["']?)([^"'>\s]+)["']?>\s*(.*?)\s*</function>`)
+	funcMatches := reFunc.FindAllStringSubmatch(content, -1)
+	reParam := regexp.MustCompile(`(?si)<parameter(?:=|\s+name=["']?)([^"'>\s]+)["']?>\s*(.*?)\s*</parameter>`)
+
+	for _, fm := range funcMatches {
+		funcName := strings.TrimSpace(fm[1])
+		funcBody := fm[2]
+		params := make(map[string]interface{})
+
+		paramMatches := reParam.FindAllStringSubmatch(funcBody, -1)
+		for _, pm := range paramMatches {
+			pKey := strings.ToLower(strings.TrimSpace(pm[1]))
+			pVal := strings.TrimSpace(pm[2])
+			params[pKey] = pVal
+		}
+
+		callID++
+		argsBytes, _ := json.Marshal(params)
+		normName, normArgs := NormalizeToolCall(funcName, string(argsBytes))
+		calls = append(calls, ToolCall{
+			ID:   fmt.Sprintf("xml_tc_%d", callID),
+			Type: "function",
+			Function: FunctionCall{
+				Name:      normName,
+				Arguments: normArgs,
+			},
+		})
+	}
+
+	return calls, len(calls) > 0
 }
 
 func (c *Client) GenerateReply(
@@ -569,10 +788,167 @@ func (c *Client) GenerateReply(
 	}
 
 	choice := resp.Choices[0]
+
+	// Rescue: some fallback models leak tool calls as XML text instead of JSON function calls.
+	// Detect and convert them so they actually execute instead of leaking into chat.
+	toolCalls := choice.Message.ToolCalls
+	content := choice.Message.Content
+	if len(toolCalls) == 0 && strings.TrimSpace(content) != "" {
+		if xmlCalls, ok := parseXMLToolCalls(content); ok {
+			log.Printf("[AI] Rescued %d XML-format tool call(s) from model text output", len(xmlCalls))
+			toolCalls = xmlCalls
+			content = "" // suppress raw XML from leaking into the reply
+		}
+	}
+
 	return &AIResponse{
-		Content:   choice.Message.Content,
-		ToolCalls: choice.Message.ToolCalls,
+		Content:   content,
+		ToolCalls: toolCalls,
 	}, nil
+}
+
+// RunAgenticLoop runs a ReAct (Reason+Act) agentic loop that enables prompt chaining.
+// On each iteration it calls the AI with the full message history (including all tool results
+// accumulated so far). If the AI returns tool calls, the executor callback runs each tool,
+// results are appended as 'tool' messages, and the loop continues. When the AI returns plain
+// text with no further tool calls, that text is the final reply. Max 5 iterations.
+func (c *Client) RunAgenticLoop(
+	ctx context.Context,
+	senderUsername string,
+	isOwner bool,
+	history []memory.Message,
+	userPrompt string,
+	summary string,
+	profile *memory.UserProfile,
+	executor ToolExecutor,
+) AgenticResult {
+	const maxIterations = 5
+
+	result := AgenticResult{}
+
+	// Build the base message list (system + summary + history + current prompt)
+	sysPrompt := c.systemPrompt(senderUsername, isOwner, profile)
+	var baseMsgs []ChatMessage
+	baseMsgs = append(baseMsgs, ChatMessage{Role: "system", Content: sysPrompt})
+	if summary != "" {
+		baseMsgs = append(baseMsgs, ChatMessage{Role: "system", Content: fmt.Sprintf("[Past Chat Summary Context]: %s", summary)})
+	}
+	for _, h := range history {
+		role := h.Role
+		if role != "user" && role != "assistant" && role != "system" {
+			role = "user"
+		}
+		prefix := ""
+		if h.Sender != "" && role == "user" {
+			prefix = fmt.Sprintf("@%s: ", h.Sender)
+		}
+		content := h.Content
+		if len(content) > 350 {
+			content = content[:350] + "..."
+		}
+		baseMsgs = append(baseMsgs, ChatMessage{Role: role, Content: prefix + content})
+	}
+
+	// Current user prompt (initial turn)
+	currContent := userPrompt
+	if senderUsername != "" {
+		currContent = fmt.Sprintf("@%s: %s", senderUsername, userPrompt)
+	}
+	// runMsgs accumulates the live agentic thread
+	runMsgs := append([]ChatMessage(nil), baseMsgs...)
+	runMsgs = append(runMsgs, ChatMessage{Role: "user", Content: currContent})
+
+	for i := 0; i < maxIterations; i++ {
+		result.Iterations++
+
+		reqBody := ChatCompletionRequest{
+			Model:            c.model,
+			Messages:         runMsgs,
+			Tools:            c.tools,
+			ToolChoice:       "auto",
+			Temperature:      0.7,
+			MaxTokens:        500,
+			FrequencyPenalty: 0.3,
+			PresencePenalty:  0.2,
+		}
+
+		resp, err := c.sendChatCompletion(ctx, reqBody)
+		if err != nil {
+			// Groq failed - try Gemini for this turn
+			if c.geminiKey != "" {
+				log.Printf("[AI] AgenticLoop Groq error (%v). Falling back to Gemini...", err)
+				fallback, ferr := c.generateReplyGemini(ctx, senderUsername, isOwner, history, userPrompt, summary, profile)
+				if ferr == nil && fallback != nil {
+					result.FinalText = strings.TrimSpace(fallback.Content)
+				}
+			}
+			return result
+		}
+		if len(resp.Choices) == 0 {
+			return result
+		}
+
+		choice := resp.Choices[0]
+		assistantMsg := choice.Message
+
+		// XML rescue: if the model leaked tool calls as text, parse them
+		toolCalls := assistantMsg.ToolCalls
+		plainContent := assistantMsg.Content
+		if len(toolCalls) == 0 && strings.TrimSpace(plainContent) != "" {
+			if xmlCalls, ok := parseXMLToolCalls(plainContent); ok {
+				log.Printf("[AI] AgenticLoop: rescued %d XML tool call(s) on iteration %d", len(xmlCalls), i+1)
+				toolCalls = xmlCalls
+				plainContent = ""
+			}
+		}
+
+		// No tool calls = final answer
+		if len(toolCalls) == 0 {
+			result.FinalText = strings.TrimSpace(plainContent)
+			return result
+		}
+
+		// Append the assistant's tool-call turn to runMsgs
+		runMsgs = append(runMsgs, ChatMessage{
+			Role:      "assistant",
+			ToolCalls: toolCalls,
+		})
+
+		// Execute each tool call and append results
+		for _, tc := range toolCalls {
+			result.ToolsUsed = append(result.ToolsUsed, tc.Function.Name)
+			toolResult := executor(tc.Function.Name, tc.Function.Arguments)
+			log.Printf("[AI] AgenticLoop iteration %d: ran %s -> %d bytes result", i+1, tc.Function.Name, len(toolResult))
+			runMsgs = append(runMsgs, ChatMessage{
+				Role:       "tool",
+				Name:       tc.Function.Name,
+				ToolCallID: tc.ID,
+				Content:    toolResult,
+			})
+		}
+		// Continue loop - next iteration feeds all tool results back to the AI
+	}
+
+	// If the loop finished without a plain-text reply but tools were executed,
+	// run one quick synthesis step so the user gets a natural confirmation.
+	if strings.TrimSpace(result.FinalText) == "" && len(result.ToolsUsed) > 0 {
+		synthReq := ChatCompletionRequest{
+			Model: c.model,
+			Messages: append(runMsgs, ChatMessage{
+				Role:    "user",
+				Content: "Wrap up and confirm the actions taken above in 1-2 casual sentences for the chat.",
+			}),
+			Temperature: 0.5,
+			MaxTokens:   200,
+		}
+		if synthResp, err := c.sendChatCompletion(ctx, synthReq); err == nil && len(synthResp.Choices) > 0 {
+			result.FinalText = strings.TrimSpace(synthResp.Choices[0].Message.Content)
+		}
+	}
+
+	// Hit max iterations without a plain-text reply - return whatever we have
+	log.Printf("[AI] AgenticLoop finished (%d iterations, %d tools) for prompt: %.80s", result.Iterations, len(result.ToolsUsed), userPrompt)
+	return result
 }
 
 // GenerateVisionReply processes objective visual perception from Gemini Flash,

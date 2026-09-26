@@ -237,4 +237,81 @@ func TestLiveModelDynamicToolFollowup(t *testing.T) {
 	}
 }
 
+func TestParseXMLToolCalls(t *testing.T) {
+	// 1. Tag-based format (as seen in Groq fallback leak screenshot)
+	leakXML := `<toolcall>
+<function=senddm>
+<parameter=recipientemail>
+michael.j.vianney@gmail.com
+</parameter>
+<parameter=message>
+TeraWallet ($TERA) on Robinhood EVM. Market cap is $36.19K.
+</parameter>
+</function>
+</toolcall>`
+
+	calls, ok := parseXMLToolCalls(leakXML)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("expected 1 tool call parsed, got %d (ok=%v)", len(calls), ok)
+	}
+
+	call := calls[0]
+	// Should be smartly converted to send_email because recipient is an email address
+	if call.Function.Name != "send_email" {
+		t.Errorf("expected function name 'send_email', got %s", call.Function.Name)
+	}
+
+	var args map[string]interface{}
+	_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
+	if args["to"] != "michael.j.vianney@gmail.com" {
+		t.Errorf("expected to='michael.j.vianney@gmail.com', got %v", args["to"])
+	}
+	if !strings.Contains(args["body"].(string), "TeraWallet") {
+		t.Errorf("expected body to contain TeraWallet, got %v", args["body"])
+	}
+
+	// 2. JSON-inside-tags format
+	jsonXML := `<tool_call>
+{"name": "analyze_token", "arguments": {"address": "0x3c12e57fa7817a86ce7c254db9ea5fe639e233f8"}}
+</tool_call>`
+	calls2, ok2 := parseXMLToolCalls(jsonXML)
+	if !ok2 || len(calls2) != 1 {
+		t.Fatalf("expected 1 json tool call parsed, got %d (ok=%v)", len(calls2), ok2)
+	}
+	if calls2[0].Function.Name != "analyze_token" {
+		t.Errorf("expected function name 'analyze_token', got %s", calls2[0].Function.Name)
+	}
+
+	// 3. Normal text with no XML
+	normalText := "Hey anon, market looks hot today."
+	_, ok3 := parseXMLToolCalls(normalText)
+	if ok3 {
+		t.Errorf("expected ok=false for plain text")
+	}
+}
+
+func TestNormalizeToolCall(t *testing.T) {
+	// Verify smart redirection of send_dm to send_email when target is an email
+	normName, normArgs := NormalizeToolCall("senddm", `{"recipient":"alice@example.com","message":"check this out"}`)
+	if normName != "send_email" {
+		t.Errorf("expected send_email, got %s", normName)
+	}
+	var args map[string]interface{}
+	_ = json.Unmarshal([]byte(normArgs), &args)
+	if args["to"] != "alice@example.com" {
+		t.Errorf("expected to='alice@example.com', got %v", args["to"])
+	}
+
+	// Verify send_dm remains send_dm for telegram handles
+	dmName, dmArgs := NormalizeToolCall("senddm", `{"recipient":"@alice","message":"gm"}`)
+	if dmName != "send_dm" {
+		t.Errorf("expected send_dm, got %s", dmName)
+	}
+	var dmMap map[string]interface{}
+	_ = json.Unmarshal([]byte(dmArgs), &dmMap)
+	if dmMap["recipient"] != "@alice" {
+		t.Errorf("expected recipient='@alice', got %v", dmMap["recipient"])
+	}
+}
+
 

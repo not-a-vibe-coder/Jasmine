@@ -543,77 +543,58 @@ func (b *Bot) handleNLPAndChat(
 		}
 	}
 
-	// 3. Ask AI with tool declarations
-	aiResp, err := b.ai.GenerateReply(ctx, username, isOwner, history, prompt, summary, profile)
-	if err != nil {
-		log.Printf("[Bot] AI generate error: %v", err)
-		// Even on rate-limit / error, still try interceptors so merge/edit commands aren't lost.
-		if isOwner && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, "") {
+	// 3. Run the agentic loop (ReAct: reason, act, observe, repeat)
+	//    The loop calls the AI, executes any tool calls, feeds results back, and loops
+	//    until the AI returns a plain-text final reply or the 5-iteration cap is hit.
+	executor := func(toolName, arguments string) string {
+		return b.executeToolCall(ctx, chatID, toolName, arguments, username, isOwner)
+	}
+
+	// For long-running async tools (github_edit_file, run_sandbox_task), ack immediately
+	// and run the agentic loop in a goroutine so the user gets instant feedback.
+	mightBeAsync := strings.Contains(lowerPrompt, "push") ||
+		strings.Contains(lowerPrompt, "edit") ||
+		strings.Contains(lowerPrompt, "update") ||
+		strings.Contains(lowerPrompt, "rewrite") ||
+		strings.Contains(lowerPrompt, "run") ||
+		strings.Contains(lowerPrompt, "execute") ||
+		strings.Contains(lowerPrompt, "sandbox")
+
+	// Quick pre-flight: if prompt explicitly mentions a GitHub URL or sandbox,
+	// send a working ack before the loop starts so the chat doesn't feel frozen.
+	if isOwner && mightBeAsync && (extractRepoFromHistory(nil, prompt) != "" || strings.Contains(lowerPrompt, "sandbox") || strings.Contains(lowerPrompt, "run sandbox")) {
+		b.sendReply(chatID, msg.MessageID, b.getRandomWorkingAck())
+		go func() {
+			agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor)
+			finalText := agResult.FinalText
+			if strings.TrimSpace(finalText) == "" {
+				finalText = b.getRandomEmptyAck()
+			}
+			b.sendSimpleMessage(chatID, finalText)
+			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
 			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
-			return
-		}
-		b.sendReply(chatID, msg.MessageID, b.getRandomChatFallback())
+		}()
 		return
 	}
 
-	// 4. Handle Tool Calls if any
-	if len(aiResp.ToolCalls) > 0 {
-		for _, tc := range aiResp.ToolCalls {
-			// For long-running tools (github edit, sandbox), ack immediately and run async.
-			if tc.Function.Name == "github_edit_file" || tc.Function.Name == "run_sandbox_task" {
-				b.sendReply(chatID, msg.MessageID, b.getRandomWorkingAck())
-				tcCopy := tc
-				go func() {
-					toolResult := b.executeToolCall(ctx, chatID, tcCopy.Function.Name, tcCopy.Function.Arguments, username, isOwner)
-					followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tcCopy.Function.Name, tcCopy.ID, tcCopy.Function.Arguments, toolResult, profile)
-					if err != nil || strings.TrimSpace(followup) == "" || strings.HasPrefix(strings.TrimSpace(followup), "{") {
-						followup = toolResult
-					}
-					b.sendSimpleMessage(chatID, followup)
-					_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", followup)
-				}()
-				go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
-				return
-			}
+	agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor)
 
-			toolResult := b.executeToolCall(ctx, chatID, tc.Function.Name, tc.Function.Arguments, username, isOwner)
-
-			// Generate conversational response incorporating tool result
-			followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult, profile)
-			if err != nil || strings.TrimSpace(followup) == "" || strings.HasPrefix(strings.TrimSpace(followup), "{") {
-				if tc.Function.Name == "get_balances" {
-					followup = formatEmergencyBalanceFallback(toolResult)
-				} else if tc.Function.Name == "convert_crypto" {
-					followup = formatEmergencyConvertFallback(toolResult)
-				} else if tc.Function.Name == "get_wallet_address" {
-					followup = formatEmergencyAddressFallback(toolResult)
-				} else {
-					followup = toolResult
-				}
-			}
-
-			b.sendReply(chatID, msg.MessageID, followup)
-			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", followup)
-			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
-			return
-		}
-	}
-
-	// 5. Intercept hallucinated git actions or explicit push/merge commands that bypassed tool calls
-	replyText := strings.TrimSpace(aiResp.Content)
-	if isOwner && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, replyText) {
+	// 4. Intercept hallucinated git/merge actions from the final text (safety net)
+	finalText := strings.TrimSpace(agResult.FinalText)
+	if isOwner && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText) {
 		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 		return
 	}
 
-	if replyText == "" {
-		replyText = b.getRandomEmptyAck()
+	if finalText == "" {
+		finalText = b.getRandomEmptyAck()
 	}
 
-	b.sendReply(chatID, msg.MessageID, replyText)
-	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", replyText)
+	b.sendReply(chatID, msg.MessageID, finalText)
+	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
 	go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 }
+
 
 // trySmartDispatch fires github_edit_file directly when the prompt has a GitHub URL + an edit verb,
 // bypassing the LLM to prevent "I need the repo name" clarification loops.
@@ -752,6 +733,7 @@ func (b *Bot) executeToolCall(
 	username string,
 	isOwner bool,
 ) string {
+	toolName, arguments = ai.NormalizeToolCall(toolName, arguments)
 	log.Printf("[Bot] Executing NLP Tool: %s (args: %s) invoked by @%s", toolName, arguments, username)
 
 	switch toolName {
@@ -1916,6 +1898,8 @@ var repoSlugRegex = regexp.MustCompile(`\b([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)\b`)
 var prRegex = regexp.MustCompile(`(?i)(?:pr|pull\s*request)\s*#?(\d+)`)
 var doubleBoldRegex = regexp.MustCompile(`\*\*(.+?)\*\*`)
 var doubleUnderscoreRegex = regexp.MustCompile(`__(.+?)__`)
+var leakedToolCallRegex = regexp.MustCompile(`(?si)<(?:toolcall|tool_call)[^>]*>.*?</(?:toolcall|tool_call)>`)
+var leakedFunctionRegex = regexp.MustCompile(`(?si)<function(?:=|\s+name=)[^>]*>.*?</function>`)
 
 // toTelegramMarkdown converts GitHub-flavored markdown to Telegram Markdown v1.
 // Telegram uses *bold* and _italic_, not **bold** / __italic__.
@@ -2074,7 +2058,9 @@ func formatEmergencyAddressFallback(toolResult string) string {
 }
 
 func cleanNoEmojis(text string) string {
-	cleaned := emojiPattern.ReplaceAllString(text, "")
+	cleaned := leakedToolCallRegex.ReplaceAllString(text, "")
+	cleaned = leakedFunctionRegex.ReplaceAllString(cleaned, "")
+	cleaned = emojiPattern.ReplaceAllString(cleaned, "")
 	// Replace em dashes (—) and en dashes (–) with standard hyphens
 	cleaned = strings.ReplaceAll(cleaned, "—", " - ")
 	cleaned = strings.ReplaceAll(cleaned, "–", " - ")
