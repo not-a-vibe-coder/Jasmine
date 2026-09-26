@@ -747,10 +747,42 @@ func FormatCard(m *TokenMetrics) string {
 		lines = append(lines, fmt.Sprintf("• Note: Pools also detected on %s. Specify chain if needed.", strings.Join(m.OtherChains, ", ")))
 	}
 
-	lines = append(lines, "")
-	lines = append(lines, "Market data only. Not financial advice.")
-
 	return strings.Join(lines, "\n")
+}
+
+// FormatNatural formats token metrics in a casual, conversational tone without an official bulleted list
+func FormatNatural(m *TokenMetrics) string {
+	if m == nil {
+		return "couldn't pull up metrics for that token."
+	}
+
+	changeStr := fmt.Sprintf("+%.1f%%", m.PriceChange24h)
+	if m.PriceChange24h < 0 {
+		changeStr = fmt.Sprintf("%.1f%%", m.PriceChange24h)
+	}
+
+	var parts []string
+	if m.MarketCap > 0 {
+		parts = append(parts, fmt.Sprintf("sitting around %s mcap", FormatUSD(m.MarketCap)))
+	}
+	if m.PriceUSD > 0 {
+		parts = append(parts, fmt.Sprintf("trading at %s (%s today)", FormatPrice(m.PriceUSD), changeStr))
+	}
+	if m.Volume24h > 0 {
+		parts = append(parts, fmt.Sprintf("doing about %s in 24h volume", FormatUSD(m.Volume24h)))
+	}
+
+	core := strings.Join(parts, ", ")
+	if core == "" {
+		core = fmt.Sprintf("trading at %s on %s", FormatPrice(m.PriceUSD), m.Chain)
+	}
+
+	chainNote := ""
+	if m.Chain != "" {
+		chainNote = fmt.Sprintf(" on %s", m.Chain)
+	}
+
+	return fmt.Sprintf("that's $%s (%s)%s, %s. hit me with 'detailed' if you want the full breakdown.", m.Symbol, m.Name, chainNote, core)
 }
 
 // FormatAmbiguousChains asks user to clarify chain with NO EMOJIS

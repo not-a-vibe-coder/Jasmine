@@ -92,6 +92,19 @@ func TestFormatCardNoEmojis(t *testing.T) {
 		t.Errorf("expected buys and sells in card: %s", card)
 	}
 
+	if strings.Contains(card, "Market data only") {
+		t.Errorf("FormatCard still contains disclaimer: %s", card)
+	}
+
+	natural := FormatNatural(metrics)
+	if hasEmoji(natural) {
+		t.Errorf("FormatNatural contains emojis: %s", natural)
+	}
+	if !strings.Contains(natural, "$USDC") || !strings.Contains(natural, "mcap") {
+		t.Errorf("FormatNatural missing expected fields: %s", natural)
+	}
+	t.Logf("Natural response:\n%s", natural)
+
 	ambiguous := FormatAmbiguousChains(metrics.Address, []string{"Base", "Ethereum"})
 	if hasEmoji(ambiguous) {
 		t.Errorf("FormatAmbiguousChains contains emojis! Output:\n%s", ambiguous)

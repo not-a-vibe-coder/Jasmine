@@ -175,7 +175,12 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			case token.StatusNotFound:
 				replyText = token.FormatNotFound(res.Address)
 			case token.StatusSuccess:
-				replyText = token.FormatCard(res.Metrics)
+				lower := strings.ToLower(cleanPrompt)
+				if strings.Contains(lower, "detailed") || strings.Contains(lower, "details") || strings.Contains(lower, "full") || strings.Contains(lower, "breakdown") || strings.Contains(lower, "more") {
+					replyText = token.FormatCard(res.Metrics)
+				} else {
+					replyText = token.FormatNatural(res.Metrics)
+				}
 			default:
 				replyText = res.Message
 			}
