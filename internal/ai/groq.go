@@ -145,7 +145,7 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "summarize_context",
-				Description: "Summarize recent conversation history and key points in the chat. Use whenever user asks for a recap, summary, or what happened earlier.",
+				Description: "Summarize and compact recent conversation history and key points in the chat into persistent memory. Use whenever user asks to compact memory, recap, summarize, or asks what happened earlier.",
 				Parameters: map[string]interface{}{
 					"type":       "object",
 					"properties": map[string]interface{}{},

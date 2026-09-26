@@ -306,7 +306,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 	case "/send":
 		b.handleSendCommand(ctx, msg, parts[1:], isOwner)
 
-	case "/summarize", "/recap":
+	case "/summarize", "/recap", "/compact":
 		b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
 		b.handleSummarizeCommand(ctx, msg)
 
