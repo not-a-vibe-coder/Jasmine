@@ -134,6 +134,27 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "analyze_token",
+				Description: "Analyze any crypto token Contract Address (CA) or Solana mint address to get real-time price, market cap, 24h volume, 24h price change, liquidity, and buy/sell transaction counts across DexScreener and Codex. Always invoke when given a token address or asked about a token's market metrics.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"address": map[string]interface{}{
+							"type":        "string",
+							"description": "The token contract address (EVM 0x... or Solana base58 mint)",
+						},
+						"chain": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional specific chain (e.g. solana, base, ethereum, arbitrum, bsc). Leave empty if not specified by user.",
+						},
+					},
+					"required": []string{"address"},
+				},
+			},
+		},
 	}
 }
 
@@ -162,7 +183,9 @@ Core Personality & Rules:
 4. If the user asks for your wallet address, balances, sending funds, summarizing the chat, or clearing context, you MUST trigger the corresponding tool.
 5. If someone who is NOT an owner asks you to send crypto, decline with witty banter (e.g., "nice try, only @skipp_dev and @shigarakiXBT can touch the vault").
 6. Maintain context and banter with group members. You can use light crypto/dev slang when appropriate (anon, gm, lfg, wagmi, cooked) without overdoing it.
-7. You have access to real-time live internet search via the 'web_search' tool. ALWAYS trigger 'web_search' whenever asked about current events, world leaders, news, market trends, sports, or anything where facts may have updated. NEVER claim your knowledge has a cutoff or say you don't have real-time access when you can simply search the web.`, ownersStr, roleNote)
+7. You have access to real-time live internet search via the 'web_search' tool. ALWAYS trigger 'web_search' whenever asked about current events, world leaders, news, market trends, sports, or anything where facts may have updated. NEVER claim your knowledge has a cutoff or say you don't have real-time access when you can simply search the web.
+8. You have a token analysis engine via the 'analyze_token' tool. When a user pastes a token CA or asks for token metrics (price, market cap, 24h volume, liquidity, buys/sells), call 'analyze_token'.
+9. STRICT RULE FOR TOKEN RESPONSES: Do NOT use ANY emojis in your token market responses. Keep token info clean, raw, and direct. If the token exists across multiple chains or the tool asks for clarification, clearly ask the user to clarify which chain they want (e.g. Base, Ethereum, Solana, BSC) with zero emojis.`, ownersStr, roleNote)
 }
 
 type AIResponse struct {

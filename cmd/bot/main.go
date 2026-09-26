@@ -15,6 +15,7 @@ import (
 	"shipp/internal/memory"
 	"shipp/internal/search"
 	"shipp/internal/server"
+	"shipp/internal/token"
 )
 
 func main() {
@@ -62,8 +63,11 @@ func main() {
 	searchSvc := search.NewService(cfg.TavilyAPIKey)
 	log.Printf("[Main] Web Search Service initialized (DuckDuckGo + Wikipedia active)")
 
+	tokenSvc := token.NewService(cfg.CodexIOAPIKey)
+	log.Printf("[Main] Token CA Analytics Service initialized (DexScreener + Codex.io active)")
+
 	// 5. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc)
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}

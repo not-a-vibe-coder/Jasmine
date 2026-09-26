@@ -21,6 +21,7 @@ import (
 	"shipp/internal/crypto"
 	"shipp/internal/memory"
 	"shipp/internal/search"
+	"shipp/internal/token"
 )
 
 type Bot struct {
@@ -30,6 +31,7 @@ type Bot struct {
 	memory      memory.Store
 	crypto      *crypto.Service
 	search      *search.Service
+	token       *token.Service
 	updatesChan chan tgbotapi.Update
 
 	// Proactive settings per chat
@@ -44,6 +46,7 @@ func NewBot(
 	memStore memory.Store,
 	cryptoSvc *crypto.Service,
 	searchSvc *search.Service,
+	tokenSvc *token.Service,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
@@ -59,6 +62,7 @@ func NewBot(
 		memory:            memStore,
 		crypto:            cryptoSvc,
 		search:            searchSvc,
+		token:             tokenSvc,
 		updatesChan:       make(chan tgbotapi.Update, 100),
 		proactiveDisabled: make(map[int64]bool),
 		lastProactiveTime: make(map[int64]time.Time),
@@ -158,6 +162,31 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// Clean bot handle from prompt
 	cleanPrompt := b.cleanPrompt(text)
 
+	// Direct Token CA detection (fast path when primarily a CA paste)
+	rawAddr, rawChain := token.ExtractAddressAndChain(cleanPrompt)
+	if rawAddr != "" && len(strings.Fields(cleanPrompt)) <= 3 {
+		b.sendChatAction(chatID, tgbotapi.ChatTyping)
+		res, err := b.token.AnalyzeToken(ctx, rawAddr, rawChain)
+		if err == nil && res != nil {
+			var replyText string
+			switch res.Status {
+			case token.StatusAmbiguousChain:
+				replyText = token.FormatAmbiguousChains(res.Address, res.CandidateChains)
+			case token.StatusNotFound:
+				replyText = token.FormatNotFound(res.Address)
+			case token.StatusSuccess:
+				replyText = token.FormatCard(res.Metrics)
+			default:
+				replyText = res.Message
+			}
+			if replyText != "" {
+				b.sendReply(chatID, msg.MessageID, replyText)
+				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", replyText)
+				return
+			}
+		}
+	}
+
 	// Send typing indicator
 	b.sendChatAction(chatID, tgbotapi.ChatTyping)
 
@@ -241,6 +270,9 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 
 	case "/proactive":
 		b.handleProactiveCommand(msg, parts[1:], isOwner)
+
+	case "/ca", "/token":
+		b.handleTokenCommand(ctx, msg, parts[1:])
 
 	case "/search":
 		query := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]))
@@ -371,6 +403,31 @@ func (b *Bot) executeToolCall(
 		}
 		return res
 
+	case "analyze_token":
+		var args struct {
+			Address string `json:"address"`
+			Chain   string `json:"chain"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		addr := strings.TrimSpace(args.Address)
+		if addr == "" {
+			return "No token address provided. Please specify a contract address."
+		}
+		res, err := b.token.AnalyzeToken(ctx, addr, args.Chain)
+		if err != nil {
+			return fmt.Sprintf("Error analyzing token: %v", err)
+		}
+		switch res.Status {
+		case token.StatusAmbiguousChain:
+			return token.FormatAmbiguousChains(res.Address, res.CandidateChains)
+		case token.StatusNotFound:
+			return token.FormatNotFound(res.Address)
+		case token.StatusSuccess:
+			return token.FormatCard(res.Metrics)
+		default:
+			return res.Message
+		}
+
 	default:
 		return "Unknown action."
 	}
@@ -471,6 +528,41 @@ func (b *Bot) handleProactiveCommand(msg *tgbotapi.Message, args []string, isOwn
 	}
 }
 
+func (b *Bot) handleTokenCommand(ctx context.Context, msg *tgbotapi.Message, args []string) {
+	if len(args) == 0 {
+		b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: /ca <address> or /ca <chain> <address>\nExample: /ca 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 or /ca solana DezXAZ8...")
+		return
+	}
+
+	addr, chain := token.ExtractAddressAndChain(strings.Join(args, " "))
+	if addr == "" {
+		b.sendReply(msg.Chat.ID, msg.MessageID, "Please provide a valid token address or Solana mint.")
+		return
+	}
+
+	b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
+	res, err := b.token.AnalyzeToken(ctx, addr, chain)
+	if err != nil {
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("Error analyzing token: %v", err))
+		return
+	}
+
+	var replyText string
+	switch res.Status {
+	case token.StatusAmbiguousChain:
+		replyText = token.FormatAmbiguousChains(res.Address, res.CandidateChains)
+	case token.StatusNotFound:
+		replyText = token.FormatNotFound(res.Address)
+	case token.StatusSuccess:
+		replyText = token.FormatCard(res.Metrics)
+	default:
+		replyText = res.Message
+	}
+
+	b.sendReply(msg.Chat.ID, msg.MessageID, replyText)
+	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", replyText)
+}
+
 func (b *Bot) runProactiveEngine(ctx context.Context) {
 	// Random check every 25 to 50 minutes
 	ticker := time.NewTicker(30 * time.Minute)
@@ -564,10 +656,12 @@ func (b *Bot) formatHelpMessage(isOwner bool) string {
 		"You don't need slashes! You can say:\n" +
 		"• \"Shipp, what's your sol address?\"\n" +
 		"• \"Check your balances across chains\"\n" +
+		"• \"Check this token CA: 0x8335...\"\n" +
 		"• \"Summarize what we discussed earlier\"\n" +
 		"• \"Clear memory context\"\n" +
 		"• \"Send 0.01 eth to 0x... on base\" (Owner only)\n\n" +
 		"⚡ *Slash Commands:*\n" +
+		"• `/ca <address>` or `/token <address>` - Analyze token metrics (MCap, Vol, LP)\n" +
 		"• `/wallet` or `/deposit` - View deposit addresses\n" +
 		"• `/balance` - Check live balances (Solana & EVM)\n" +
 		"• `/summarize` - Recap recent conversation\n" +
