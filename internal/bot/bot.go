@@ -360,10 +360,49 @@ func (b *Bot) executeToolCall(
 
 	switch toolName {
 	case "get_wallet_address":
-		return b.formatWalletAddressMessage()
+		var args struct {
+			Chain string `json:"chain"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		svmAddr, evmAddr := b.crypto.GetAddresses()
+		chain := strings.ToLower(strings.TrimSpace(args.Chain))
+		if chain == "sol" || chain == "solana" || chain == "svm" {
+			return fmt.Sprintf("Solana deposit address: %s", svmAddr)
+		} else if chain != "" && chain != "all" {
+			return fmt.Sprintf("EVM (%s) deposit address: %s", strings.ToUpper(chain), evmAddr)
+		}
+		return fmt.Sprintf("Solana (SVM): %s\nEVM (Base, Ethereum, Arbitrum, BSC): %s", svmAddr, evmAddr)
 
 	case "get_balances":
-		return b.formatBalanceMessage(ctx)
+		var args struct {
+			Chain string `json:"chain"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		chain := strings.ToLower(strings.TrimSpace(args.Chain))
+		if chain == "sol" || chain == "solana" || chain == "svm" {
+			bal, err := b.crypto.GetSVMBalance(ctx)
+			if err != nil {
+				return "Solana balance is currently unavailable."
+			}
+			return fmt.Sprintf("Solana balance: %s SOL", bal.Text('f', 4))
+		} else if chain != "" && chain != "all" {
+			bal, err := b.crypto.GetEVMBalance(ctx, chain)
+			if err != nil {
+				return fmt.Sprintf("%s balance is currently unavailable.", strings.ToUpper(chain))
+			}
+			symbol := "ETH"
+			if chain == "bnb" || chain == "bsc" {
+				symbol = "BNB"
+			}
+			return fmt.Sprintf("%s balance: %s %s", strings.ToUpper(chain), bal.Text('f', 4), symbol)
+		}
+
+		balances, err := b.crypto.GetAllBalances(ctx)
+		if err != nil {
+			return "Failed to fetch balances."
+		}
+		return fmt.Sprintf("Balances: Solana: %s, Base: %s, Arbitrum: %s, Ethereum: %s, BNB: %s",
+			balances.Solana, balances.Base, balances.Arbitrum, balances.Ethereum, balances.BNB)
 
 	case "send_crypto":
 		var args ai.SendCryptoArgs

@@ -108,7 +108,20 @@ func NewService(
 		}
 	}
 
-	// Configure EVM Chains
+	// Configure EVM Chains with public fallbacks
+	if baseRPC == "" {
+		baseRPC = "https://mainnet.base.org"
+	}
+	if ethRPC == "" {
+		ethRPC = "https://eth.llamarpc.com"
+	}
+	if arbRPC == "" {
+		arbRPC = "https://arb1.arbitrum.io/rpc"
+	}
+	if bnbRPC == "" {
+		bnbRPC = "https://binance.llamarpc.com"
+	}
+
 	s.chains["base"] = ChainInfo{
 		Name:     "Base",
 		Symbol:   "ETH",
