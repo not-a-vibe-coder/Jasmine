@@ -63,7 +63,7 @@ func TestFormatWalletAddressMessage(t *testing.T) {
 	cryptoSvc, err := crypto.NewService(
 		"HzxdDjSZPw9JCbrknZ3dUru5SwnuTQrJFqZN7gPKHfXr", "", "", "",
 		"0x0a2e799d0b57217a1066a4CDD132F01215E132b8", "",
-		"", "", "", "",
+		"", "", "", "", "",
 	)
 	if err != nil {
 		t.Fatalf("crypto init failed: %v", err)

@@ -55,6 +55,12 @@ func TestExtractAddressAndChain(t *testing.T) {
 	if addr2 != "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263" || chain2 != "solana" {
 		t.Errorf("got addr=%s chain=%s", addr2, chain2)
 	}
+
+	input3 := "/ca rh 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+	addr3, chain3 := ExtractAddressAndChain(input3)
+	if addr3 != "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" || chain3 != "robinhood" {
+		t.Errorf("got addr=%s chain=%s", addr3, chain3)
+	}
 }
 
 func TestFormatCardNoEmojis(t *testing.T) {

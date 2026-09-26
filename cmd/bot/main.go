@@ -49,6 +49,7 @@ func main() {
 		cfg.EthereumRPCURL,
 		cfg.ArbitrumRPCURL,
 		cfg.BnbRPCURL,
+		cfg.RobinhoodRPCURL,
 	)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize crypto service: %v", err)

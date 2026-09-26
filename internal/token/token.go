@@ -126,6 +126,8 @@ func ExtractAddressAndChain(input string) (address string, chain string) {
 		"avalanche":   "avalanche",
 		"pulsechain":  "pulsechain",
 		"pulse":       "pulsechain",
+		"rh":          "robinhood",
+		"robinhood":   "robinhood",
 	}
 
 	for _, t := range tokens {
@@ -175,6 +177,8 @@ func NormalizeChain(chain string) string {
 		return "optimism"
 	case "avax", "avalanche":
 		return "avalanche"
+	case "rh", "robinhood":
+		return "robinhood"
 	default:
 		return c
 	}
@@ -199,6 +203,8 @@ func ChainCodexNetworkID(chain string) int {
 		return 10
 	case "avalanche":
 		return 43114
+	case "robinhood", "rh":
+		return 4663
 	default:
 		return 0
 	}
@@ -567,8 +573,8 @@ func (s *Service) fetchCodexFallback(ctx context.Context, address, chain string)
 			networkIDs = append(networkIDs, id)
 		}
 	} else if IsValidEVMAddress(address) {
-		// Try Base, Ethereum, Arbitrum, BSC
-		networkIDs = []int{8453, 1, 42161, 56}
+		// Try Base, Robinhood, Ethereum, Arbitrum, BSC
+		networkIDs = []int{8453, 4663, 1, 42161, 56}
 	} else if IsValidSolanaAddress(address) {
 		networkIDs = []int{1399811149}
 	}
@@ -592,6 +598,8 @@ func (s *Service) fetchCodexFallback(ctx context.Context, address, chain string)
 		switch nid {
 		case 8453:
 			chainName = "Base"
+		case 4663:
+			chainName = "Robinhood"
 		case 1:
 			chainName = "Ethereum"
 		case 1399811149:
@@ -796,7 +804,7 @@ func FormatAmbiguousChains(address string, chains []string) string {
 
 // FormatNotFound notifies user token was not found and requests chain clarification with NO EMOJIS
 func FormatNotFound(address string) string {
-	return fmt.Sprintf("Could not find market data for address %s.\nWhich chain is this token on? (e.g. Solana, Base, Ethereum, BSC, Arbitrum)", address)
+	return fmt.Sprintf("Could not find market data for address %s.\nWhich chain is this token on? (e.g. Solana, Base, Robinhood, Ethereum, BSC, Arbitrum)", address)
 }
 
 // FormatUSD formats currency values into K, M, B abbreviations
@@ -871,6 +879,8 @@ func FormatChainTitle(c string) string {
 		return "Avalanche"
 	case "pulsechain":
 		return "Pulsechain"
+	case "robinhood", "rh":
+		return "Robinhood"
 	default:
 		if len(c) > 0 {
 			return strings.ToUpper(c[:1]) + strings.ToLower(c[1:])

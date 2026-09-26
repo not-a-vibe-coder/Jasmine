@@ -43,13 +43,13 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "get_wallet_address",
-				Description: "Get the bot's deposit wallet addresses for receiving crypto on Solana (SVM) and EVM chains (Base, Ethereum, Arbitrum, BNB). Use whenever user asks for deposit address, wallet address, or where to send funds.",
+				Description: "Get the bot's deposit wallet addresses for receiving crypto on Solana (SVM) and EVM chains (Base, Robinhood, Ethereum, Arbitrum, BNB). Use whenever user asks for deposit address, wallet address, or where to send funds.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"chain": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional chain name: solana, evm, base, ethereum, arbitrum, bnb",
+							"description": "Optional chain name: solana, evm, base, robinhood, rh, ethereum, arbitrum, bnb",
 						},
 					},
 				},
@@ -59,13 +59,13 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "get_balances",
-				Description: "Check the bot's current live crypto balances across Solana and EVM chains. Use whenever user asks about balance, money, funds, or holdings.",
+				Description: "Check the bot's current live crypto balances across Solana and EVM chains (Base, Robinhood, Ethereum, Arbitrum, BNB). Use whenever user asks about balance, money, funds, or holdings.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"chain": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional specific chain: solana, base, ethereum, arbitrum, bnb",
+							"description": "Optional specific chain: solana, base, robinhood, rh, ethereum, arbitrum, bnb",
 						},
 					},
 				},
@@ -75,13 +75,13 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "send_crypto",
-				Description: "Send crypto (SOL on Solana, or ETH/BNB on EVM chains: base, ethereum, arbitrum, bnb) to a recipient address. This can only be executed by bot owners.",
+				Description: "Send crypto (SOL on Solana, or ETH/BNB on EVM chains: base, robinhood, rh, ethereum, arbitrum, bnb) to a recipient address. This can only be executed by bot owners.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"chain": map[string]interface{}{
 							"type":        "string",
-							"description": "The chain to transfer on: solana, base, ethereum, arbitrum, bnb",
+							"description": "The chain to transfer on: solana, base, robinhood, rh, ethereum, arbitrum, bnb",
 						},
 						"recipient": map[string]interface{}{
 							"type":        "string",
@@ -180,9 +180,9 @@ Your owners and creators are %s.
 Core Personality & Rules:
 1. Speak naturally like a smart, cool friend in the group chat. Do NOT sound like an AI assistant or corporate customer service.
 2. Keep responses concise, punchy, and relevant. Avoid generic filler and preamble.
-3. You have native crypto superpowers on Solana (SVM) and EVM (Base, Ethereum, Arbitrum, BNB).
+3. You have native crypto superpowers on Solana (SVM) and EVM (Base, Robinhood, Ethereum, Arbitrum, BNB). Note that "rh" stands for Robinhood EVM chain.
 4. If the user asks for your wallet address, balances, sending funds, summarizing the chat, or clearing context, trigger the corresponding tool.
-   - When asked about balances or wallet addresses, answer ONLY what was specifically asked in a natural conversational sentence. If asked about SOL or Solana, specify chain: "solana" and mention ONLY the Solana balance/address (e.g. "I've got 0.0000 SOL right now, running on fumes").
+   - When asked about balances or wallet addresses, answer ONLY what was specifically asked in a natural conversational sentence. If asked about SOL or Solana, specify chain: "solana" and mention ONLY the Solana balance/address (e.g. "I've got 0.0000 SOL right now, running on fumes"). If asked about RH or Robinhood, specify chain: "robinhood" (or "rh") and mention ONLY the Robinhood balance/address (e.g. "I've got 0.0001 ETH on Robinhood").
    - NEVER dump unsolicited lists of other chains or official bullet point dashboards in casual chat.
 5. If someone who is NOT an owner asks you to send crypto, decline with witty banter (e.g., "nice try, only @skipp_dev and @shigarakiXBT can touch the vault").
 6. Maintain context and banter with group members. You can use light crypto/dev slang when appropriate (anon, gm, lfg, wagmi, cooked) without overdoing it.

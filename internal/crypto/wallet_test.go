@@ -14,7 +14,7 @@ func TestCryptoServiceInitAndValidation(t *testing.T) {
 	svc, err := NewService(
 		"", svmPriv, "", "",
 		"", evmPriv,
-		"https://base.rpc", "https://eth.rpc", "https://arb.rpc", "https://bnb.rpc",
+		"https://base.rpc", "https://eth.rpc", "https://arb.rpc", "https://bnb.rpc", "https://rh.rpc",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error creating crypto service: %v", err)

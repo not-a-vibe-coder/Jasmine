@@ -368,10 +368,12 @@ func (b *Bot) executeToolCall(
 		chain := strings.ToLower(strings.TrimSpace(args.Chain))
 		if chain == "sol" || chain == "solana" || chain == "svm" {
 			return fmt.Sprintf("Solana deposit address: %s", svmAddr)
+		} else if chain == "rh" || chain == "robinhood" {
+			return fmt.Sprintf("Robinhood (RH) deposit address: %s", evmAddr)
 		} else if chain != "" && chain != "all" {
 			return fmt.Sprintf("EVM (%s) deposit address: %s", strings.ToUpper(chain), evmAddr)
 		}
-		return fmt.Sprintf("Solana (SVM): %s\nEVM (Base, Ethereum, Arbitrum, BSC): %s", svmAddr, evmAddr)
+		return fmt.Sprintf("Solana (SVM): %s\nEVM (Base, Robinhood, Ethereum, Arbitrum, BSC): %s", svmAddr, evmAddr)
 
 	case "get_balances":
 		var args struct {
@@ -394,15 +396,19 @@ func (b *Bot) executeToolCall(
 			if chain == "bnb" || chain == "bsc" {
 				symbol = "BNB"
 			}
-			return fmt.Sprintf("%s balance: %s %s", strings.ToUpper(chain), bal.Text('f', 4), symbol)
+			displayName := strings.ToUpper(chain)
+			if chain == "rh" || chain == "robinhood" {
+				displayName = "Robinhood"
+			}
+			return fmt.Sprintf("%s balance: %s %s", displayName, bal.Text('f', 4), symbol)
 		}
 
 		balances, err := b.crypto.GetAllBalances(ctx)
 		if err != nil {
 			return "Failed to fetch balances."
 		}
-		return fmt.Sprintf("Balances: Solana: %s, Base: %s, Arbitrum: %s, Ethereum: %s, BNB: %s",
-			balances.Solana, balances.Base, balances.Arbitrum, balances.Ethereum, balances.BNB)
+		return fmt.Sprintf("Balances: Solana: %s, Base: %s, Robinhood: %s, Arbitrum: %s, Ethereum: %s, BNB: %s",
+			balances.Solana, balances.Base, balances.Robinhood, balances.Arbitrum, balances.Ethereum, balances.BNB)
 
 	case "send_crypto":
 		var args ai.SendCryptoArgs
@@ -718,7 +724,7 @@ func (b *Bot) formatWalletAddressMessage() string {
 	svmAddr, evmAddr := b.crypto.GetAddresses()
 	return fmt.Sprintf("💳 *Shipp Deposit Addresses*\n\n"+
 		"🟣 *Solana (SVM):*\n`%s`\n\n"+
-		"🔵 *EVM (Base, Ethereum, Arbitrum, BSC, Monad):*\n`%s`\n\n"+
+		"🔵 *EVM (Base, Robinhood, Ethereum, Arbitrum, BSC):*\n`%s`\n\n"+
 		"*(Tap any address above to copy it)*", svmAddr, evmAddr)
 }
 
@@ -732,11 +738,13 @@ func (b *Bot) formatBalanceMessage(ctx context.Context) string {
 
 🟣 **Solana:** %s
 🔵 **Base:** %s
+🟢 **Robinhood:** %s
 🔷 **Arbitrum:** %s
 💠 **Ethereum:** %s
 🟡 **BNB Chain:** %s`,
 		balances.Solana,
 		balances.Base,
+		balances.Robinhood,
 		balances.Arbitrum,
 		balances.Ethereum,
 		balances.BNB,

@@ -30,11 +30,12 @@ type ChainInfo struct {
 }
 
 type Balances struct {
-	Solana   string `json:"solana"`
-	Base     string `json:"base"`
-	Ethereum string `json:"ethereum"`
-	Arbitrum string `json:"arbitrum"`
-	BNB      string `json:"bnb"`
+	Solana    string `json:"solana"`
+	Base      string `json:"base"`
+	Ethereum  string `json:"ethereum"`
+	Arbitrum  string `json:"arbitrum"`
+	BNB       string `json:"bnb"`
+	Robinhood string `json:"robinhood"`
 }
 
 type Service struct {
@@ -71,7 +72,7 @@ type rpcResponse struct {
 func NewService(
 	svmPub, svmPriv, svmRPC, svmFallback string,
 	evmPub, evmPriv string,
-	baseRPC, ethRPC, arbRPC, bnbRPC string,
+	baseRPC, ethRPC, arbRPC, bnbRPC, rhRPC string,
 ) (*Service, error) {
 	s := &Service{
 		svmPubKey:      svmPub,
@@ -121,6 +122,9 @@ func NewService(
 	if bnbRPC == "" {
 		bnbRPC = "https://binance.llamarpc.com"
 	}
+	if rhRPC == "" {
+		rhRPC = "https://rpc.robinhood.com"
+	}
 
 	s.chains["base"] = ChainInfo{
 		Name:     "Base",
@@ -150,6 +154,16 @@ func NewService(
 		RPCURL:   bnbRPC,
 		Explorer: "https://bscscan.com/tx/",
 	}
+
+	rhChain := ChainInfo{
+		Name:     "Robinhood Chain",
+		Symbol:   "ETH",
+		ChainID:  4663,
+		RPCURL:   rhRPC,
+		Explorer: "https://explorer.robinhood.com/tx/",
+	}
+	s.chains["robinhood"] = rhChain
+	s.chains["rh"] = rhChain
 
 	return s, nil
 }
@@ -199,6 +213,14 @@ func (s *Service) GetAllBalances(ctx context.Context) (*Balances, error) {
 		b.BNB = "Unavailable"
 	} else {
 		b.BNB = fmt.Sprintf("%s BNB", bnbVal.Text('f', 4))
+	}
+
+	// Robinhood
+	rhVal, err := s.GetEVMBalance(ctx, "robinhood")
+	if err != nil {
+		b.Robinhood = "Unavailable"
+	} else {
+		b.Robinhood = fmt.Sprintf("%s ETH", rhVal.Text('f', 4))
 	}
 
 	return b, nil
