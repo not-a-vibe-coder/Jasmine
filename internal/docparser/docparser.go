@@ -57,18 +57,37 @@ func parsePDF(data []byte) (string, error) {
 		return "", fmt.Errorf("failed to open PDF: %w", err)
 	}
 
-	plainText, err := reader.GetPlainText()
-	if err != nil {
-		return "", fmt.Errorf("failed to extract PDF text: %w", err)
+	numPages := reader.NumPage()
+	if numPages == 0 {
+		return "", fmt.Errorf("PDF has no pages")
 	}
 
-	var buf bytes.Buffer
-	_, err = buf.ReadFrom(plainText)
-	if err != nil {
-		return "", fmt.Errorf("failed to read PDF stream: %w", err)
+	var sb strings.Builder
+	for i := 1; i <= numPages; i++ {
+		page := reader.Page(i) // returns Page, not (Page, error)
+		rows, err := page.GetTextByRow()
+		if err != nil {
+			// Fall back to raw Content() tokens for this page
+			for _, text := range page.Content().Text {
+				sb.WriteString(text.S)
+			}
+			sb.WriteString("\n\n")
+			continue
+		}
+		for _, row := range rows {
+			for _, word := range row.Content {
+				sb.WriteString(word.S)
+			}
+			sb.WriteByte('\n')
+		}
+		sb.WriteString("\n") // page break
 	}
 
-	return buf.String(), nil
+	result := strings.TrimSpace(sb.String())
+	if result == "" {
+		return "", fmt.Errorf("PDF text extraction returned empty — file may be image-based or encrypted")
+	}
+	return result, nil
 }
 
 func parseDOCX(data []byte) (string, error) {
