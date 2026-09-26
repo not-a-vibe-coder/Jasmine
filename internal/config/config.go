@@ -46,6 +46,10 @@ type Config struct {
 	GithubUsername string
 	PersonalEmail  string
 
+	// Resend Email
+	ResendAPIKey    string
+	ResendFromEmail string
+
 	// Search & Analytics & Vision
 	TavilyAPIKey   string
 	CodexIOAPIKey  string
@@ -83,11 +87,17 @@ func LoadConfig() (*Config, error) {
 		GithubPAT:           os.Getenv("GITHUB_PAT"),
 		GithubUsername:      os.Getenv("GITHUB_USERNAME"),
 		PersonalEmail:       os.Getenv("PERSONAL_EMAIL"),
+		ResendAPIKey:        os.Getenv("RESEND_API_KEY"),
+		ResendFromEmail:     os.Getenv("RESEND_FROM_EMAIL"),
 		TavilyAPIKey:        os.Getenv("TAVILY_API_KEY"),
 		CodexIOAPIKey:       os.Getenv("CODEX_IO_API_KEY"),
 		GeminiAPIKey:        os.Getenv("GEMINI_API_KEY"),
 		Port:                os.Getenv("PORT"),
 		WebhookURL:          os.Getenv("WEBHOOK_URL"),
+	}
+
+	if cfg.ResendFromEmail == "" {
+		cfg.ResendFromEmail = "Shipp <shipp@bot.davidnzube.xyz>"
 	}
 
 	if cfg.CodexIOAPIKey == "" {

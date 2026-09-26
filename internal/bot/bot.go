@@ -22,6 +22,7 @@ import (
 	"shipp/internal/config"
 	"shipp/internal/crypto"
 	"shipp/internal/docparser"
+	"shipp/internal/email"
 	"shipp/internal/github"
 	"shipp/internal/memory"
 	"shipp/internal/price"
@@ -41,6 +42,7 @@ type Bot struct {
 	price       *price.Service
 	vision      *vision.Service
 	github      *github.Service
+	email       *email.Service
 	updatesChan chan tgbotapi.Update
 
 	// Proactive settings per chat
@@ -59,6 +61,7 @@ func NewBot(
 	priceSvc *price.Service,
 	visionSvc *vision.Service,
 	githubSvc *github.Service,
+	emailSvc *email.Service,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
@@ -78,6 +81,7 @@ func NewBot(
 		price:             priceSvc,
 		vision:            visionSvc,
 		github:            githubSvc,
+		email:             emailSvc,
 		updatesChan:       make(chan tgbotapi.Update, 100),
 		proactiveDisabled: make(map[int64]bool),
 		lastProactiveTime: make(map[int64]time.Time),
@@ -328,6 +332,9 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 			return
 		}
 		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("🔍 **Search Results for '%s':**\n\n%s", query, res))
+
+	case "/email":
+		b.handleEmailCommand(ctx, msg, parts[1:], isOwner)
 
 	default:
 		// Unknown slash command
@@ -756,6 +763,30 @@ func (b *Bot) executeToolCall(
 		}
 		return fmt.Sprintf("🎉 **%s** on `%s/%s`!", res, owner, repoName)
 
+	case "send_email":
+		if !isOwner {
+			return fmt.Sprintf("Nice try anon! Only bot owners (@%s) can authorize dispatching emails from Shipp.", strings.Join(b.cfg.Owners, ", @"))
+		}
+
+		var args struct {
+			To      string `json:"to"`
+			Subject string `json:"subject"`
+			Body    string `json:"body"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.To == "" {
+			return "Please specify a recipient email address (e.g. 'alice@example.com')."
+		}
+		if args.Body == "" {
+			return "Please specify the email body content."
+		}
+
+		res, err := b.email.Send(ctx, args.To, args.Subject, args.Body)
+		if err != nil {
+			return fmt.Sprintf("❌ Failed to send email to %s: %v", args.To, err)
+		}
+		return email.FormatEmailSent(res)
+
 	default:
 		return "Unknown action."
 	}
@@ -803,6 +834,60 @@ func (b *Bot) executeCryptoSend(ctx context.Context, chain, toAddress string, am
 	}
 
 	return fmt.Sprintf("🚀 **EVM Transfer Successful!**\n\nChain: **%s**\nAmount: `%.6f`\nTo: `%s`\nTx Hash: `%s`\n[View Explorer](%s)", strings.ToUpper(chainLower), amount, toAddress, txHash, explorer)
+}
+
+func (b *Bot) handleEmailCommand(ctx context.Context, msg *tgbotapi.Message, args []string, isOwner bool) {
+	if !isOwner {
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("🔒 Nice try anon! Only bot owners (@%s) can authorize dispatching emails from Shipp.", strings.Join(b.cfg.Owners, ", @")))
+		return
+	}
+
+	rawText := strings.TrimSpace(strings.TrimPrefix(msg.Text, strings.Fields(msg.Text)[0]))
+	if rawText == "" {
+		b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/email <to> <subject> | <body>`\nExample: `/email dev@example.com Update on Release | Hey, we just shipped v0.3 to production!`")
+		return
+	}
+
+	to := ""
+	subject := ""
+	body := ""
+
+	// Check if there is a "|" delimiter for body
+	if strings.Contains(rawText, "|") {
+		parts := strings.SplitN(rawText, "|", 2)
+		headerParts := strings.Fields(strings.TrimSpace(parts[0]))
+		if len(headerParts) > 0 {
+			to = headerParts[0]
+			if len(headerParts) > 1 {
+				subject = strings.Join(headerParts[1:], " ")
+			}
+		}
+		body = strings.TrimSpace(parts[1])
+	} else {
+		fields := strings.Fields(rawText)
+		to = fields[0]
+		if len(fields) > 1 {
+			body = strings.Join(fields[1:], " ")
+		}
+	}
+
+	if to == "" || body == "" {
+		b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/email <to> <subject> | <body>`\nExample: `/email dev@example.com Update on Release | Hey, we just shipped v0.3 to production!`")
+		return
+	}
+
+	if subject == "" {
+		subject = "Message from Shipp"
+	}
+
+	b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
+	res, err := b.email.Send(ctx, to, subject, body)
+	if err != nil {
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("❌ Failed to dispatch email: %v", err))
+		return
+	}
+
+	b.sendReply(msg.Chat.ID, msg.MessageID, email.FormatEmailSent(res))
 }
 
 func (b *Bot) handleSummarizeCommand(ctx context.Context, msg *tgbotapi.Message) {
@@ -976,7 +1061,7 @@ Type /help to see all commands and examples!`, roleGreeting, b.api.Self.UserName
 func (b *Bot) formatHelpMessage(isOwner bool) string {
 	ownerNote := ""
 	if isOwner {
-		ownerNote = "\n👑 *Owner Commands:*\n• `/send <chain> <to> <amount>` - Transfer funds (e.g. `/send base 0x123... 0.01`)"
+		ownerNote = "\n👑 *Owner Commands:*\n• `/send <chain> <to> <amount>` - Transfer funds (e.g. `/send base 0x123... 0.01`)\n• `/email <to> <subject> | <body>` - Dispatch email (e.g. `/email dev@example.com Hi | Hello!`)"
 	}
 
 	return "🤖 *Shipp Command & NLP Reference*\n\n" +
@@ -987,7 +1072,8 @@ func (b *Bot) formatHelpMessage(isOwner bool) string {
 		"• \"Check this token CA: 0x8335...\"\n" +
 		"• \"Summarize what we discussed earlier\"\n" +
 		"• \"Clear memory context\"\n" +
-		"• \"Send 0.01 eth to 0x... on base\" (Owner only)\n\n" +
+		"• \"Send 0.01 eth to 0x... on base\" (Owner only)\n" +
+		"• \"Email dev@example.com about the release update\" (Owner only)\n\n" +
 		"⚡ *Slash Commands:*\n" +
 		"• `/ca <address>` or `/token <address>` - Analyze token metrics (MCap, Vol, LP)\n" +
 		"• `/wallet` or `/deposit` - View deposit addresses\n" +

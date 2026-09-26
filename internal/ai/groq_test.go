@@ -43,6 +43,7 @@ func TestToolsDefinition(t *testing.T) {
 		"github_inspect_project": false,
 		"github_edit_file":       false,
 		"github_merge_pr":        false,
+		"send_email":              false,
 	}
 
 	for _, tool := range tools {

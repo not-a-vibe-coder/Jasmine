@@ -12,6 +12,7 @@ import (
 	"shipp/internal/bot"
 	"shipp/internal/config"
 	"shipp/internal/crypto"
+	"shipp/internal/email"
 	"shipp/internal/github"
 	"shipp/internal/memory"
 	"shipp/internal/price"
@@ -79,8 +80,15 @@ func main() {
 	githubSvc := github.NewService(cfg.GithubPAT, cfg.GithubUsername, cfg.PersonalEmail)
 	log.Printf("[Main] GitHub Service initialized for user @%s (Email: %s)", cfg.GithubUsername, cfg.PersonalEmail)
 
+	emailSvc := email.NewService(cfg.ResendAPIKey, cfg.ResendFromEmail, cfg.PersonalEmail)
+	if emailSvc.IsConfigured() {
+		log.Printf("[Main] Resend Email Service initialized (From: %s | Reply-To: %s)", cfg.ResendFromEmail, cfg.PersonalEmail)
+	} else {
+		log.Printf("[Main] Resend Email Service not configured (RESEND_API_KEY missing)")
+	}
+
 	// 5. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc)
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc, emailSvc)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}

@@ -255,6 +255,31 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "send_email",
+				Description: "Send an email to any recipient from Shipp's verified sending address (shipp@bot.davidnzube.xyz). Replies will automatically route to Shipp's personal Atomic Mail inbox (shippzero@atomicmail.io). Only bot owners can authorize sending emails.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"to": map[string]interface{}{
+							"type":        "string",
+							"description": "The recipient's email address (e.g. 'alice@example.com')",
+						},
+						"subject": map[string]interface{}{
+							"type":        "string",
+							"description": "The email subject line",
+						},
+						"body": map[string]interface{}{
+							"type":        "string",
+							"description": "The email body text or message content",
+						},
+					},
+					"required": []string{"to", "subject", "body"},
+				},
+			},
+		},
 	}
 }
 
@@ -312,7 +337,12 @@ Core Personality & Rules:
   - If it is a web URL: tell the user where it leads or what site/dapp/repo it is, and share the link.
   - If it is a crypto address or transfer request: identify the network/address and ask if they'd like to inspect it or send funds.
   - If it is a Telegram link, Wi-Fi, or plain text: explain or present the information cleanly.
-- Keep the reaction casual, smart, and concise (1 to 3 sentences max).`, ownersStr, roleNote)
+- Keep the reaction casual, smart, and concise (1 to 3 sentences max).
+15. Email Superpowers (Sending via Resend & Receiving on Atomic Mail):
+- You have the 'send_email' tool to dispatch emails from your verified address ('shipp@bot.davidnzube.xyz').
+- Your personal receiving inbox and git committer identity is 'shippzero@atomicmail.io' (Atomic Mail). All outbound emails automatically set their reply-to header to route replies directly to your Atomic Mail inbox.
+- ONLY bot owners (@skipp_dev, @shigarakiXBT) can authorize sending emails. If anyone else asks you to send an email, decline with witty banter.
+- When an owner asks you to draft an email, draft it cleanly and casually. When they confirm or explicitly instruct you to send an email, trigger 'send_email'.`, ownersStr, roleNote)
 }
 
 type AIResponse struct {
