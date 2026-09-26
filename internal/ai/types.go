@@ -36,8 +36,10 @@ type ChatCompletionRequest struct {
 	Messages    []ChatMessage    `json:"messages"`
 	Tools       []ToolDefinition `json:"tools,omitempty"`
 	ToolChoice  string           `json:"tool_choice,omitempty"`
-	Temperature float64          `json:"temperature,omitempty"`
-	MaxTokens   int              `json:"max_tokens,omitempty"`
+	Temperature      float64          `json:"temperature,omitempty"`
+	MaxTokens        int              `json:"max_tokens,omitempty"`
+	FrequencyPenalty float64          `json:"frequency_penalty,omitempty"`
+	PresencePenalty  float64          `json:"presence_penalty,omitempty"`
 }
 
 type UsageInfo struct {

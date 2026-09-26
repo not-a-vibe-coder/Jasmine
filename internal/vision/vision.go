@@ -46,7 +46,7 @@ func (s *Service) PerceiveImage(ctx context.Context, imageBytes []byte, mimeType
 
 	// 1. Primary: Gemini Vision Cascade
 	if s.geminiKey != "" {
-		visionModels := []string{"gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-flash-latest"}
+		visionModels := []string{"gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-2.5-flash"}
 		for _, m := range visionModels {
 			res, err := s.callGemini(ctx, m, imageBytes, mimeType, userPrompt)
 			if err == nil && strings.TrimSpace(res) != "" {

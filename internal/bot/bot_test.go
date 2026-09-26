@@ -172,3 +172,67 @@ func TestIsBalanceIntent(t *testing.T) {
 	}
 }
 
+func TestDeduplicateResponse(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{
+			input:    "need the chain, amount and your wallet address to fire it off. - need the chain, amount and your wallet address to fire it off.",
+			expected: "need the chain, amount and your wallet address to fire it off.",
+		},
+		{
+			input:    "need the chain (solana, base, etc.), the exact amount you want, and the destination address to send it.need the chain (solana, base, etc.), the exact amount you want, and the destination address to send it.",
+			expected: "need the chain (solana, base, etc.), the exact amount you want, and the destination address to send it.",
+		},
+		{
+			input:    "need the chain (solana, base, etc.), the exact amount you want, and the destination address to send it. need the chain (solana, base, etc.), the exact amount you want, and the destination address to send it.",
+			expected: "need the chain (solana, base, etc.), the exact amount you want, and the destination address to send it.",
+		},
+		{
+			input:    "got it. need the chain and amount. need the chain and amount.",
+			expected: "got it. need the chain and amount.",
+		},
+		{
+			input:    "sitting on about $1.30 on robinhood right now (0.0004835 ETH). rest of the chains are dry.",
+			expected: "sitting on about $1.30 on robinhood right now (0.0004835 ETH). rest of the chains are dry.",
+		},
+		{
+			input:    "yeah anon\nyeah anon",
+			expected: "yeah anon",
+		},
+		{
+			input:    "we are cooking. we are cooking.",
+			expected: "we are cooking.",
+		},
+		{
+			input:    "all good. no worries. all good. no worries.",
+			expected: "all good. no worries.",
+		},
+	}
+
+	for _, c := range cases {
+		got := deduplicateResponse(c.input)
+		if got != c.expected {
+			t.Errorf("deduplicateResponse(%q)\n  got:      %q\n  expected: %q", c.input, got, c.expected)
+		}
+	}
+}
+
+func TestCleanNoEmojisWithDeduplication(t *testing.T) {
+	input := "need the chain, amount and your wallet address to fire it off. — need the chain, amount and your wallet address to fire it off."
+	expected := "need the chain, amount and your wallet address to fire it off."
+	got := cleanNoEmojis(input)
+	if got != expected {
+		t.Errorf("cleanNoEmojis(%q) = %q; want %q", input, got, expected)
+	}
+}
+
+func TestFormatEmergencyBalanceFallback(t *testing.T) {
+	rawJSON := `{"total_usd_value":"$1.30","active_holdings":[{"chain":"robinhood","token":"ETH","amount":"0.0004835","usd":"$1.30"}],"dry_chains":["solana","base","ethereum","arbitrum","bnb"]}`
+	res := formatEmergencyBalanceFallback(rawJSON)
+	if !strings.Contains(res, "robinhood") || !strings.Contains(res, "$1.30") {
+		t.Errorf("expected emergency fallback to mention robinhood and $1.30, got: %s", res)
+	}
+}
+

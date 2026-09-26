@@ -104,7 +104,7 @@ func (c *Client) callGeminiGenerate(ctx context.Context, payload geminiChatReq) 
 		return nil, fmt.Errorf("failed to marshal gemini payload: %w", err)
 	}
 
-	models := []string{"gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-flash-latest"}
+	models := []string{"gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-2.5-flash"}
 	var lastErr error
 
 	for _, model := range models {

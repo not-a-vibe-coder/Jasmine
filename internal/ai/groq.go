@@ -697,10 +697,12 @@ func (c *Client) GenerateToolFollowup(
 	}
 
 	reqBody := ChatCompletionRequest{
-		Model:       c.model,
-		Messages:    msgs,
-		Temperature: 0.5,
-		MaxTokens:   250,
+		Model:            c.model,
+		Messages:         msgs,
+		Temperature:      0.7,
+		MaxTokens:        250,
+		FrequencyPenalty: 0.3,
+		PresencePenalty:  0.2,
 	}
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
@@ -713,8 +715,13 @@ func (c *Client) GenerateToolFollowup(
 		return toolResult, nil
 	}
 
-	if len(resp.Choices) > 0 && resp.Choices[0].Message.Content != "" {
-		return resp.Choices[0].Message.Content, nil
+	if len(resp.Choices) > 0 && strings.TrimSpace(resp.Choices[0].Message.Content) != "" {
+		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+	}
+
+	if c.geminiKey != "" {
+		log.Printf("[AI] Groq GenerateToolFollowup returned empty choice. Falling back to Gemini Flash...")
+		return c.generateToolFollowupGemini(ctx, senderUsername, isOwner, originalPrompt, toolName, toolCallID, toolArguments, toolResult, profile)
 	}
 
 	return toolResult, nil
@@ -803,10 +810,16 @@ Keep it short (1-2 sentences max). Do NOT introduce yourself or say "Hey guys, a
 var defaultGroqModelPool = []string{
 	"qwen/qwen3.8-27b",
 	"openai/gpt-oss-120b",
-	"openai/gpt-oss-20b",
 }
 
 func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionRequest) (*ChatCompletionResponse, error) {
+	if reqBody.FrequencyPenalty == 0 {
+		reqBody.FrequencyPenalty = 0.3
+	}
+	if reqBody.PresencePenalty == 0 {
+		reqBody.PresencePenalty = 0.2
+	}
+
 	candidateModels := []string{c.model}
 	for _, m := range defaultGroqModelPool {
 		if m != c.model {
@@ -874,6 +887,15 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 
 				lastErr = fmt.Errorf("groq api error (%s): %s (%s)", model, chatResp.Error.Message, chatResp.Error.Type)
 				break
+			}
+
+			if len(chatResp.Choices) > 0 {
+				choice := chatResp.Choices[0]
+				if strings.TrimSpace(choice.Message.Content) == "" && len(choice.Message.ToolCalls) == 0 {
+					log.Printf("[AI] Groq model %s returned empty response choice. Cascading to next model...", model)
+					lastErr = fmt.Errorf("groq model %s returned empty response", model)
+					break
+				}
 			}
 
 			// Successfully received response

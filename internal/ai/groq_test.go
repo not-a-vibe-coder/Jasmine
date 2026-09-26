@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/joho/godotenv"
 	"shipp/internal/memory"
 )
 
@@ -200,4 +202,27 @@ func TestGenerateVisionReplyMock(t *testing.T) {
 		t.Errorf("expected visual perception in user prompt")
 	}
 }
+
+func TestLiveModelDynamicToolFollowup(t *testing.T) {
+	_ = godotenv.Load("../../.env")
+	groqKey := os.Getenv("GROQ_API_KEY")
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	if groqKey == "" && geminiKey == "" {
+		t.Skip("no api keys")
+	}
+
+	ctx := context.Background()
+	c := NewClient(groqKey, "qwen/qwen3.8-27b", geminiKey, []string{"skipp_dev"})
+	rawData := `{"total_usd_value": "$1.30", "active_holdings": [{"chain": "robinhood", "token": "ETH", "amount": "0.0004835", "usd": "$1.30"}], "dry_chains": ["solana", "base", "ethereum", "arbitrum", "bnb"]}`
+
+	out, err := c.GenerateToolFollowup(ctx, "skipp_dev", true, "How much you got?", "get_balances", "call_1", `{}`, rawData, nil)
+	if err != nil {
+		t.Fatalf("GenerateToolFollowup failed: %v", err)
+	}
+	t.Logf("Generated dynamic followup: %s", out)
+	if strings.TrimSpace(out) == "" {
+		t.Errorf("expected non-empty output")
+	}
+}
+
 

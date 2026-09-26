@@ -448,8 +448,8 @@ func (b *Bot) handleNLPAndChat(
 		b.sendChatAction(chatID, tgbotapi.ChatTyping)
 		toolResult := b.executeToolCall(ctx, chatID, "get_balances", fmt.Sprintf(`{"chain":"%s"}`, targetChain), username, isOwner)
 		followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, "get_balances", "call_balance", fmt.Sprintf(`{"chain":"%s"}`, targetChain), toolResult, profile)
-		if err != nil || strings.TrimSpace(followup) == "" {
-			followup = toolResult
+		if err != nil || strings.TrimSpace(followup) == "" || strings.HasPrefix(strings.TrimSpace(followup), "{") {
+			followup = formatEmergencyBalanceFallback(toolResult)
 		}
 		b.sendReply(chatID, msg.MessageID, followup)
 		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", followup)
@@ -489,7 +489,7 @@ func (b *Bot) handleNLPAndChat(
 				go func() {
 					toolResult := b.executeToolCall(ctx, chatID, tcCopy.Function.Name, tcCopy.Function.Arguments, username, isOwner)
 					followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tcCopy.Function.Name, tcCopy.ID, tcCopy.Function.Arguments, toolResult, profile)
-					if err != nil || followup == "" {
+					if err != nil || strings.TrimSpace(followup) == "" || strings.HasPrefix(strings.TrimSpace(followup), "{") {
 						followup = toolResult
 					}
 					b.sendSimpleMessage(chatID, followup)
@@ -503,8 +503,14 @@ func (b *Bot) handleNLPAndChat(
 
 			// Generate conversational response incorporating tool result
 			followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult, profile)
-			if err != nil || followup == "" {
-				followup = toolResult
+			if err != nil || strings.TrimSpace(followup) == "" || strings.HasPrefix(strings.TrimSpace(followup), "{") {
+				if tc.Function.Name == "get_balances" {
+					followup = formatEmergencyBalanceFallback(toolResult)
+				} else if tc.Function.Name == "convert_crypto" {
+					followup = formatEmergencyConvertFallback(toolResult)
+				} else {
+					followup = toolResult
+				}
 			}
 
 			b.sendReply(chatID, msg.MessageID, followup)
@@ -697,18 +703,22 @@ func (b *Bot) executeToolCall(
 		if chain == "sol" || chain == "solana" || chain == "svm" {
 			bal, err := b.crypto.GetSVMBalance(ctx)
 			if err != nil {
-				return "solana balance is currently unavailable."
+				return `{"error": "solana balance unavailable"}`
 			}
 			fVal, _ := bal.Float64()
-			if fVal == 0 {
-				return "solana wallet is dry right now ($0.00)."
-			}
 			usd := price.ConvertToUSD(fVal, "SOL", prices)
-			return fmt.Sprintf("got %s SOL on solana (~%s USD).", crypto.FormatTokenAmount(bal), price.FormatUSD(usd))
+			data, _ := json.Marshal(map[string]interface{}{
+				"chain":     "solana",
+				"token":     "SOL",
+				"amount":    crypto.FormatTokenAmount(bal),
+				"usd_value": price.FormatUSD(usd),
+				"is_dry":    fVal == 0,
+			})
+			return string(data)
 		} else if chain != "" && chain != "all" {
 			bal, err := b.crypto.GetEVMBalance(ctx, chain)
 			if err != nil {
-				return fmt.Sprintf("%s balance is currently unavailable.", strings.ToLower(chain))
+				return fmt.Sprintf(`{"error": "%s balance unavailable"}`, strings.ToLower(chain))
 			}
 			symbol := "ETH"
 			if chain == "bnb" || chain == "bsc" {
@@ -719,16 +729,20 @@ func (b *Bot) executeToolCall(
 				displayName = "robinhood"
 			}
 			fVal, _ := bal.Float64()
-			if fVal == 0 {
-				return fmt.Sprintf("%s wallet is dry right now ($0.00).", displayName)
-			}
 			usd := price.ConvertToUSD(fVal, symbol, prices)
-			return fmt.Sprintf("got %s %s on %s (~%s USD).", crypto.FormatTokenAmount(bal), symbol, displayName, price.FormatUSD(usd))
+			data, _ := json.Marshal(map[string]interface{}{
+				"chain":     displayName,
+				"token":     symbol,
+				"amount":    crypto.FormatTokenAmount(bal),
+				"usd_value": price.FormatUSD(usd),
+				"is_dry":    fVal == 0,
+			})
+			return string(data)
 		}
 
 		balances, err := b.crypto.GetAllBalances(ctx)
 		if err != nil {
-			return "failed to fetch balances."
+			return `{"error": "failed to fetch balances"}`
 		}
 		solUSD := price.ConvertToUSD(balances.SolanaVal, "SOL", prices)
 		baseUSD := price.ConvertToUSD(balances.BaseVal, "ETH", prices)
@@ -739,44 +753,51 @@ func (b *Bot) executeToolCall(
 		totalUSD := solUSD + baseUSD + rhUSD + arbUSD + ethUSD + bnbUSD
 
 		type holding struct {
-			chain  string
-			amount string
-			usd    float64
+			Chain  string `json:"chain"`
+			Token  string `json:"token"`
+			Amount string `json:"amount"`
+			USD    string `json:"usd"`
 		}
-		var nonZero []holding
+		var active []holding
+		var dry []string
+
 		if balances.SolanaVal > 0 {
-			nonZero = append(nonZero, holding{"solana", balances.Solana, solUSD})
+			active = append(active, holding{"solana", "SOL", balances.Solana, price.FormatUSD(solUSD)})
+		} else {
+			dry = append(dry, "solana")
 		}
 		if balances.BaseVal > 0 {
-			nonZero = append(nonZero, holding{"base", balances.Base, baseUSD})
+			active = append(active, holding{"base", "ETH", balances.Base, price.FormatUSD(baseUSD)})
+		} else {
+			dry = append(dry, "base")
 		}
 		if balances.RhVal > 0 {
-			nonZero = append(nonZero, holding{"robinhood", balances.Robinhood, rhUSD})
+			active = append(active, holding{"robinhood", "ETH", balances.Robinhood, price.FormatUSD(rhUSD)})
+		} else {
+			dry = append(dry, "robinhood")
 		}
 		if balances.ArbVal > 0 {
-			nonZero = append(nonZero, holding{"arbitrum", balances.Arbitrum, arbUSD})
+			active = append(active, holding{"arbitrum", "ETH", balances.Arbitrum, price.FormatUSD(arbUSD)})
+		} else {
+			dry = append(dry, "arbitrum")
 		}
 		if balances.EthVal > 0 {
-			nonZero = append(nonZero, holding{"ethereum", balances.Ethereum, ethUSD})
+			active = append(active, holding{"ethereum", "ETH", balances.Ethereum, price.FormatUSD(ethUSD)})
+		} else {
+			dry = append(dry, "ethereum")
 		}
 		if balances.BnbVal > 0 {
-			nonZero = append(nonZero, holding{"bnb", balances.BNB, bnbUSD})
+			active = append(active, holding{"bnb", "BNB", balances.BNB, price.FormatUSD(bnbUSD)})
+		} else {
+			dry = append(dry, "bnb")
 		}
 
-		if len(nonZero) == 0 {
-			return "wallets are completely dry right now. sitting at $0.00 across all chains."
-		}
-
-		if len(nonZero) == 1 {
-			h := nonZero[0]
-			return fmt.Sprintf("sitting on about %s on %s right now (%s). rest of the chains are dry.", price.FormatUSD(h.usd), h.chain, h.amount)
-		}
-
-		var parts []string
-		for _, h := range nonZero {
-			parts = append(parts, fmt.Sprintf("%s on %s (~%s)", h.amount, h.chain, price.FormatUSD(h.usd)))
-		}
-		return fmt.Sprintf("sitting on about %s total: %s. rest of the chains are dry.", price.FormatUSD(totalUSD), strings.Join(parts, ", "))
+		resData, _ := json.Marshal(map[string]interface{}{
+			"total_usd_value": price.FormatUSD(totalUSD),
+			"active_holdings": active,
+			"dry_chains":      dry,
+		})
+		return string(resData)
 
 	case "convert_crypto":
 		var args struct {
@@ -792,21 +813,22 @@ func (b *Bot) executeToolCall(
 			args.To = "USD"
 		}
 		if args.Amount <= 0 {
-			return "Please specify an amount greater than 0 to convert."
+			return `{"error": "amount must be greater than 0"}`
 		}
 
 		prices := b.price.GetPrices(ctx)
 		result, rate, err := price.Convert(args.Amount, args.From, args.To, prices)
 		if err != nil {
-			return fmt.Sprintf("Couldn't convert %g %s to %s: %v", args.Amount, strings.ToUpper(args.From), strings.ToUpper(args.To), err)
+			return fmt.Sprintf(`{"error": "%s"}`, err.Error())
 		}
-
-		if strings.ToUpper(args.To) == "USD" {
-			return fmt.Sprintf("%g %s is worth %s USD (rate: %s/%s).",
-				args.Amount, strings.ToUpper(args.From), price.FormatUSD(result), price.FormatUSD(rate), strings.ToUpper(args.From))
-		}
-		return fmt.Sprintf("%g %s is approximately %s %s.",
-			args.Amount, strings.ToUpper(args.From), price.FormatCrypto(result, args.To), strings.ToUpper(args.To))
+		data, _ := json.Marshal(map[string]interface{}{
+			"amount": args.Amount,
+			"from":   strings.ToUpper(args.From),
+			"to":     strings.ToUpper(args.To),
+			"rate":   rate,
+			"result": result,
+		})
+		return string(data)
 
 	case "send_crypto":
 		var args ai.SendCryptoArgs
@@ -1794,6 +1816,134 @@ func toTelegramMarkdown(text string) string {
 }
 
 
+func deduplicateRepeatedHalf(s string) string {
+	s = strings.TrimSpace(s)
+	n := len(s)
+	if n < 16 {
+		return s
+	}
+
+	for offset := -8; offset <= 8; offset++ {
+		mid := n/2 + offset
+		if mid <= 4 || mid >= n-4 {
+			continue
+		}
+
+		left := strings.TrimSpace(s[:mid])
+		right := strings.TrimSpace(s[mid:])
+
+		trimL := strings.Trim(left, " .!?-—–\t\r\n")
+		trimR := strings.Trim(right, " .!?-—–\t\r\n")
+
+		if len(trimL) >= 8 && strings.EqualFold(trimL, trimR) {
+			trailing := ""
+			if strings.HasSuffix(right, ".") || strings.HasSuffix(left, ".") {
+				trailing = "."
+			} else if strings.HasSuffix(right, "!") || strings.HasSuffix(left, "!") {
+				trailing = "!"
+			} else if strings.HasSuffix(right, "?") || strings.HasSuffix(left, "?") {
+				trailing = "?"
+			}
+			return strings.TrimRight(trimL, " .!?-—–\t\r\n") + trailing
+		}
+	}
+	return s
+}
+
+func deduplicateResponse(text string) string {
+	text = strings.TrimSpace(text)
+	if len(text) < 16 {
+		return text
+	}
+
+	// 1. Check if the entire string is a duplicated half
+	if deduped := deduplicateRepeatedHalf(text); deduped != text {
+		return deduped
+	}
+
+	// 2. Check if a suffix after a delimiter is duplicated
+	delimRegex := regexp.MustCompile(`([.!?\n]+|\s+-\s+)`)
+	matches := delimRegex.FindAllStringIndex(text, -1)
+
+	for _, loc := range matches {
+		boundary := loc[1]
+		if boundary >= len(text)-16 {
+			continue
+		}
+		prefix := text[:boundary]
+		suffix := strings.TrimSpace(text[boundary:])
+
+		if dedupedSuffix := deduplicateRepeatedHalf(suffix); dedupedSuffix != suffix {
+			return strings.TrimSpace(prefix + " " + dedupedSuffix)
+		}
+	}
+
+	return text
+}
+
+func formatEmergencyBalanceFallback(toolResult string) string {
+	var data struct {
+		TotalUSD string `json:"total_usd_value"`
+		Holdings []struct {
+			Chain  string `json:"chain"`
+			Token  string `json:"token"`
+			Amount string `json:"amount"`
+			USD    string `json:"usd"`
+		} `json:"active_holdings"`
+		Chain  string `json:"chain"`
+		Amount string `json:"amount"`
+		Token  string `json:"token"`
+		USDVal string `json:"usd_value"`
+		IsDry  bool   `json:"is_dry"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(toolResult), &data); err != nil {
+		return toolResult
+	}
+	if data.Error != "" {
+		return data.Error
+	}
+	if data.Chain != "" {
+		if data.IsDry {
+			return fmt.Sprintf("%s is dry ($0.00 right now).", data.Chain)
+		}
+		return fmt.Sprintf("got %s %s on %s (~%s).", data.Amount, data.Token, data.Chain, data.USDVal)
+	}
+	if len(data.Holdings) == 0 {
+		return "wallets are dry right now, $0.00 across all chains."
+	}
+	if len(data.Holdings) == 1 {
+		h := data.Holdings[0]
+		return fmt.Sprintf("sitting on about %s on %s right now (%s).", h.USD, h.Chain, h.Amount)
+	}
+	var parts []string
+	for _, h := range data.Holdings {
+		parts = append(parts, fmt.Sprintf("%s on %s (~%s)", h.Amount, h.Chain, h.USD))
+	}
+	return fmt.Sprintf("sitting on about %s total: %s.", data.TotalUSD, strings.Join(parts, ", "))
+}
+
+func formatEmergencyConvertFallback(toolResult string) string {
+	var data struct {
+		Amount float64 `json:"amount"`
+		From   string  `json:"from"`
+		To     string  `json:"to"`
+		Rate   float64 `json:"rate"`
+		Result float64 `json:"result"`
+		Error  string  `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(toolResult), &data); err != nil {
+		return toolResult
+	}
+	if data.Error != "" {
+		return data.Error
+	}
+	if data.To == "USD" {
+		return fmt.Sprintf("%.6f %s is about $%.2f USD.", data.Amount, data.From, data.Result)
+	}
+	return fmt.Sprintf("%.2f %s is about %.6f %s.", data.Amount, data.From, data.Result, data.To)
+}
+
 func cleanNoEmojis(text string) string {
 	cleaned := emojiPattern.ReplaceAllString(text, "")
 	// Replace em dashes (—) and en dashes (–) with standard hyphens
@@ -1804,7 +1954,8 @@ func cleanNoEmojis(text string) string {
 	for i, l := range lines {
 		lines[i] = strings.TrimLeft(l, " ")
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	res := strings.TrimSpace(strings.Join(lines, "\n"))
+	return deduplicateResponse(res)
 }
 
 func extractRepoFromHistory(history []memory.Message, currentPrompt string) string {
