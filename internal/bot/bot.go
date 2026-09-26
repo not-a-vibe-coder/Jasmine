@@ -1523,6 +1523,19 @@ var emojiPattern = regexp.MustCompile(`[\x{1F600}-\x{1F64F}\x{1F300}-\x{1F5FF}\x
 var githubURLRegex = regexp.MustCompile(`(?i)github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)`)
 var repoSlugRegex = regexp.MustCompile(`\b([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)\b`)
 var prRegex = regexp.MustCompile(`(?i)(?:pr|pull\s*request)\s*#?(\d+)`)
+var doubleBoldRegex = regexp.MustCompile(`\*\*(.+?)\*\*`)
+var doubleUnderscoreRegex = regexp.MustCompile(`__(.+?)__`)
+
+// toTelegramMarkdown converts GitHub-flavored markdown to Telegram Markdown v1.
+// Telegram uses *bold* and _italic_, not **bold** / __italic__.
+func toTelegramMarkdown(text string) string {
+	// **bold** → *bold*
+	text = doubleBoldRegex.ReplaceAllString(text, "*$1*")
+	// __italic__ → _italic_  (only if not already single-underscore)
+	text = doubleUnderscoreRegex.ReplaceAllString(text, "_$1_")
+	return text
+}
+
 
 func cleanNoEmojis(text string) string {
 	cleaned := emojiPattern.ReplaceAllString(text, "")
@@ -1588,7 +1601,7 @@ func extractPRNumber(history []memory.Message, prompt string) int {
 }
 
 func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {
-	text = cleanNoEmojis(text)
+	text = toTelegramMarkdown(cleanNoEmojis(text))
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
 	if replyToMsgID > 0 {
@@ -1603,7 +1616,7 @@ func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {
 }
 
 func (b *Bot) sendSimpleMessage(chatID int64, text string) {
-	text = cleanNoEmojis(text)
+	text = toTelegramMarkdown(cleanNoEmojis(text))
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
 	_, err := b.api.Send(msg)
