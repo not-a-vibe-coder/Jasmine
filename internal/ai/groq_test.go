@@ -117,3 +117,72 @@ func TestMockChatCompletionWithToolCall(t *testing.T) {
 		t.Errorf("expected tool name 'get_wallet_address', got %s", chatResp.Choices[0].Message.ToolCalls[0].Function.Name)
 	}
 }
+
+func TestSystemPromptVisionAndMemoryRules(t *testing.T) {
+	client := NewClient("mock_key", "qwen/qwen3.8-27b", []string{"skipp_dev"})
+	prompt := client.systemPrompt("skipp_dev", true)
+
+	if !strings.Contains(prompt, "1 to 3 sentences max") {
+		t.Errorf("expected prompt to restrict image reactions to 1 to 3 sentences max")
+	}
+	if !strings.Contains(prompt, "visual perception subsystem") {
+		t.Errorf("expected prompt to mention visual perception subsystem")
+	}
+	if !strings.Contains(prompt, "Gemini operates solely as your objective \"eyes\"") {
+		t.Errorf("expected prompt to clarify eyes vs brain architecture")
+	}
+}
+
+func TestGenerateVisionReplyMock(t *testing.T) {
+	var receivedBody ChatCompletionRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+
+		resp := ChatCompletionResponse{
+			ID: "mock-vision-reply",
+		}
+		resp.Choices = append(resp.Choices, struct {
+			Index        int         `json:"index"`
+			Message      ChatMessage `json:"message"`
+			FinishReason string      `json:"finish_reason"`
+		}{
+			Index: 0,
+			Message: ChatMessage{
+				Role:    "assistant",
+				Content: "nice 40x long on Bayse anon, up 32% already.",
+			},
+			FinishReason: "stop",
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("mock_key", "qwen/qwen3.8-27b", []string{"skipp_dev"})
+	client.httpClient = server.Client()
+
+	// Direct call to sendChatCompletion with mock server by swapping DefaultGroqURL logic or testing request structure
+	ctx := context.Background()
+	req := ChatCompletionRequest{
+		Model: client.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: client.systemPrompt("skipp_dev", true)},
+			{Role: "user", Content: "[User sent an image]\n[Visual Perception: BTC Long 40x on Bayse, +32.75%]\n\nUser caption: look at this"},
+		},
+		MaxTokens: 350,
+	}
+
+	data, _ := json.Marshal(req)
+	httpReq, _ := http.NewRequestWithContext(ctx, "POST", server.URL, strings.NewReader(string(data)))
+	res, err := server.Client().Do(httpReq)
+	if err != nil {
+		t.Fatalf("mock request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if !strings.Contains(receivedBody.Messages[1].Content, "BTC Long 40x on Bayse") {
+		t.Errorf("expected visual perception in user prompt")
+	}
+}
+

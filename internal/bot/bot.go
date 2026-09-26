@@ -828,8 +828,6 @@ func (b *Bot) handlePhotoMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	b.sendChatAction(chatID, tgbotapi.ChatTyping)
-
 	// Pick highest resolution photo
 	bestPhoto := photos[len(photos)-1]
 
@@ -859,21 +857,72 @@ func (b *Bot) handlePhotoMessage(ctx context.Context, msg *tgbotapi.Message) {
 	if username == "" {
 		username = msg.From.FirstName
 	}
-
+	isOwner := b.cfg.IsOwner(msg.From.UserName) || b.cfg.IsOwner(msg.From.FirstName)
 	cleanCaption := b.cleanPrompt(msg.Caption)
-	userLog := "[User sent an image]"
+
+	b.processImage(ctx, chatID, msg.MessageID, senderID, username, isOwner, imgBytes, "image/jpeg", cleanCaption)
+}
+
+func (b *Bot) processImage(
+	ctx context.Context,
+	chatID int64,
+	replyToMsgID int,
+	senderID int64,
+	username string,
+	isOwner bool,
+	imgBytes []byte,
+	mimeType string,
+	cleanCaption string,
+) {
+	b.sendChatAction(chatID, tgbotapi.ChatTyping)
+
+	// 1. Perception Layer (Gemini Flash = "The Eyes"): Objective visual fact extraction
+	perception, err := b.vision.PerceiveImage(ctx, imgBytes, mimeType, cleanCaption)
+	if err != nil || strings.TrimSpace(perception) == "" {
+		log.Printf("[Bot] Vision perception error: %v", err)
+		b.sendReply(chatID, replyToMsgID, "I took a look, but couldn't clearly make out what's in that picture.")
+		return
+	}
+
+	// 2. Memory Continuity: Save user image event and Gemini visual perception to conversation memory
+	userMemory := fmt.Sprintf("[User sent an image. Visual description: %s]", perception)
 	if cleanCaption != "" {
-		userLog = fmt.Sprintf("[User sent an image with caption: %s]", cleanCaption)
+		userMemory = fmt.Sprintf("[User sent an image with caption '%s'. Visual description: %s]", cleanCaption, perception)
 	}
-	_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userLog)
+	_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userMemory)
 
-	analysis, err := b.vision.AnalyzeImage(ctx, imgBytes, "image/jpeg", cleanCaption)
-	if err != nil || analysis == "" {
-		analysis = "I took a look, but couldn't make out what's in that picture."
+	// 3. Reasoning & Persona Layer (Groq = "The Brain & Voice")
+	history, _ := b.memory.GetRecentMessages(ctx, chatID, 15)
+	summary, _ := b.memory.GetSummary(ctx, chatID)
+
+	aiResp, err := b.ai.GenerateVisionReply(ctx, username, isOwner, history, cleanCaption, perception, summary)
+	if err != nil {
+		log.Printf("[Bot] AI vision reasoning error: %v", err)
+		b.sendReply(chatID, replyToMsgID, "Saw the image, but my brain lagged for a second.")
+		return
 	}
 
-	b.sendReply(chatID, msg.MessageID, analysis)
-	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", analysis)
+	// Handle tools if Groq decided to invoke one (e.g. analyze_token or get_balances)
+	if len(aiResp.ToolCalls) > 0 {
+		for _, tc := range aiResp.ToolCalls {
+			toolResult := b.executeToolCall(ctx, chatID, tc.Function.Name, tc.Function.Arguments, username, isOwner)
+			followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, cleanCaption, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult)
+			if err != nil || followup == "" {
+				followup = toolResult
+			}
+			b.sendReply(chatID, replyToMsgID, followup)
+			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", followup)
+			return
+		}
+	}
+
+	replyText := strings.TrimSpace(aiResp.Content)
+	if replyText == "" {
+		replyText = "Saw that."
+	}
+
+	b.sendReply(chatID, replyToMsgID, replyText)
+	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", replyText)
 }
 
 func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) {
@@ -883,6 +932,7 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 	if username == "" {
 		username = msg.From.FirstName
 	}
+	isOwner := b.cfg.IsOwner(msg.From.UserName) || b.cfg.IsOwner(msg.From.FirstName)
 
 	isPrivate := msg.Chat.IsPrivate()
 	shouldRespond := isPrivate || b.isAddressedToBot(msg) || msg.Caption != ""
@@ -901,7 +951,6 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 
 	// Check if sent as an uncompressed image file
 	if strings.HasPrefix(mime, "image/") || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" {
-		b.sendChatAction(chatID, tgbotapi.ChatTyping)
 		fileURL, err := b.api.GetFileDirectURL(doc.FileID)
 		if err != nil {
 			b.sendReply(chatID, msg.MessageID, "failed to get image link.")
@@ -919,18 +968,7 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 			return
 		}
 
-		userLog := fmt.Sprintf("[User sent image file: %s]", doc.FileName)
-		if cleanCaption != "" {
-			userLog = fmt.Sprintf("[User sent image file %s with caption: %s]", doc.FileName, cleanCaption)
-		}
-		_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userLog)
-
-		analysis, err := b.vision.AnalyzeImage(ctx, imgBytes, mime, cleanCaption)
-		if err != nil || analysis == "" {
-			analysis = "Couldn't parse that image file."
-		}
-		b.sendReply(chatID, msg.MessageID, analysis)
-		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", analysis)
+		b.processImage(ctx, chatID, msg.MessageID, senderID, username, isOwner, imgBytes, mime, cleanCaption)
 		return
 	}
 
@@ -981,7 +1019,7 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 	}
 	_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userDocLog)
 
-	analysis, err := b.ai.AnalyzeDocument(ctx, doc.FileName, extractedText, cleanCaption)
+	analysis, err := b.ai.AnalyzeDocument(ctx, username, isOwner, doc.FileName, extractedText, cleanCaption)
 	if err != nil || analysis == "" {
 		b.sendReply(chatID, msg.MessageID, "I extracted the document text, but couldn't generate the analysis.")
 		return

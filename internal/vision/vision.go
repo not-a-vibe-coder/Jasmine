@@ -28,9 +28,9 @@ func NewService(geminiKey string) *Service {
 	}
 }
 
-// AnalyzeImage analyzes an image with visual awareness (colors, objects, layout, style, charts, text)
-// using Gemini Flash as primary and OCR as fallback.
-func (s *Service) AnalyzeImage(ctx context.Context, imageBytes []byte, mimeType string, userPrompt string) (string, error) {
+// PerceiveImage extracts objective visual facts (objects, text, colors, layout, charts, numbers)
+// using Gemini Flash as primary visual perception engine and OCR as fallback.
+func (s *Service) PerceiveImage(ctx context.Context, imageBytes []byte, mimeType string, userPrompt string) (string, error) {
 	if len(imageBytes) == 0 {
 		return "", fmt.Errorf("empty image bytes")
 	}
@@ -41,14 +41,14 @@ func (s *Service) AnalyzeImage(ctx context.Context, imageBytes []byte, mimeType 
 	// 1. Primary: Gemini Vision (2.5 Flash)
 	if s.geminiKey != "" {
 		res, err := s.callGemini(ctx, "gemini-2.5-flash", imageBytes, mimeType, userPrompt)
-		if err == nil && res != "" {
+		if err == nil && strings.TrimSpace(res) != "" {
 			return res, nil
 		}
 		log.Printf("[VisionService] Gemini 2.5 Flash failed: %v. Retrying with gemini-flash-latest...", err)
 
 		// 1b. Fallback Gemini model
 		res, err = s.callGemini(ctx, "gemini-flash-latest", imageBytes, mimeType, userPrompt)
-		if err == nil && res != "" {
+		if err == nil && strings.TrimSpace(res) != "" {
 			return res, nil
 		}
 		log.Printf("[VisionService] Gemini fallback model failed: %v. Falling back to OCR...", err)
@@ -57,14 +57,15 @@ func (s *Service) AnalyzeImage(ctx context.Context, imageBytes []byte, mimeType 
 	// 2. Secondary Fallback: OCR text extraction
 	ocrText, ocrErr := s.fallbackOCR(ctx, imageBytes)
 	if ocrErr == nil && strings.TrimSpace(ocrText) != "" {
-		promptPrefix := "I extracted this text from the image using OCR:"
-		if userPrompt != "" {
-			return fmt.Sprintf("%s\n\n```\n%s\n```\n(Responding to '%s')", promptPrefix, ocrText, userPrompt), nil
-		}
-		return fmt.Sprintf("%s\n\n```\n%s\n```", promptPrefix, ocrText), nil
+		return fmt.Sprintf("[Visual OCR Text Extracted]:\n%s", strings.TrimSpace(ocrText)), nil
 	}
 
-	return "I took a look, but couldn't clearly parse the image right now.", nil
+	return "", fmt.Errorf("unable to visually perceive image or extract OCR text")
+}
+
+// AnalyzeImage is an alias for PerceiveImage for backward compatibility.
+func (s *Service) AnalyzeImage(ctx context.Context, imageBytes []byte, mimeType string, userPrompt string) (string, error) {
+	return s.PerceiveImage(ctx, imageBytes, mimeType, userPrompt)
 }
 
 type geminiReq struct {
@@ -105,14 +106,18 @@ type geminiResp struct {
 func (s *Service) callGemini(ctx context.Context, model string, imageBytes []byte, mimeType string, userPrompt string) (string, error) {
 	b64Data := base64.StdEncoding.EncodeToString(imageBytes)
 
-	systemInstruction := "You are Shipp, a sharp, witty, highly intelligent friend in a Telegram group chat. " +
-		"Analyze this image casually, naturally, and concisely (1 to 3 sentences max). " +
-		"Sound like a cool friend reacting in the group chat, NOT an essay writer or formal AI. " +
-		"Highlight the key visual facts (numbers, colors, what it actually is) with quick, sharp banter. " +
-		"Never write long essays or bulleted lists unless explicitly asked."
+	systemInstruction := "You are an objective, expert visual perception engine. Examine the image carefully and extract all visual facts objectively, accurately, and thoroughly for an AI reasoning system.\n" +
+		"Extract and report:\n" +
+		"- Main subject, scene, objects, people, or media type (e.g. photo, crypto PnL card/chart, meme, screenshot, document, artwork).\n" +
+		"- Visible text, numbers, labels, currency amounts, percentages, and tickers exactly as displayed (full OCR).\n" +
+		"- Dominant colors, aesthetic, layout, UI elements, and visual themes (e.g. dark mode/light mode, green/red accents).\n" +
+		"- If it's a crypto trade / PnL card: identify platform (Bayse, Binance, Bybit, Hyperliquid, etc.), pair/coin, position (Long/Short), leverage multiplier (e.g. 40x), PnL % and profit USD, entry price, mark/current price, liquidation price.\n" +
+		"- If it's a chart: time frame, price action trend, indicators, key levels.\n" +
+		"- If it's a meme or graphic: describe what is depicted and any punchlines or visual humor.\n" +
+		"Be objective, structured, and factual. Do NOT address the user directly, do NOT write chat greetings, banter, or conversational filler."
 
 	if userPrompt != "" {
-		systemInstruction += fmt.Sprintf(" The user sent this prompt: '%s'. Respond directly and concisely to their prompt based on the image.", userPrompt)
+		systemInstruction += fmt.Sprintf("\n\nUser Context/Question: \"%s\". Pay special attention to any visual elements or text that answer this context.", userPrompt)
 	}
 
 	payload := geminiReq{

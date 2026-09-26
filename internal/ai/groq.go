@@ -193,8 +193,13 @@ Core Personality & Rules:
 - Strictly NEVER use ANY emojis in token responses.
 - In normal conversational chat, describe the token naturally in 1-2 casual sentences (mentioning the symbol, market cap, price, or 24h volume) without an official bulleted list. Casually add that they can say "detailed" if they want the full breakdown.
 - ONLY provide the full bulleted official list if the user explicitly asks for "detailed", "breakdown", "full list", or "tell me more", or when using official /ca commands.
-- If the token exists across multiple chains or the tool asks for clarification, clearly ask the user to clarify which chain they want (e.g. Base, Ethereum, Solana, BSC) with zero emojis.
-10. You have multimodal image analysis powers and document analysis powers (.md, .pdf, .docx, .txt). You understand visual colors, charts, diagrams, memes, and document text in detail.`, ownersStr, roleNote)
+10. You have multimodal image perception powers (via your visual perception subsystem) and document analysis powers (.md, .pdf, .docx, .txt). You understand visual colors, charts, diagrams, memes, trade setups, and document text in detail.
+11. When reacting to or discussing images/photos:
+- Keep your response casual, sharp, and natural (1 to 3 sentences max).
+- Sound like a cool, witty friend reacting in the Telegram chat, NOT an essay writer or formal AI.
+- Highlight the key visual facts (numbers, profits, coin, colors, what it actually is) with quick banter.
+- Never write long essays or dump bulleted lists unless the user explicitly asked for a detailed breakdown.
+12. If asked how you perceive images or whether Gemini has access to memory: You (Groq) are the brain and conversational voice with full access to chat memory, history, and user relationships. Gemini operates solely as your objective "eyes" to perceive visual facts, OCR text, and colors, but Gemini has zero access to memories or chat history.`, ownersStr, roleNote)
 }
 
 type AIResponse struct {
@@ -268,6 +273,91 @@ func (c *Client) GenerateReply(
 
 	if len(resp.Choices) == 0 {
 		return &AIResponse{Content: "..." }, nil
+	}
+
+	choice := resp.Choices[0]
+	return &AIResponse{
+		Content:   choice.Message.Content,
+		ToolCalls: choice.Message.ToolCalls,
+	}, nil
+}
+
+// GenerateVisionReply processes objective visual perception from Gemini Flash,
+// applying chat history, summary context, Shipp persona, and owner recognition through Groq.
+func (c *Client) GenerateVisionReply(
+	ctx context.Context,
+	senderUsername string,
+	isOwner bool,
+	history []memory.Message,
+	userCaption string,
+	visualPerception string,
+	summary string,
+) (*AIResponse, error) {
+	var msgs []ChatMessage
+
+	// System prompt with full persona & rules
+	msgs = append(msgs, ChatMessage{
+		Role:    "system",
+		Content: c.systemPrompt(senderUsername, isOwner),
+	})
+
+	// Add summary if available
+	if summary != "" {
+		msgs = append(msgs, ChatMessage{
+			Role:    "system",
+			Content: fmt.Sprintf("[Past Chat Summary Context]: %s", summary),
+		})
+	}
+
+	// Add history for memory continuity
+	for _, h := range history {
+		role := h.Role
+		if role != "user" && role != "assistant" && role != "system" {
+			role = "user"
+		}
+		prefix := ""
+		if h.Sender != "" && role == "user" {
+			prefix = fmt.Sprintf("@%s: ", h.Sender)
+		}
+		msgs = append(msgs, ChatMessage{
+			Role:    role,
+			Content: prefix + h.Content,
+		})
+	}
+
+	// Construct user prompt with visual perception
+	var currentPrompt string
+	if userCaption != "" {
+		currentPrompt = fmt.Sprintf("[User sent an image]\n[Visual Perception from your eyes: %s]\n\nUser caption/request: %s", visualPerception, userCaption)
+	} else {
+		currentPrompt = fmt.Sprintf("[User sent an image]\n[Visual Perception from your eyes: %s]\n\nReact to what the user sent naturally, casually, and punchily in 1-3 sentences.", visualPerception)
+	}
+
+	if senderUsername != "" {
+		currentPrompt = fmt.Sprintf("@%s: %s", senderUsername, currentPrompt)
+	}
+
+	msgs = append(msgs, ChatMessage{
+		Role:    "user",
+		Content: currentPrompt,
+	})
+
+	reqBody := ChatCompletionRequest{
+		Model:       c.model,
+		Messages:    msgs,
+		Tools:       c.tools,
+		ToolChoice:  "auto",
+		Temperature: 0.7,
+		MaxTokens:   350,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(resp.Choices) == 0 {
+		return &AIResponse{Content: "saw that."}, nil
 	}
 
 	choice := resp.Choices[0]
@@ -452,11 +542,13 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 	return &chatResp, nil
 }
 
-func (c *Client) AnalyzeDocument(ctx context.Context, filename string, content string, userPrompt string) (string, error) {
-	systemPrompt := "You are Shipp (@Shipp0Bot), a sharp, witty, highly intelligent friend in a Telegram chat. " +
-		"Analyze document contents accurately, casually, and concisely. Keep responses natural, punchy, and short (under 150 words). " +
-		"Do NOT write long corporate essays or spam emojis. " +
-		"Give 2-4 key takeaways and casually mention they can ask for details or questions on anything specific."
+func (c *Client) AnalyzeDocument(ctx context.Context, senderUsername string, isOwner bool, filename string, content string, userPrompt string) (string, error) {
+	systemPrompt := c.systemPrompt(senderUsername, isOwner) + "\n\n" +
+		"Document Analysis Instructions:\n" +
+		"- Analyze the document contents accurately, casually, and concisely.\n" +
+		"- Keep response natural, punchy, and short (under 150 words).\n" +
+		"- Do NOT write long corporate essays or spam emojis.\n" +
+		"- Give 2-4 key takeaways and casually mention they can ask for details or questions on anything specific."
 
 	var userMsg string
 	if userPrompt != "" {
