@@ -39,6 +39,7 @@ func TestToolsDefinition(t *testing.T) {
 		"summarize_context":  false,
 		"clear_context":      false,
 		"web_search":         false,
+		"analyze_token":      false,
 	}
 
 	for _, tool := range tools {

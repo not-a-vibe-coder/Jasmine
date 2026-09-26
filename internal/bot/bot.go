@@ -327,7 +327,7 @@ func (b *Bot) handleNLPAndChat(
 			toolResult := b.executeToolCall(ctx, chatID, tc.Function.Name, tc.Function.Arguments, username, isOwner)
 
 			// Generate conversational response incorporating tool result
-			followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tc.Function.Name, tc.ID, toolResult)
+			followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult)
 			if err != nil || followup == "" {
 				followup = toolResult
 			}

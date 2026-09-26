@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -279,8 +280,13 @@ func (c *Client) GenerateToolFollowup(
 	originalPrompt string,
 	toolName string,
 	toolCallID string,
+	toolArguments string,
 	toolResult string,
 ) (string, error) {
+	if toolArguments == "" {
+		toolArguments = "{}"
+	}
+
 	msgs := []ChatMessage{
 		{
 			Role:    "system",
@@ -297,7 +303,8 @@ func (c *Client) GenerateToolFollowup(
 					ID:   toolCallID,
 					Type: "function",
 					Function: FunctionCall{
-						Name: toolName,
+						Name:      toolName,
+						Arguments: toolArguments,
 					},
 				},
 			},
@@ -319,7 +326,7 @@ func (c *Client) GenerateToolFollowup(
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
 	if err != nil {
-		// Fallback to presenting tool result directly
+		log.Printf("[AI] GenerateToolFollowup error from Groq: %v", err)
 		return toolResult, nil
 	}
 
