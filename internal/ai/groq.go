@@ -453,14 +453,16 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 }
 
 func (c *Client) AnalyzeDocument(ctx context.Context, filename string, content string, userPrompt string) (string, error) {
-	systemPrompt := "You are Shipp (@Shipp0Bot), a sharp, witty, highly intelligent AI companion in a Telegram chat. " +
-		"Analyze document contents accurately, concisely, and with engaging intelligence. Use clear markdown formatting with key takeaways."
+	systemPrompt := "You are Shipp (@Shipp0Bot), a sharp, witty, highly intelligent friend in a Telegram chat. " +
+		"Analyze document contents accurately, casually, and concisely. Keep responses natural, punchy, and short (under 150 words). " +
+		"Do NOT write long corporate essays or spam emojis. " +
+		"Give 2-4 key takeaways and casually mention they can ask for details or questions on anything specific."
 
 	var userMsg string
 	if userPrompt != "" {
 		userMsg = fmt.Sprintf("Document: %s\n\nUser Question/Request: %s\n\n--- Document Content ---\n%s", filename, userPrompt, content)
 	} else {
-		userMsg = fmt.Sprintf("Document: %s\n\nPlease provide a clear executive summary, key highlights, and notable takeaways from this document.\n\n--- Document Content ---\n%s", filename, content)
+		userMsg = fmt.Sprintf("Document: %s\n\nPlease give a quick, casual breakdown with the essential takeaways.\n\n--- Document Content ---\n%s", filename, content)
 	}
 
 	reqBody := ChatCompletionRequest{
@@ -470,7 +472,7 @@ func (c *Client) AnalyzeDocument(ctx context.Context, filename string, content s
 			{Role: "user", Content: userMsg},
 		},
 		Temperature: 0.5,
-		MaxTokens:   800,
+		MaxTokens:   350,
 	}
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)

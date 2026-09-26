@@ -854,7 +854,19 @@ func (b *Bot) handlePhotoMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	senderID := msg.From.ID
+	username := msg.From.UserName
+	if username == "" {
+		username = msg.From.FirstName
+	}
+
 	cleanCaption := b.cleanPrompt(msg.Caption)
+	userLog := "[User sent an image]"
+	if cleanCaption != "" {
+		userLog = fmt.Sprintf("[User sent an image with caption: %s]", cleanCaption)
+	}
+	_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userLog)
+
 	analysis, err := b.vision.AnalyzeImage(ctx, imgBytes, "image/jpeg", cleanCaption)
 	if err != nil || analysis == "" {
 		analysis = "I took a look, but couldn't make out what's in that picture."
@@ -866,6 +878,12 @@ func (b *Bot) handlePhotoMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
+	senderID := msg.From.ID
+	username := msg.From.UserName
+	if username == "" {
+		username = msg.From.FirstName
+	}
+
 	isPrivate := msg.Chat.IsPrivate()
 	shouldRespond := isPrivate || b.isAddressedToBot(msg) || msg.Caption != ""
 	if !shouldRespond {
@@ -879,6 +897,7 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 
 	mime := strings.ToLower(doc.MimeType)
 	ext := strings.ToLower(filepath.Ext(doc.FileName))
+	cleanCaption := b.cleanPrompt(msg.Caption)
 
 	// Check if sent as an uncompressed image file
 	if strings.HasPrefix(mime, "image/") || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" {
@@ -899,7 +918,13 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 			b.sendReply(chatID, msg.MessageID, "failed to read image file.")
 			return
 		}
-		cleanCaption := b.cleanPrompt(msg.Caption)
+
+		userLog := fmt.Sprintf("[User sent image file: %s]", doc.FileName)
+		if cleanCaption != "" {
+			userLog = fmt.Sprintf("[User sent image file %s with caption: %s]", doc.FileName, cleanCaption)
+		}
+		_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userLog)
+
 		analysis, err := b.vision.AnalyzeImage(ctx, imgBytes, mime, cleanCaption)
 		if err != nil || analysis == "" {
 			analysis = "Couldn't parse that image file."
@@ -950,7 +975,12 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 		return
 	}
 
-	cleanCaption := b.cleanPrompt(msg.Caption)
+	userDocLog := fmt.Sprintf("[User sent document: %s]", doc.FileName)
+	if cleanCaption != "" {
+		userDocLog = fmt.Sprintf("[User sent document %s with caption: %s]", doc.FileName, cleanCaption)
+	}
+	_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userDocLog)
+
 	analysis, err := b.ai.AnalyzeDocument(ctx, doc.FileName, extractedText, cleanCaption)
 	if err != nil || analysis == "" {
 		b.sendReply(chatID, msg.MessageID, "I extracted the document text, but couldn't generate the analysis.")

@@ -68,7 +68,13 @@ func (s *Service) AnalyzeImage(ctx context.Context, imageBytes []byte, mimeType 
 }
 
 type geminiReq struct {
-	Contents []geminiContent `json:"contents"`
+	Contents       []geminiContent       `json:"contents"`
+	SafetySettings []geminiSafetySetting `json:"safetySettings,omitempty"`
+}
+
+type geminiSafetySetting struct {
+	Category  string `json:"category"`
+	Threshold string `json:"threshold"`
 }
 
 type geminiContent struct {
@@ -87,7 +93,8 @@ type geminiInlineData struct {
 
 type geminiResp struct {
 	Candidates []struct {
-		Content struct {
+		FinishReason string `json:"finishReason"`
+		Content      struct {
 			Parts []struct {
 				Text string `json:"text"`
 			} `json:"parts"`
@@ -98,14 +105,14 @@ type geminiResp struct {
 func (s *Service) callGemini(ctx context.Context, model string, imageBytes []byte, mimeType string, userPrompt string) (string, error) {
 	b64Data := base64.StdEncoding.EncodeToString(imageBytes)
 
-	systemInstruction := "You are Shipp, a sharp, witty, highly intelligent AI companion in a Telegram group chat. " +
-		"Analyze this image with full visual awareness (colors, aesthetics, charts, candlestick trends, memes, UI layout, objects, and text). " +
-		"Speak naturally like a smart friend in chat. Do NOT use robotic corporate filler or preamble. "
+	systemInstruction := "You are Shipp, a sharp, witty, highly intelligent friend in a Telegram group chat. " +
+		"Analyze this image casually, naturally, and concisely (1 to 3 sentences max). " +
+		"Sound like a cool friend reacting in the group chat, NOT an essay writer or formal AI. " +
+		"Highlight the key visual facts (numbers, colors, what it actually is) with quick, sharp banter. " +
+		"Never write long essays or bulleted lists unless explicitly asked."
 
 	if userPrompt != "" {
-		systemInstruction += fmt.Sprintf("The user sent this prompt with the image: '%s'. Prioritize answering their question directly using the visual details.", userPrompt)
-	} else {
-		systemInstruction += "Provide a punchy, perceptive, and witty observation about what's in the image, noting notable colors and details."
+		systemInstruction += fmt.Sprintf(" The user sent this prompt: '%s'. Respond directly and concisely to their prompt based on the image.", userPrompt)
 	}
 
 	payload := geminiReq{
@@ -121,6 +128,13 @@ func (s *Service) callGemini(ctx context.Context, model string, imageBytes []byt
 					},
 				},
 			},
+		},
+		SafetySettings: []geminiSafetySetting{
+			{Category: "HARM_CATEGORY_HARASSMENT", Threshold: "BLOCK_NONE"},
+			{Category: "HARM_CATEGORY_HATE_SPEECH", Threshold: "BLOCK_NONE"},
+			{Category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", Threshold: "BLOCK_NONE"},
+			{Category: "HARM_CATEGORY_DANGEROUS_CONTENT", Threshold: "BLOCK_NONE"},
+			{Category: "HARM_CATEGORY_CIVIC_INTEGRITY", Threshold: "BLOCK_NONE"},
 		},
 	}
 
@@ -141,6 +155,19 @@ func (s *Service) callGemini(ctx context.Context, model string, imageBytes []byt
 		return "", err
 	}
 	defer resp.Body.Close()
+
+	// Retry once on rate limit (429) after brief delay
+	if resp.StatusCode == http.StatusTooManyRequests {
+		time.Sleep(1500 * time.Millisecond)
+		retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(jsonBytes))
+		if err == nil {
+			retryReq.Header.Set("Content-Type", "application/json")
+			if retryResp, err := s.httpClient.Do(retryReq); err == nil {
+				defer retryResp.Body.Close()
+				resp = retryResp
+			}
+		}
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
