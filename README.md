@@ -1,6 +1,6 @@
 # Shipp 🚀
 
-A high-performance personal AI companion Telegram bot built in **Go**, featuring intelligent human-like conversation, context memory, proactive group messaging, and native crypto capabilities (receive, check balances, and send funds on Solana and EVM chains).
+A sharp, witty personal AI companion with native crypto superpowers on Solana and EVM chains.
 
 ---
 
