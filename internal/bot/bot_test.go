@@ -145,3 +145,30 @@ func TestExtractPRNumber(t *testing.T) {
 		t.Errorf("extractPRNumber history = %d; want 7", prFromHist)
 	}
 }
+
+func TestIsBalanceIntent(t *testing.T) {
+	tests := []struct {
+		prompt    string
+		wantOK    bool
+		wantChain string
+	}{
+		{"How much you got?", true, "all"},
+		{"how much do you have", true, "all"},
+		{"what's your balance?", true, "all"},
+		{"check wallet", true, "all"},
+		{"how much sol do you have", true, "solana"},
+		{"check your base balance", true, "base"},
+		{"what's your robinhood balance", true, "robinhood"},
+		{"how do i balance a binary tree", false, ""},
+		{"show me the balance sheet", false, ""},
+		{"what are we cooking today?", false, ""},
+	}
+
+	for _, tt := range tests {
+		ok, chain := isBalanceIntent(tt.prompt)
+		if ok != tt.wantOK || chain != tt.wantChain {
+			t.Errorf("isBalanceIntent(%q) = (%v, %q); want (%v, %q)", tt.prompt, ok, chain, tt.wantOK, tt.wantChain)
+		}
+	}
+}
+

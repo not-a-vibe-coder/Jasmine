@@ -442,12 +442,17 @@ func (b *Bot) handleNLPAndChat(
 
 	lowerPrompt := strings.ToLower(prompt)
 
-	// 2a. Pre-AI balance dispatch: skip LLM to prevent hallucinating made-up numbers
+	// 2a. Pre-AI balance dispatch: fetch ground-truth balances first to prevent hallucination,
+	//     then format naturally through AI or clean natural fallback.
 	if ok, targetChain := isBalanceIntent(prompt); ok {
 		b.sendChatAction(chatID, tgbotapi.ChatTyping)
 		toolResult := b.executeToolCall(ctx, chatID, "get_balances", fmt.Sprintf(`{"chain":"%s"}`, targetChain), username, isOwner)
-		b.sendReply(chatID, msg.MessageID, toolResult)
-		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+		followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, "get_balances", "call_balance", fmt.Sprintf(`{"chain":"%s"}`, targetChain), toolResult, profile)
+		if err != nil || strings.TrimSpace(followup) == "" {
+			followup = toolResult
+		}
+		b.sendReply(chatID, msg.MessageID, followup)
+		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", followup)
 		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 		return
 	}
@@ -692,32 +697,38 @@ func (b *Bot) executeToolCall(
 		if chain == "sol" || chain == "solana" || chain == "svm" {
 			bal, err := b.crypto.GetSVMBalance(ctx)
 			if err != nil {
-				return "Solana balance is currently unavailable."
+				return "solana balance is currently unavailable."
 			}
 			fVal, _ := bal.Float64()
+			if fVal == 0 {
+				return "solana wallet is dry right now ($0.00)."
+			}
 			usd := price.ConvertToUSD(fVal, "SOL", prices)
-			return fmt.Sprintf("Solana balance: %s SOL (~%s USD)", crypto.FormatTokenAmount(bal), price.FormatUSD(usd))
+			return fmt.Sprintf("got %s SOL on solana (~%s USD).", crypto.FormatTokenAmount(bal), price.FormatUSD(usd))
 		} else if chain != "" && chain != "all" {
 			bal, err := b.crypto.GetEVMBalance(ctx, chain)
 			if err != nil {
-				return fmt.Sprintf("%s balance is currently unavailable.", strings.ToUpper(chain))
+				return fmt.Sprintf("%s balance is currently unavailable.", strings.ToLower(chain))
 			}
 			symbol := "ETH"
 			if chain == "bnb" || chain == "bsc" {
 				symbol = "BNB"
 			}
-			displayName := strings.ToUpper(chain)
+			displayName := strings.ToLower(chain)
 			if chain == "rh" || chain == "robinhood" {
-				displayName = "Robinhood"
+				displayName = "robinhood"
 			}
 			fVal, _ := bal.Float64()
+			if fVal == 0 {
+				return fmt.Sprintf("%s wallet is dry right now ($0.00).", displayName)
+			}
 			usd := price.ConvertToUSD(fVal, symbol, prices)
-			return fmt.Sprintf("%s balance: %s %s (~%s USD)", displayName, crypto.FormatTokenAmount(bal), symbol, price.FormatUSD(usd))
+			return fmt.Sprintf("got %s %s on %s (~%s USD).", crypto.FormatTokenAmount(bal), symbol, displayName, price.FormatUSD(usd))
 		}
 
 		balances, err := b.crypto.GetAllBalances(ctx)
 		if err != nil {
-			return "Failed to fetch balances."
+			return "failed to fetch balances."
 		}
 		solUSD := price.ConvertToUSD(balances.SolanaVal, "SOL", prices)
 		baseUSD := price.ConvertToUSD(balances.BaseVal, "ETH", prices)
@@ -727,14 +738,45 @@ func (b *Bot) executeToolCall(
 		bnbUSD := price.ConvertToUSD(balances.BnbVal, "BNB", prices)
 		totalUSD := solUSD + baseUSD + rhUSD + arbUSD + ethUSD + bnbUSD
 
-		return fmt.Sprintf("Balances: Solana: %s (%s), Base: %s (%s), Robinhood: %s (%s), Arbitrum: %s (%s), Ethereum: %s (%s), BNB: %s (%s). Total Portfolio Net Worth: %s USD",
-			balances.Solana, price.FormatUSD(solUSD),
-			balances.Base, price.FormatUSD(baseUSD),
-			balances.Robinhood, price.FormatUSD(rhUSD),
-			balances.Arbitrum, price.FormatUSD(arbUSD),
-			balances.Ethereum, price.FormatUSD(ethUSD),
-			balances.BNB, price.FormatUSD(bnbUSD),
-			price.FormatUSD(totalUSD))
+		type holding struct {
+			chain  string
+			amount string
+			usd    float64
+		}
+		var nonZero []holding
+		if balances.SolanaVal > 0 {
+			nonZero = append(nonZero, holding{"solana", balances.Solana, solUSD})
+		}
+		if balances.BaseVal > 0 {
+			nonZero = append(nonZero, holding{"base", balances.Base, baseUSD})
+		}
+		if balances.RhVal > 0 {
+			nonZero = append(nonZero, holding{"robinhood", balances.Robinhood, rhUSD})
+		}
+		if balances.ArbVal > 0 {
+			nonZero = append(nonZero, holding{"arbitrum", balances.Arbitrum, arbUSD})
+		}
+		if balances.EthVal > 0 {
+			nonZero = append(nonZero, holding{"ethereum", balances.Ethereum, ethUSD})
+		}
+		if balances.BnbVal > 0 {
+			nonZero = append(nonZero, holding{"bnb", balances.BNB, bnbUSD})
+		}
+
+		if len(nonZero) == 0 {
+			return "wallets are completely dry right now. sitting at $0.00 across all chains."
+		}
+
+		if len(nonZero) == 1 {
+			h := nonZero[0]
+			return fmt.Sprintf("sitting on about %s on %s right now (%s). rest of the chains are dry.", price.FormatUSD(h.usd), h.chain, h.amount)
+		}
+
+		var parts []string
+		for _, h := range nonZero {
+			parts = append(parts, fmt.Sprintf("%s on %s (~%s)", h.amount, h.chain, price.FormatUSD(h.usd)))
+		}
+		return fmt.Sprintf("sitting on about %s total: %s. rest of the chains are dry.", price.FormatUSD(totalUSD), strings.Join(parts, ", "))
 
 	case "convert_crypto":
 		var args struct {
@@ -1935,22 +1977,27 @@ func (b *Bot) handleSandboxTimeout(task *sandbox.Task) {
 
 func isBalanceIntent(prompt string) (bool, string) {
 	lower := strings.ToLower(prompt)
-	hasBalanceWord := strings.Contains(lower, "balance") ||
-		strings.Contains(lower, "how much do you have") ||
-		strings.Contains(lower, "how much you got") ||
-		strings.Contains(lower, "how much money") ||
-		strings.Contains(lower, "what you got") ||
-		strings.Contains(lower, "check wallet") ||
-		strings.Contains(lower, "wallet balance") ||
-		strings.Contains(lower, "show balance") ||
-		strings.Contains(lower, "show wallet")
 
-	if !hasBalanceWord {
+	// Exclude non-balance concepts early
+	if strings.Contains(lower, "balance sheet") || strings.Contains(lower, "tree") || strings.Contains(lower, "cooking") {
 		return false, ""
 	}
 
-	// Exclude non-balance concepts
-	if strings.Contains(lower, "balance sheet") || strings.Contains(lower, "tree") {
+	hasBalanceWord := strings.Contains(lower, "balance") ||
+		strings.Contains(lower, "check wallet") ||
+		strings.Contains(lower, "show wallet") ||
+		strings.Contains(lower, "how much money") ||
+		strings.Contains(lower, "how much you got") ||
+		strings.Contains(lower, "what you got")
+
+	if !hasBalanceWord && strings.Contains(lower, "how much") {
+		if strings.Contains(lower, "have") || strings.Contains(lower, "got") ||
+			strings.Contains(lower, "sol") || strings.Contains(lower, "eth") || strings.Contains(lower, "bnb") || strings.Contains(lower, "crypto") {
+			hasBalanceWord = true
+		}
+	}
+
+	if !hasBalanceWord {
 		return false, ""
 	}
 
