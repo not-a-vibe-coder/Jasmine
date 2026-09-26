@@ -55,6 +55,10 @@ type Bot struct {
 	proactiveMu       sync.RWMutex
 	proactiveDisabled map[int64]bool
 	lastProactiveTime map[int64]time.Time
+
+	// Forum topic registry: chatID -> threadID -> topicName
+	topicMu       sync.RWMutex
+	topicRegistry map[int64]map[int]string
 }
 
 func NewBot(
@@ -94,6 +98,7 @@ func NewBot(
 		userDMChats:       make(map[string]int64),
 		proactiveDisabled: make(map[int64]bool),
 		lastProactiveTime: make(map[int64]time.Time),
+		topicRegistry:     make(map[int64]map[int]string),
 	}
 
 	if sandboxSvc != nil {
@@ -107,23 +112,55 @@ func NewBot(
 	return b, nil
 }
 
+// rawTelegramMessage is a lightweight struct used ONLY to extract fields that
+// tgbotapi v5.5.1 does not expose (forum thread IDs, topic creation events).
+type rawTelegramMessage struct {
+	MessageThreadID int `json:"message_thread_id"`
+	ForumTopicCreated *struct {
+		Name string `json:"name"`
+	} `json:"forum_topic_created"`
+}
+
+type rawTelegramUpdate struct {
+	Message *rawTelegramMessage `json:"message"`
+}
+
 func (b *Bot) WebhookHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
 	var update tgbotapi.Update
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+	if err := json.Unmarshal(body, &update); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	b.updatesChan <- update
+
+	// Extract thread ID from raw JSON (not in tgbotapi v5.5.1 struct)
+	var raw rawTelegramUpdate
+	_ = json.Unmarshal(body, &raw)
+	threadID := 0
+	topicName := ""
+	if raw.Message != nil {
+		threadID = raw.Message.MessageThreadID
+		if raw.Message.ForumTopicCreated != nil {
+			topicName = raw.Message.ForumTopicCreated.Name
+		}
+	}
+
+	if update.Message != nil {
+		go b.handleMessageWithThread(context.Background(), update.Message, threadID, topicName)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
 func (b *Bot) Start(ctx context.Context) error {
-	var updates tgbotapi.UpdatesChannel
-
 	if b.cfg.WebhookURL != "" {
 		log.Printf("[Bot] Configuring Webhook at %s", b.cfg.WebhookURL)
 		wh, err := tgbotapi.NewWebhook(b.cfg.WebhookURL)
@@ -133,20 +170,29 @@ func (b *Bot) Start(ctx context.Context) error {
 		if _, err := b.api.Request(wh); err != nil {
 			return fmt.Errorf("failed to register webhook: %w", err)
 		}
-		updates = b.updatesChan
 		log.Printf("[Bot] Webhook registered successfully with Telegram")
-	} else {
-		log.Printf("[Bot] WebhookURL not configured. Clearing any existing webhook and using Long Polling...")
-		_, _ = b.api.Request(tgbotapi.DeleteWebhookConfig{})
-		u := tgbotapi.NewUpdate(0)
-		u.Timeout = 30
-		updates = b.api.GetUpdatesChan(u)
+
+		// Start background proactive messaging engine
+		go b.runProactiveEngine(ctx)
+		log.Printf("[Bot] Shipp is live and listening for updates (webhook mode)...")
+
+		// In webhook mode, handleMessageWithThread is called directly from WebhookHandler.
+		// Just block until context is cancelled.
+		<-ctx.Done()
+		log.Printf("[Bot] Shutting down (webhook mode)...")
+		return nil
 	}
+
+	log.Printf("[Bot] WebhookURL not configured. Clearing any existing webhook and using Long Polling...")
+	_, _ = b.api.Request(tgbotapi.DeleteWebhookConfig{})
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 30
+	updates := b.api.GetUpdatesChan(u)
 
 	// Start background proactive messaging engine
 	go b.runProactiveEngine(ctx)
 
-	log.Printf("[Bot] Shipp is live and listening for updates...")
+	log.Printf("[Bot] Shipp is live and listening for updates (polling mode)...")
 
 	for {
 		select {
@@ -160,11 +206,42 @@ func (b *Bot) Start(ctx context.Context) error {
 			if update.Message == nil {
 				continue
 			}
-
-			// Process each message concurrently
-			go b.handleMessage(ctx, update.Message)
+			// Long polling: no raw body available, threadID defaults to 0
+			go b.handleMessageWithThread(ctx, update.Message, 0, "")
 		}
 	}
+}
+
+
+// ctxKeyThreadID is the context key used to pass the message_thread_id through the call chain
+// so replies land in the correct forum thread.
+type ctxKeyThreadID struct{}
+
+// handleMessageWithThread is the primary entry point for all incoming messages.
+// It extracts the forum thread ID (from webhook raw JSON) and topic name,
+// registers new topics, injects the thread ID into context, then calls handleMessage.
+func (b *Bot) handleMessageWithThread(ctx context.Context, msg *tgbotapi.Message, threadID int, topicName string) {
+	chatID := msg.Chat.ID
+
+	// If this is a forum_topic_created service message, register the topic
+	if topicName != "" && threadID != 0 {
+		b.topicMu.Lock()
+		if b.topicRegistry[chatID] == nil {
+			b.topicRegistry[chatID] = make(map[int]string)
+		}
+		b.topicRegistry[chatID][threadID] = topicName
+		b.topicMu.Unlock()
+		log.Printf("[Bot] Registered forum topic: chatID=%d threadID=%d name=%q", chatID, threadID, topicName)
+		// Don't respond to pure service messages - just register and return
+		return
+	}
+
+	// Inject thread ID into context for thread-aware replies
+	if threadID != 0 {
+		ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
+	}
+
+	b.handleMessage(ctx, msg)
 }
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
@@ -1218,6 +1295,28 @@ func (b *Bot) executeToolCall(
 		}
 		return fmt.Sprintf("Successfully sent direct message to @%s.", targetUser)
 
+	case "get_group_topics":
+		b.topicMu.RLock()
+		topics := b.topicRegistry[chatID]
+		b.topicMu.RUnlock()
+
+		if len(topics) == 0 {
+			return `{"topics": [], "note": "no forum topics registered yet in this chat"}`
+		}
+		type topicEntry struct {
+			ThreadID int    `json:"thread_id"`
+			Name     string `json:"name"`
+		}
+		var list []topicEntry
+		for threadID, name := range topics {
+			list = append(list, topicEntry{ThreadID: threadID, Name: name})
+		}
+		data, _ := json.Marshal(map[string]interface{}{
+			"topics": list,
+			"count":  len(list),
+		})
+		return string(data)
+
 	default:
 		return "Unknown action."
 	}
@@ -2038,8 +2137,24 @@ func extractPRNumber(history []memory.Message, prompt string) int {
 	return 0
 }
 
+// sendReply sends a reply. If ctx carries a forum thread ID it sends inside that thread.
 func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {
+	b.sendReplyCtx(context.Background(), chatID, replyToMsgID, text)
+}
+
+func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, text string) {
 	text = toTelegramMarkdown(cleanNoEmojis(text))
+
+	threadID := 0
+	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
+		threadID = v.(int)
+	}
+
+	if threadID != 0 {
+		b.sendViaThreadAPI(ctx, chatID, threadID, replyToMsgID, text)
+		return
+	}
+
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
 	if replyToMsgID > 0 {
@@ -2047,14 +2162,29 @@ func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {
 	}
 	_, err := b.api.Send(msg)
 	if err != nil {
-		// Fallback without parse mode if markdown fails
 		msg.ParseMode = ""
 		_, _ = b.api.Send(msg)
 	}
 }
 
+// sendSimpleMessage sends without replying to a specific message. Thread-aware via ctx.
 func (b *Bot) sendSimpleMessage(chatID int64, text string) {
+	b.sendSimpleMessageCtx(context.Background(), chatID, text)
+}
+
+func (b *Bot) sendSimpleMessageCtx(ctx context.Context, chatID int64, text string) {
 	text = toTelegramMarkdown(cleanNoEmojis(text))
+
+	threadID := 0
+	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
+		threadID = v.(int)
+	}
+
+	if threadID != 0 {
+		b.sendViaThreadAPI(ctx, chatID, threadID, 0, text)
+		return
+	}
+
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
 	_, err := b.api.Send(msg)
@@ -2063,6 +2193,26 @@ func (b *Bot) sendSimpleMessage(chatID int64, text string) {
 		_, _ = b.api.Send(msg)
 	}
 }
+
+// sendViaThreadAPI sends a message into a specific Telegram forum thread using
+// the raw MakeRequest path, since tgbotapi v5.5.1 BaseChat lacks MessageThreadID.
+func (b *Bot) sendViaThreadAPI(_ context.Context, chatID int64, threadID int, replyToMsgID int, text string) {
+	params := tgbotapi.Params{}
+	params.AddNonZero64("chat_id", chatID)
+	params.AddNonEmpty("text", text)
+	params.AddNonEmpty("parse_mode", "Markdown")
+	params.AddNonZero("message_thread_id", threadID)
+	if replyToMsgID > 0 {
+		params.AddNonZero("reply_to_message_id", replyToMsgID)
+	}
+	_, err := b.api.MakeRequest("sendMessage", params)
+	if err != nil {
+		// Fallback: retry without parse mode
+		params["parse_mode"] = ""
+		_, _ = b.api.MakeRequest("sendMessage", params)
+	}
+}
+
 
 func (b *Bot) sendChatAction(chatID int64, action string) {
 	chatAction := tgbotapi.NewChatAction(chatID, action)
