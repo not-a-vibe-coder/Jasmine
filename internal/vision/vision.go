@@ -41,7 +41,7 @@ func (s *Service) PerceiveImage(ctx context.Context, imageBytes []byte, mimeType
 	// 0. Instant Deterministic QR Code Detection (pure Go, 100% precision)
 	var qrPrefix string
 	if qrData, err := DecodeQRCode(imageBytes); err == nil && qrData != "" {
-		qrPrefix = fmt.Sprintf("[Deterministic QR Code Decoded: \"%s\"]\n\n", qrData)
+		qrPrefix = FormatQRPerception(qrData) + "\n\n"
 	}
 
 	// 1. Primary: Gemini Vision (2.5 Flash)
