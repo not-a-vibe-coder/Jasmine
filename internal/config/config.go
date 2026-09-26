@@ -44,6 +44,7 @@ type Config struct {
 	// GitHub
 	GithubPAT      string
 	GithubUsername string
+	PersonalEmail  string
 
 	// Search & Analytics & Vision
 	TavilyAPIKey   string
@@ -81,6 +82,7 @@ func LoadConfig() (*Config, error) {
 		MonadRPCURL:         os.Getenv("MONAD_RPC_URL"),
 		GithubPAT:           os.Getenv("GITHUB_PAT"),
 		GithubUsername:      os.Getenv("GITHUB_USERNAME"),
+		PersonalEmail:       os.Getenv("PERSONAL_EMAIL"),
 		TavilyAPIKey:        os.Getenv("TAVILY_API_KEY"),
 		CodexIOAPIKey:       os.Getenv("CODEX_IO_API_KEY"),
 		GeminiAPIKey:        os.Getenv("GEMINI_API_KEY"),

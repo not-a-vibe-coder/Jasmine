@@ -534,11 +534,13 @@ func (b *Bot) executeToolCall(
 			return res.Message
 		}
 
-	case "github_view_repo":
+	case "github_inspect_project", "github_view_repo":
 		var args struct {
-			Repo   string `json:"repo"`
-			Path   string `json:"path"`
-			Branch string `json:"branch"`
+			Repo      string `json:"repo"`
+			View      string `json:"view"`
+			Path      string `json:"path"`
+			Branch    string `json:"branch"`
+			CustomPAT string `json:"custom_pat"`
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
 		if args.Repo == "" {
@@ -549,32 +551,78 @@ func (b *Bot) executeToolCall(
 			return fmt.Sprintf("Invalid repo format: %v", err)
 		}
 
-		if args.Path == "" {
-			// List files in repo root
-			files, err := b.github.ListDirectory(ctx, owner, repoName, "", args.Branch)
+		view := strings.ToLower(strings.TrimSpace(args.View))
+		switch view {
+		case "actions", "workflow", "runs", "ci":
+			runs, err := b.github.GetWorkflowRuns(ctx, owner, repoName, args.CustomPAT)
+			if err != nil {
+				return fmt.Sprintf("Couldn't fetch workflow runs for '%s/%s': %v", owner, repoName, err)
+			}
+			return github.FormatWorkflowRuns(owner, repoName, runs)
+
+		case "releases", "release", "tags":
+			releases, err := b.github.GetReleases(ctx, owner, repoName, args.CustomPAT)
+			if err != nil {
+				return fmt.Sprintf("Couldn't fetch releases for '%s/%s': %v", owner, repoName, err)
+			}
+			return github.FormatReleases(owner, repoName, releases)
+
+		case "commits", "history":
+			commits, err := b.github.GetCommits(ctx, owner, repoName, args.Branch, args.CustomPAT)
+			if err != nil {
+				return fmt.Sprintf("Couldn't fetch commits for '%s/%s': %v", owner, repoName, err)
+			}
+			return github.FormatCommits(owner, repoName, commits)
+
+		case "issues", "issue":
+			issues, err := b.github.GetIssues(ctx, owner, repoName, args.CustomPAT)
+			if err != nil {
+				return fmt.Sprintf("Couldn't fetch issues for '%s/%s': %v", owner, repoName, err)
+			}
+			return github.FormatIssues(owner, repoName, issues)
+
+		case "overview", "stats", "summary", "repo":
+			overview, err := b.github.GetRepoOverview(ctx, owner, repoName, args.CustomPAT)
+			if err != nil {
+				return fmt.Sprintf("Couldn't fetch repo overview for '%s/%s': %v", owner, repoName, err)
+			}
+			return github.FormatRepoOverview(overview)
+
+		default:
+			// View a specific file if view == "file" or if path is explicitly set
+			if view == "file" || (args.Path != "" && view != "files" && view != "dir") {
+				targetPath := args.Path
+				if targetPath == "" {
+					targetPath = "README.md"
+				}
+				_, content, err := b.github.GetFileWithToken(ctx, owner, repoName, targetPath, args.Branch, args.CustomPAT)
+				if err != nil {
+					// If file not found, list directory to help user
+					files, listErr := b.github.ListDirectoryWithToken(ctx, owner, repoName, filepath.Dir(targetPath), args.Branch, args.CustomPAT)
+					if listErr == nil && len(files) > 0 {
+						return fmt.Sprintf("File '%s' was not found in '%s/%s'. Files in that folder: %s", targetPath, owner, repoName, strings.Join(files, ", "))
+					}
+					return fmt.Sprintf("Couldn't read '%s' from '%s/%s': %v", targetPath, owner, repoName, err)
+				}
+
+				preview := content
+				if len(preview) > 1500 {
+					preview = preview[:1500] + "\n... (truncated preview)"
+				}
+				return fmt.Sprintf("📄 **%s/%s (%s):**\n\n```markdown\n%s\n```", owner, repoName, targetPath, preview)
+			}
+
+			// List files in repo root or directory
+			files, err := b.github.ListDirectoryWithToken(ctx, owner, repoName, args.Path, args.Branch, args.CustomPAT)
 			if err != nil {
 				return fmt.Sprintf("Couldn't inspect repo '%s/%s': %v", owner, repoName, err)
 			}
-			return fmt.Sprintf("📂 Repository **%s/%s** root files:\n• %s", owner, repoName, strings.Join(files, "\n• "))
-		}
-
-		// View specific file
-		_, content, err := b.github.GetFile(ctx, owner, repoName, args.Path, args.Branch)
-		if err != nil {
-			// If file not found, list directory to help user
-			files, listErr := b.github.ListDirectory(ctx, owner, repoName, filepath.Dir(args.Path), args.Branch)
-			if listErr == nil && len(files) > 0 {
-				return fmt.Sprintf("File '%s' was not found in '%s/%s'. Files in that folder: %s", args.Path, owner, repoName, strings.Join(files, ", "))
+			dirName := args.Path
+			if dirName == "" {
+				dirName = "root"
 			}
-			return fmt.Sprintf("Couldn't read '%s' from '%s/%s': %v", args.Path, owner, repoName, err)
+			return fmt.Sprintf("📂 Repository **%s/%s** (%s):\n• %s", owner, repoName, dirName, strings.Join(files, "\n• "))
 		}
-
-		// Truncate if huge
-		preview := content
-		if len(preview) > 1500 {
-			preview = preview[:1500] + "\n... (truncated preview)"
-		}
-		return fmt.Sprintf("📄 **%s/%s (%s):**\n\n```markdown\n%s\n```", owner, repoName, args.Path, preview)
 
 	case "github_edit_file":
 		if !isOwner {
@@ -586,6 +634,9 @@ func (b *Bot) executeToolCall(
 			Path        string `json:"path"`
 			Instruction string `json:"instruction"`
 			PushToMain  bool   `json:"push_to_main"`
+			CustomPAT   string `json:"custom_pat"`
+			GitName     string `json:"git_name"`
+			GitEmail    string `json:"git_email"`
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
 		if args.Repo == "" || args.Instruction == "" {
@@ -603,16 +654,16 @@ func (b *Bot) executeToolCall(
 		}
 
 		// 1. Resolve default branch
-		defaultBranch, err := b.github.GetDefaultBranch(ctx, owner, repoName)
+		defaultBranch, err := b.github.GetDefaultBranchWithToken(ctx, owner, repoName, args.CustomPAT)
 		if err != nil {
 			return fmt.Sprintf("Couldn't access repo '%s/%s': %v", owner, repoName, err)
 		}
 
 		// 2. Fetch existing file
-		fc, currentContent, err := b.github.GetFile(ctx, owner, repoName, filePath, defaultBranch)
+		fc, currentContent, err := b.github.GetFileWithToken(ctx, owner, repoName, filePath, defaultBranch, args.CustomPAT)
 		if err != nil {
 			// Check if file doesn't exist, list available files
-			files, listErr := b.github.ListDirectory(ctx, owner, repoName, "", defaultBranch)
+			files, listErr := b.github.ListDirectoryWithToken(ctx, owner, repoName, "", defaultBranch, args.CustomPAT)
 			if listErr == nil && len(files) > 0 {
 				return fmt.Sprintf("File '%s' was not found in '%s/%s'. Found these files in repo root: %s. Would you like me to create '%s' from scratch or edit another file?", filePath, owner, repoName, strings.Join(files, ", "), filePath)
 			}
@@ -633,8 +684,18 @@ func (b *Bot) executeToolCall(
 		}
 
 		// 5. Commit & Push (Direct to main or Open PR)
+		commitOpts := github.CommitOptions{
+			Message:     fmt.Sprintf("Update %s via Shipp", filePath),
+			Content:     refactored,
+			FileSHA:     fc.SHA,
+			CustomPAT:   args.CustomPAT,
+			AuthorName:  args.GitName,
+			AuthorEmail: args.GitEmail,
+		}
+
 		if args.PushToMain {
-			commitURL, err := b.github.CommitFile(ctx, owner, repoName, filePath, defaultBranch, fmt.Sprintf("Update %s via Shipp", filePath), refactored, fc.SHA)
+			commitOpts.Branch = defaultBranch
+			commitURL, err := b.github.CommitFileWithOptions(ctx, owner, repoName, filePath, commitOpts)
 			if err != nil {
 				return fmt.Sprintf("Commit to %s failed: %v", defaultBranch, err)
 			}
@@ -643,16 +704,17 @@ func (b *Bot) executeToolCall(
 
 		// Safe PR-first default
 		branchName := fmt.Sprintf("shipp/update-%s-%d", strings.ToLower(filepath.Base(filePath)), time.Now().Unix())
-		if err := b.github.CreateBranch(ctx, owner, repoName, branchName, defaultBranch); err != nil {
+		if err := b.github.CreateBranchWithToken(ctx, owner, repoName, branchName, defaultBranch, args.CustomPAT); err != nil {
 			return fmt.Sprintf("Failed to create branch '%s': %v", branchName, err)
 		}
 
-		_, err = b.github.CommitFile(ctx, owner, repoName, filePath, branchName, fmt.Sprintf("Update %s via Shipp", filePath), refactored, fc.SHA)
+		commitOpts.Branch = branchName
+		_, err = b.github.CommitFileWithOptions(ctx, owner, repoName, filePath, commitOpts)
 		if err != nil {
 			return fmt.Sprintf("Failed to commit to branch '%s': %v", branchName, err)
 		}
 
-		prURL, prNum, err := b.github.CreatePullRequest(
+		prURL, prNum, err := b.github.CreatePullRequestWithToken(
 			ctx,
 			owner,
 			repoName,
@@ -660,6 +722,7 @@ func (b *Bot) executeToolCall(
 			fmt.Sprintf("Automated update requested by @%s:\n\n> %s", username, args.Instruction),
 			branchName,
 			defaultBranch,
+			args.CustomPAT,
 		)
 		if err != nil {
 			return fmt.Sprintf("Committed to branch '%s', but failed to open PR: %v", branchName, err)
@@ -673,8 +736,9 @@ func (b *Bot) executeToolCall(
 		}
 
 		var args struct {
-			Repo     string `json:"repo"`
-			PRNumber int    `json:"pr_number"`
+			Repo      string `json:"repo"`
+			PRNumber  int    `json:"pr_number"`
+			CustomPAT string `json:"custom_pat"`
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
 		if args.Repo == "" || args.PRNumber <= 0 {
@@ -686,7 +750,7 @@ func (b *Bot) executeToolCall(
 			return fmt.Sprintf("Invalid repo format: %v", err)
 		}
 
-		res, err := b.github.MergePullRequest(ctx, owner, repoName, args.PRNumber)
+		res, err := b.github.MergePullRequestWithToken(ctx, owner, repoName, args.PRNumber, args.CustomPAT)
 		if err != nil {
 			return fmt.Sprintf("❌ Merge failed: %v", err)
 		}

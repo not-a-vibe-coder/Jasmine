@@ -159,8 +159,8 @@ func (c *Client) buildTools() []ToolDefinition {
 		{
 			Type: "function",
 			Function: FunctionDefinition{
-				Name:        "github_view_repo",
-				Description: "Inspect a GitHub repository, view file contents (e.g. README.md, code files), or list repository files. Use whenever asked to check, view, or review a GitHub repo or file.",
+				Name:        "github_inspect_project",
+				Description: "Inspect a GitHub repository's workflow runs (actions), releases, recent commits, issues, file contents, or repository overview. Use whenever asked about GitHub Actions status, releases, commits, issues, or repo details.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -168,16 +168,24 @@ func (c *Client) buildTools() []ToolDefinition {
 							"type":        "string",
 							"description": "The repository in 'owner/repo' format (e.g. 'davidnzube101/shipp')",
 						},
+						"view": map[string]interface{}{
+							"type":        "string",
+							"description": "What to inspect: 'actions' (workflow runs/CI), 'releases' (published versions & assets), 'commits' (recent commit history), 'issues' (open/closed issues), 'file' (specific file content), 'files' (list root files), or 'overview' (repo stats)",
+						},
 						"path": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional file path to view (e.g. 'README.md', 'cmd/bot/main.go'). Leave empty to list files in repo root.",
+							"description": "Optional file path if view is 'file' (e.g. 'README.md', 'cmd/bot/main.go')",
 						},
 						"branch": map[string]interface{}{
 							"type":        "string",
 							"description": "Optional branch name. Defaults to the repository's default branch.",
 						},
+						"custom_pat": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional custom GitHub Personal Access Token (PAT) if user provided one.",
+						},
 					},
-					"required": []string{"repo"},
+					"required": []string{"repo", "view"},
 				},
 			},
 		},
@@ -185,7 +193,7 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "github_edit_file",
-				Description: "Analyze, rewrite, edit, or refactor a file (e.g. README.md, documentation, source code) on a GitHub repository. Safely creates a branch and opens a Pull Request by default. If the user explicitly asks to 'push to main' or 'commit directly to main', set push_to_main to true.",
+				Description: "Analyze, rewrite, edit, or refactor a file (e.g. README.md, documentation, source code) on a GitHub repository. Safely creates a branch and opens a Pull Request by default. If the user explicitly asks to 'push to main' or 'commit directly to main', set push_to_main to true. Supports optional custom PAT and custom git credentials.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -204,6 +212,18 @@ func (c *Client) buildTools() []ToolDefinition {
 						"push_to_main": map[string]interface{}{
 							"type":        "boolean",
 							"description": "Set to true ONLY if user explicitly requested to push or commit directly to the default branch (main). Defaults to false (safe PR creation).",
+						},
+						"custom_pat": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional custom GitHub PAT provided by the user.",
+						},
+						"git_name": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional custom author name (git config user.name). If omitted, defaults to 'Shipp'.",
+						},
+						"git_email": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional custom author email (git config user.email). If omitted, defaults to Shipp's personal email.",
 						},
 					},
 					"required": []string{"repo", "instruction"},
@@ -225,6 +245,10 @@ func (c *Client) buildTools() []ToolDefinition {
 						"pr_number": map[string]interface{}{
 							"type":        "integer",
 							"description": "The Pull Request number to merge (e.g. 4)",
+						},
+						"custom_pat": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional custom GitHub PAT provided by the user.",
 						},
 					},
 					"required": []string{"repo", "pr_number"},
@@ -274,10 +298,12 @@ Core Personality & Rules:
 - Sound like a cool, witty friend reacting in the Telegram chat, NOT an essay writer or formal AI.
 - Highlight the key visual facts (numbers, profits, coin, colors, what it actually is) with quick banter.
 12. If asked how you perceive images or whether Gemini has access to memory: You (Groq) are the brain and conversational voice with full access to chat memory, history, and user relationships. Gemini operates solely as your objective "eyes" to perceive visual facts, OCR text, and colors, but Gemini has zero access to memories or chat history.
-13. GitHub Code Analysis & Editing:
-- You have tools to view repositories ('github_view_repo'), edit code/docs ('github_edit_file'), and merge PRs ('github_merge_pr').
+13. GitHub Code Analysis, Project Intelligence & Editing:
+- You have tools to inspect projects ('github_inspect_project'), edit code/docs ('github_edit_file'), and merge PRs ('github_merge_pr').
+- Project Intelligence: You can check GitHub Actions workflow runs (CI status), releases & download assets, recent commits, open/closed issues, and project overviews. Answer questions about these naturally and concisely.
 - Safe PR-first default: When asked to edit a repo, default to opening a Pull Request unless the user explicitly asks to "push to main" or "commit directly to main".
-- If it's ambiguous or you feel like asking, feel free to ask naturally: "Want me to open a PR for you to review first, or push straight to main?"
+- If it's ambiguous, feel free to ask naturally: "Want me to open a PR for you to review first, or push straight to main?"
+- Custom Credentials: If the user provides a custom PAT, custom name, or custom email to use for the repo, pass them into custom_pat, git_name, and git_email. Otherwise, leave them empty to use your default Shipp identity.
 - If the file, title, or section the user asked to change does NOT exist in the repo, explain factually what you saw in the repo and ask for clarification rather than making assumptions or hallucinating.
 - Only bot owners (@skipp_dev, @shigarakiXBT) can authorize code edits, commits, and PR merges.
 14. QR Code Intelligence:

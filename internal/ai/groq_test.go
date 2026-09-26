@@ -33,16 +33,16 @@ func TestToolsDefinition(t *testing.T) {
 	tools := client.buildTools()
 
 	expectedTools := map[string]bool{
-		"get_wallet_address": false,
-		"get_balances":       false,
-		"send_crypto":        false,
-		"summarize_context":  false,
-		"clear_context":      false,
-		"web_search":         false,
-		"analyze_token":      false,
-		"github_view_repo":   false,
-		"github_edit_file":   false,
-		"github_merge_pr":    false,
+		"get_wallet_address":     false,
+		"get_balances":           false,
+		"send_crypto":            false,
+		"summarize_context":      false,
+		"clear_context":          false,
+		"web_search":             false,
+		"analyze_token":          false,
+		"github_inspect_project": false,
+		"github_edit_file":       false,
+		"github_merge_pr":        false,
 	}
 
 	for _, tool := range tools {

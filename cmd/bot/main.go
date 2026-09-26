@@ -76,8 +76,8 @@ func main() {
 	visionSvc := vision.NewService(cfg.GeminiAPIKey)
 	log.Printf("[Main] Vision Service initialized (Gemini Flash Multimodal active)")
 
-	githubSvc := github.NewService(cfg.GithubPAT, cfg.GithubUsername)
-	log.Printf("[Main] GitHub Service initialized for user @%s", cfg.GithubUsername)
+	githubSvc := github.NewService(cfg.GithubPAT, cfg.GithubUsername, cfg.PersonalEmail)
+	log.Printf("[Main] GitHub Service initialized for user @%s (Email: %s)", cfg.GithubUsername, cfg.PersonalEmail)
 
 	// 5. Initialize Telegram Bot
 	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc)

@@ -13,10 +13,11 @@ import (
 )
 
 type Service struct {
-	token      string
-	username   string
-	baseURL    string
-	httpClient *http.Client
+	token        string
+	username     string
+	defaultEmail string
+	baseURL      string
+	httpClient   *http.Client
 }
 
 type FileContent struct {
@@ -28,11 +29,22 @@ type FileContent struct {
 	Content string `json:"content"` // Base64 encoded
 }
 
-func NewService(token, username string) *Service {
+type CommitOptions struct {
+	Branch      string
+	Message     string
+	Content     string
+	FileSHA     string
+	CustomPAT   string
+	AuthorName  string
+	AuthorEmail string
+}
+
+func NewService(token, username, defaultEmail string) *Service {
 	return &Service{
-		token:    token,
-		username: username,
-		baseURL:  "https://api.github.com",
+		token:        token,
+		username:     username,
+		defaultEmail: defaultEmail,
+		baseURL:      "https://api.github.com",
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -61,7 +73,7 @@ func (s *Service) ParseRepoSlug(input string) (string, string, error) {
 	return "", "", fmt.Errorf("invalid repository format '%s'. Please specify 'owner/repo'", input)
 }
 
-func (s *Service) makeRequest(ctx context.Context, method, url string, body interface{}) (*http.Response, error) {
+func (s *Service) makeRequestWithToken(ctx context.Context, method, url string, body interface{}, customToken string) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		jsonBytes, err := json.Marshal(body)
@@ -77,8 +89,12 @@ func (s *Service) makeRequest(ctx context.Context, method, url string, body inte
 	}
 
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if s.token != "" {
-		req.Header.Set("Authorization", "Bearer "+s.token)
+	tokenToUse := s.token
+	if customToken != "" {
+		tokenToUse = customToken
+	}
+	if tokenToUse != "" {
+		req.Header.Set("Authorization", "Bearer "+tokenToUse)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -87,17 +103,25 @@ func (s *Service) makeRequest(ctx context.Context, method, url string, body inte
 	return s.httpClient.Do(req)
 }
 
+func (s *Service) makeRequest(ctx context.Context, method, url string, body interface{}) (*http.Response, error) {
+	return s.makeRequestWithToken(ctx, method, url, body, "")
+}
+
 // GetDefaultBranch retrieves the default branch (e.g. main, master) for a repository
 func (s *Service) GetDefaultBranch(ctx context.Context, owner, repo string) (string, error) {
+	return s.GetDefaultBranchWithToken(ctx, owner, repo, "")
+}
+
+func (s *Service) GetDefaultBranchWithToken(ctx context.Context, owner, repo, customToken string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s", s.baseURL, owner, repo)
-	resp, err := s.makeRequest(ctx, http.MethodGet, url, nil)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("repository '%s/%s' not found or inaccessible (check permissions for @%s)", owner, repo, s.username)
+		return "", fmt.Errorf("repository '%s/%s' not found or inaccessible", owner, repo)
 	}
 	if resp.StatusCode != http.StatusOK {
 		respBytes, _ := io.ReadAll(resp.Body)
@@ -118,12 +142,16 @@ func (s *Service) GetDefaultBranch(ctx context.Context, owner, repo string) (str
 
 // GetFile retrieves a file's content and SHA from a repository
 func (s *Service) GetFile(ctx context.Context, owner, repo, path, ref string) (*FileContent, string, error) {
+	return s.GetFileWithToken(ctx, owner, repo, path, ref, "")
+}
+
+func (s *Service) GetFileWithToken(ctx context.Context, owner, repo, path, ref, customToken string) (*FileContent, string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", s.baseURL, owner, repo, strings.TrimPrefix(path, "/"))
 	if ref != "" {
 		url += "?ref=" + ref
 	}
 
-	resp, err := s.makeRequest(ctx, http.MethodGet, url, nil)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
 	if err != nil {
 		return nil, "", err
 	}
@@ -154,12 +182,16 @@ func (s *Service) GetFile(ctx context.Context, owner, repo, path, ref string) (*
 
 // ListDirectory lists file names in a repository path
 func (s *Service) ListDirectory(ctx context.Context, owner, repo, path, ref string) ([]string, error) {
+	return s.ListDirectoryWithToken(ctx, owner, repo, path, ref, "")
+}
+
+func (s *Service) ListDirectoryWithToken(ctx context.Context, owner, repo, path, ref, customToken string) ([]string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", s.baseURL, owner, repo, strings.TrimPrefix(path, "/"))
 	if ref != "" {
 		url += "?ref=" + ref
 	}
 
-	resp, err := s.makeRequest(ctx, http.MethodGet, url, nil)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
 	if err != nil {
 		return nil, err
 	}
@@ -190,8 +222,12 @@ func (s *Service) ListDirectory(ctx context.Context, owner, repo, path, ref stri
 
 // GetBranchRef gets the latest commit SHA of a branch
 func (s *Service) GetBranchRef(ctx context.Context, owner, repo, branch string) (string, error) {
+	return s.GetBranchRefWithToken(ctx, owner, repo, branch, "")
+}
+
+func (s *Service) GetBranchRefWithToken(ctx context.Context, owner, repo, branch, customToken string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/git/ref/heads/%s", s.baseURL, owner, repo, branch)
-	resp, err := s.makeRequest(ctx, http.MethodGet, url, nil)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
 	if err != nil {
 		return "", err
 	}
@@ -215,7 +251,11 @@ func (s *Service) GetBranchRef(ctx context.Context, owner, repo, branch string) 
 
 // CreateBranch creates a new branch pointing to the baseBranch commit SHA
 func (s *Service) CreateBranch(ctx context.Context, owner, repo, newBranch, baseBranch string) error {
-	baseSHA, err := s.GetBranchRef(ctx, owner, repo, baseBranch)
+	return s.CreateBranchWithToken(ctx, owner, repo, newBranch, baseBranch, "")
+}
+
+func (s *Service) CreateBranchWithToken(ctx context.Context, owner, repo, newBranch, baseBranch, customToken string) error {
+	baseSHA, err := s.GetBranchRefWithToken(ctx, owner, repo, baseBranch, customToken)
 	if err != nil {
 		return fmt.Errorf("failed to resolve base branch '%s': %w", baseBranch, err)
 	}
@@ -226,7 +266,7 @@ func (s *Service) CreateBranch(ctx context.Context, owner, repo, newBranch, base
 		"sha": baseSHA,
 	}
 
-	resp, err := s.makeRequest(ctx, http.MethodPost, url, payload)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodPost, url, payload, customToken)
 	if err != nil {
 		return err
 	}
@@ -240,20 +280,38 @@ func (s *Service) CreateBranch(ctx context.Context, owner, repo, newBranch, base
 	return nil
 }
 
-// CommitFile commits a file update or creation to the specified branch
-func (s *Service) CommitFile(ctx context.Context, owner, repo, path, branch, message, content, fileSHA string) (string, error) {
+// CommitFile commits a file update or creation with optional custom author/committer credentials
+func (s *Service) CommitFileWithOptions(ctx context.Context, owner, repo, path string, opts CommitOptions) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", s.baseURL, owner, repo, strings.TrimPrefix(path, "/"))
 
-	payload := map[string]interface{}{
-		"message": message,
-		"content": base64.StdEncoding.EncodeToString([]byte(content)),
-		"branch":  branch,
-	}
-	if fileSHA != "" {
-		payload["sha"] = fileSHA
+	authorName := strings.TrimSpace(opts.AuthorName)
+	if authorName == "" {
+		authorName = "Shipp" // Strictly "Shipp" by default
 	}
 
-	resp, err := s.makeRequest(ctx, http.MethodPut, url, payload)
+	authorEmail := strings.TrimSpace(opts.AuthorEmail)
+	if authorEmail == "" {
+		authorEmail = s.defaultEmail
+	}
+
+	payload := map[string]interface{}{
+		"message": opts.Message,
+		"content": base64.StdEncoding.EncodeToString([]byte(opts.Content)),
+		"branch":  opts.Branch,
+		"committer": map[string]string{
+			"name":  authorName,
+			"email": authorEmail,
+		},
+		"author": map[string]string{
+			"name":  authorName,
+			"email": authorEmail,
+		},
+	}
+	if opts.FileSHA != "" {
+		payload["sha"] = opts.FileSHA
+	}
+
+	resp, err := s.makeRequestWithToken(ctx, http.MethodPut, url, payload, opts.CustomPAT)
 	if err != nil {
 		return "", err
 	}
@@ -277,8 +335,22 @@ func (s *Service) CommitFile(ctx context.Context, owner, repo, path, branch, mes
 	return commitResp.Content.HTMLURL, nil
 }
 
+// CommitFile is backward-compatible wrapper calling CommitFileWithOptions with defaults
+func (s *Service) CommitFile(ctx context.Context, owner, repo, path, branch, message, content, fileSHA string) (string, error) {
+	return s.CommitFileWithOptions(ctx, owner, repo, path, CommitOptions{
+		Branch:  branch,
+		Message: message,
+		Content: content,
+		FileSHA: fileSHA,
+	})
+}
+
 // CreatePullRequest opens a Pull Request on GitHub
 func (s *Service) CreatePullRequest(ctx context.Context, owner, repo, title, body, headBranch, baseBranch string) (string, int, error) {
+	return s.CreatePullRequestWithToken(ctx, owner, repo, title, body, headBranch, baseBranch, "")
+}
+
+func (s *Service) CreatePullRequestWithToken(ctx context.Context, owner, repo, title, body, headBranch, baseBranch, customToken string) (string, int, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls", s.baseURL, owner, repo)
 
 	payload := map[string]string{
@@ -288,7 +360,7 @@ func (s *Service) CreatePullRequest(ctx context.Context, owner, repo, title, bod
 		"base":  baseBranch,
 	}
 
-	resp, err := s.makeRequest(ctx, http.MethodPost, url, payload)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodPost, url, payload, customToken)
 	if err != nil {
 		return "", 0, err
 	}
@@ -312,14 +384,18 @@ func (s *Service) CreatePullRequest(ctx context.Context, owner, repo, title, bod
 
 // MergePullRequest merges an open Pull Request on GitHub
 func (s *Service) MergePullRequest(ctx context.Context, owner, repo string, pullNumber int) (string, error) {
+	return s.MergePullRequestWithToken(ctx, owner, repo, pullNumber, "")
+}
+
+func (s *Service) MergePullRequestWithToken(ctx context.Context, owner, repo string, pullNumber int, customToken string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", s.baseURL, owner, repo, pullNumber)
 
 	payload := map[string]string{
-		"commit_title":   fmt.Sprintf("Merge PR #%d via Shipp Bot", pullNumber),
-		"merge_method":   "squash",
+		"commit_title": fmt.Sprintf("Merge PR #%d via Shipp Bot", pullNumber),
+		"merge_method": "squash",
 	}
 
-	resp, err := s.makeRequest(ctx, http.MethodPut, url, payload)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodPut, url, payload, customToken)
 	if err != nil {
 		return "", err
 	}
@@ -342,4 +418,357 @@ func (s *Service) MergePullRequest(ctx context.Context, owner, repo string, pull
 	}
 
 	return fmt.Sprintf("PR #%d successfully merged (SHA: %s)", pullNumber, mergeResp.SHA[:7]), nil
+}
+
+// -------------------------------------------------------------
+// Expanded GitHub Project Intelligence (Actions, Releases, Commits, Issues)
+// -------------------------------------------------------------
+
+type WorkflowRun struct {
+	ID         int64     `json:"id"`
+	Name       string    `json:"name"`
+	HeadBranch string    `json:"head_branch"`
+	HeadSHA    string    `json:"head_sha"`
+	Status     string    `json:"status"`     // queued, in_progress, completed
+	Conclusion string    `json:"conclusion"` // success, failure, neutral, cancelled, timed_out
+	HTMLURL    string    `json:"html_url"`
+	Event      string    `json:"event"`
+	CreatedAt  time.Time `json:"created_at"`
+	Actor      struct {
+		Login string `json:"login"`
+	} `json:"actor"`
+	HeadCommit struct {
+		Message string `json:"message"`
+	} `json:"head_commit"`
+}
+
+func (s *Service) GetWorkflowRuns(ctx context.Context, owner, repo, customToken string) ([]WorkflowRun, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/actions/runs?per_page=5", s.baseURL, owner, repo)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get workflow runs (%d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	var data struct {
+		TotalCount   int           `json:"total_count"`
+		WorkflowRuns []WorkflowRun `json:"workflow_runs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+
+	return data.WorkflowRuns, nil
+}
+
+type Release struct {
+	ID          int64      `json:"id"`
+	TagName     string     `json:"tag_name"`
+	Name        string     `json:"name"`
+	Body        string     `json:"body"`
+	HTMLURL     string     `json:"html_url"`
+	Draft       bool       `json:"draft"`
+	Prerelease  bool       `json:"prerelease"`
+	PublishedAt *time.Time `json:"published_at"`
+	Author      struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	Assets []struct {
+		Name               string `json:"name"`
+		Size               int64  `json:"size"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+func (s *Service) GetReleases(ctx context.Context, owner, repo, customToken string) ([]Release, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=5", s.baseURL, owner, repo)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get releases (%d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	var data []Release
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+type CommitInfo struct {
+	SHA     string `json:"sha"`
+	HTMLURL string `json:"html_url"`
+	Commit  struct {
+		Message string `json:"message"`
+		Author  struct {
+			Name string    `json:"name"`
+			Date time.Time `json:"date"`
+		} `json:"author"`
+	} `json:"commit"`
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
+func (s *Service) GetCommits(ctx context.Context, owner, repo, branch, customToken string) ([]CommitInfo, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/commits?per_page=5", s.baseURL, owner, repo)
+	if branch != "" {
+		url += "&sha=" + branch
+	}
+
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get commits (%d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	var data []CommitInfo
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+type IssueInfo struct {
+	Number      int         `json:"number"`
+	Title       string      `json:"title"`
+	State       string      `json:"state"`
+	HTMLURL     string      `json:"html_url"`
+	CreatedAt   time.Time   `json:"created_at"`
+	PullRequest interface{} `json:"pull_request,omitempty"`
+	User        struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+func (s *Service) GetIssues(ctx context.Context, owner, repo, customToken string) ([]IssueInfo, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/issues?state=all&per_page=10", s.baseURL, owner, repo)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get issues (%d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	var raw []IssueInfo
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+
+	// Filter out PRs
+	var issues []IssueInfo
+	for _, it := range raw {
+		if it.PullRequest == nil {
+			issues = append(issues, it)
+			if len(issues) >= 5 {
+				break
+			}
+		}
+	}
+
+	return issues, nil
+}
+
+type RepoOverview struct {
+	FullName      string `json:"full_name"`
+	Description   string `json:"description"`
+	HTMLURL       string `json:"html_url"`
+	DefaultBranch string `json:"default_branch"`
+	Language      string `json:"language"`
+	Stargazers    int    `json:"stargazers_count"`
+	Forks         int    `json:"forks_count"`
+	OpenIssues    int    `json:"open_issues_count"`
+	Visibility    string `json:"visibility"`
+}
+
+func (s *Service) GetRepoOverview(ctx context.Context, owner, repo, customToken string) (*RepoOverview, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s", s.baseURL, owner, repo)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get repo overview (%d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	var overview RepoOverview
+	if err := json.NewDecoder(resp.Body).Decode(&overview); err != nil {
+		return nil, err
+	}
+
+	return &overview, nil
+}
+
+// -------------------------------------------------------------
+// Formatters for Project Intelligence
+// -------------------------------------------------------------
+
+func FormatWorkflowRuns(owner, repo string, runs []WorkflowRun) string {
+	if len(runs) == 0 {
+		return fmt.Sprintf("No recent GitHub Actions workflow runs found on `%s/%s`.", owner, repo)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("⚡ **Recent GitHub Actions on `%s/%s`:**\n\n", owner, repo))
+	for _, r := range runs {
+		statusIcon := "⏳"
+		if r.Status == "completed" {
+			if r.Conclusion == "success" {
+				statusIcon = "✅"
+			} else if r.Conclusion == "failure" {
+				statusIcon = "❌"
+			} else {
+				statusIcon = "⚠️"
+			}
+		}
+
+		commitMsg := r.HeadCommit.Message
+		if len(commitMsg) > 50 {
+			commitMsg = commitMsg[:47] + "..."
+		}
+		commitMsg = strings.ReplaceAll(commitMsg, "\n", " ")
+
+		headSHA := r.HeadSHA
+		if len(headSHA) > 7 {
+			headSHA = headSHA[:7]
+		}
+
+		sb.WriteString(fmt.Sprintf("%s **%s** (`%s`)\n• Status: `%s` (%s) on `%s`\n• Commit: `%s` (%s) by @%s\n• [View Run](%s)\n\n",
+			statusIcon, r.Name, headSHA, r.Status, r.Conclusion, r.HeadBranch, commitMsg, headSHA, r.Actor.Login, r.HTMLURL))
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+func FormatReleases(owner, repo string, releases []Release) string {
+	if len(releases) == 0 {
+		return fmt.Sprintf("No releases published yet on `%s/%s`.", owner, repo)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🏷️ **Releases on `%s/%s`:**\n\n", owner, repo))
+	for _, rel := range releases {
+		name := rel.Name
+		if name == "" {
+			name = rel.TagName
+		}
+
+		pubDate := ""
+		if rel.PublishedAt != nil {
+			pubDate = rel.PublishedAt.Format("Jan 02, 2006")
+		}
+
+		bodyPreview := rel.Body
+		if len(bodyPreview) > 120 {
+			bodyPreview = bodyPreview[:117] + "..."
+		}
+		bodyPreview = strings.ReplaceAll(bodyPreview, "\n", " ")
+
+		sb.WriteString(fmt.Sprintf("📦 **%s** (`%s`) - %s\n• Notes: %s\n• Assets: %d file(s)\n• [View Release](%s)\n\n",
+			name, rel.TagName, pubDate, bodyPreview, len(rel.Assets), rel.HTMLURL))
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+func FormatCommits(owner, repo string, commits []CommitInfo) string {
+	if len(commits) == 0 {
+		return fmt.Sprintf("No commits found on `%s/%s`.", owner, repo)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📜 **Recent Commits on `%s/%s`:**\n\n", owner, repo))
+	for _, c := range commits {
+		shortSHA := c.SHA
+		if len(shortSHA) > 7 {
+			shortSHA = shortSHA[:7]
+		}
+
+		firstLine := strings.Split(c.Commit.Message, "\n")[0]
+		if len(firstLine) > 60 {
+			firstLine = firstLine[:57] + "..."
+		}
+
+		author := c.Commit.Author.Name
+		if c.Author.Login != "" {
+			author = "@" + c.Author.Login
+		}
+
+		sb.WriteString(fmt.Sprintf("• [`%s`](%s) %s *(by %s)*\n", shortSHA, c.HTMLURL, firstLine, author))
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+func FormatIssues(owner, repo string, issues []IssueInfo) string {
+	if len(issues) == 0 {
+		return fmt.Sprintf("No issues found on `%s/%s`.", owner, repo)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🐛 **Issues on `%s/%s`:**\n\n", owner, repo))
+	for _, it := range issues {
+		stateIcon := "🟢"
+		if it.State == "closed" {
+			stateIcon = "🔴"
+		}
+
+		var labels []string
+		for _, l := range it.Labels {
+			labels = append(labels, l.Name)
+		}
+		labelStr := ""
+		if len(labels) > 0 {
+			labelStr = fmt.Sprintf(" [%s]", strings.Join(labels, ", "))
+		}
+
+		sb.WriteString(fmt.Sprintf("%s **#%d** [%s]%s: %s *(by @%s)*\n  [View Issue](%s)\n\n",
+			stateIcon, it.Number, strings.ToUpper(it.State), labelStr, it.Title, it.User.Login, it.HTMLURL))
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+func FormatRepoOverview(overview *RepoOverview) string {
+	if overview == nil {
+		return "No repository details available."
+	}
+
+	return fmt.Sprintf("📦 **Repository Overview (%s)**:\n\n• Description: %s\n• Default Branch: `%s`\n• Primary Language: **%s**\n• Stars: ⭐ %d | Forks: 🍴 %d | Open Issues: 🐛 %d\n• Link: %s",
+		overview.FullName,
+		overview.Description,
+		overview.DefaultBranch,
+		overview.Language,
+		overview.Stargazers,
+		overview.Forks,
+		overview.OpenIssues,
+		overview.HTMLURL,
+	)
 }
