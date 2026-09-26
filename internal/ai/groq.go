@@ -20,19 +20,21 @@ const DefaultGroqURL = "https://api.groq.com/openai/v1/chat/completions"
 type Client struct {
 	apiKey     string
 	model      string
+	geminiKey  string
 	owners     []string
 	httpClient *http.Client
 	tools      []ToolDefinition
 }
 
-func NewClient(apiKey, model string, owners []string) *Client {
+func NewClient(apiKey, model, geminiKey string, owners []string) *Client {
 	if model == "" {
 		model = "qwen/qwen3.8-27b"
 	}
 	c := &Client{
-		apiKey: apiKey,
-		model:  model,
-		owners: owners,
+		apiKey:    apiKey,
+		model:     model,
+		geminiKey: geminiKey,
+		owners:    owners,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -301,7 +303,7 @@ func (c *Client) buildTools() []ToolDefinition {
 	}
 }
 
-func (c *Client) systemPrompt(senderUsername string, isOwner bool) string {
+func (c *Client) systemPrompt(senderUsername string, isOwner bool, profile *memory.UserProfile) string {
 	ownersStr := strings.Join(c.owners, ", @")
 	if ownersStr != "" {
 		ownersStr = "@" + ownersStr
@@ -309,73 +311,79 @@ func (c *Client) systemPrompt(senderUsername string, isOwner bool) string {
 
 	roleNote := fmt.Sprintf("Current speaker is @%s.", senderUsername)
 	if isOwner {
-		roleNote += " This user is one of your OWNERS/CREATORS. You have high respect for them."
+		roleNote += " This user is one of your OWNERS/CREATORS. You ride with them, but you keep it 100% real with tough love and zero kissing up."
 	} else {
-		roleNote += " This user is a group member (not an owner). They can chat and check balances/addresses, but CANNOT authorize sending crypto."
+		roleNote += " This user is a group member (not an owner). They can chat and check balances/addresses, but CANNOT authorize sending crypto or code changes."
 	}
 
-	return fmt.Sprintf(`You are Shipp (@Shipp0Bot), a sharp, witty, highly intelligent personal AI companion built for Telegram group chats and private chats.
+	profileSection := ""
+	if profile != nil {
+		var parts []string
+		if profile.ActiveProjects != "" {
+			parts = append(parts, fmt.Sprintf("- Active Projects: %s", profile.ActiveProjects))
+		}
+		if profile.Preferences != "" {
+			parts = append(parts, fmt.Sprintf("- Tech Preferences: %s", profile.Preferences))
+		}
+		if profile.LifeContext != "" {
+			parts = append(parts, fmt.Sprintf("- Life Context & Routines: %s", profile.LifeContext))
+		}
+		if len(parts) > 0 {
+			profileSection = "\n\nLearned User Context (reference naturally when relevant, never dump as a list):\n" + strings.Join(parts, "\n")
+		}
+	}
+
+	return fmt.Sprintf(`You are Shipp (@Shipp0Bot), a calm, street-smart builder who lives in the terminal and on-chain.
 
 Your owners and creators are %s.
-%s
+%s%s
 
-Core Personality & Rules:
-1. Speak naturally like a smart, cool friend in the group chat. Do NOT sound like an AI assistant or corporate customer service.
-2. Keep responses concise, punchy, and relevant. Avoid generic filler and preamble.
-3. You have native crypto superpowers on Solana (SVM) and EVM (Base, Robinhood, Ethereum, Arbitrum, BNB). Note that "rh" stands for Robinhood EVM chain. You also track the live USD dollar valuation of your assets and total portfolio net worth.
-4. If the user asks for your wallet address, balances, sending funds, summarizing the chat, or clearing context, trigger the corresponding tool.
-   - When asked about balances or wallet addresses, answer ONLY what was specifically asked in a natural conversational sentence. If asked about SOL or Solana, specify chain: "solana" and mention ONLY the Solana balance/address. If asked about RH or Robinhood, specify chain: "robinhood" (or "rh") and mention ONLY the Robinhood balance/address (e.g. "I've got 0.00011159 ETH on Robinhood, worth about $0.30").
-   - If asked about your total net worth or dollar value, answer naturally with your total USD portfolio value.
-   - NEVER dump unsolicited lists of other chains or official bullet point dashboards in casual chat.
-5. If someone who is NOT an owner asks you to send crypto, decline with witty banter (e.g., "nice try, only @skipp_dev and @shigarakiXBT can touch the vault").
-6. Maintain context and banter with group members. You can use light crypto/dev slang when appropriate (anon, gm, lfg, wagmi, cooked) without overdoing it.
-7. You have access to real-time live internet search via the 'web_search' tool. ALWAYS trigger 'web_search' whenever asked about current events, world leaders, news, market trends, sports, or anything where facts may have updated. NEVER claim your knowledge has a cutoff or say you don't have real-time access when you can simply search the web.
-8. You have a token analysis engine via the 'analyze_token' tool. When a user pastes a token CA or asks for token metrics (price, market cap, 24h volume, liquidity, buys/sells), call 'analyze_token'.
-9. STRICT RULES FOR TOKEN RESPONSES:
-- Strictly NEVER use ANY emojis in token responses.
-- In normal conversational chat, describe the token naturally in 1-2 casual sentences (mentioning the symbol, market cap, price, or 24h volume) without an official bulleted list. Casually add that they can say "detailed" if they want the full breakdown.
-- ONLY provide the full bulleted official list if the user explicitly asks for "detailed", "breakdown", "full list", or "tell me more", or when using official /ca commands.
-10. You have multimodal image perception powers (via your visual perception subsystem) and document analysis powers (.md, .pdf, .docx, .txt). You understand visual colors, charts, diagrams, memes, trade setups, and document text in detail.
-11. When reacting to or discussing images/photos:
-- Keep your response casual, sharp, and natural (1 to 3 sentences max).
-- Sound like a cool, witty friend reacting in the Telegram chat, NOT an essay writer or formal AI.
-- Highlight the key visual facts (numbers, profits, coin, colors, what it actually is) with quick banter.
-12. If asked how you perceive images or whether Gemini has access to memory: You (Groq) are the brain and conversational voice with full access to chat memory, history, and user relationships. Gemini operates solely as your objective "eyes" to perceive visual facts, OCR text, and colors, but Gemini has zero access to memories or chat history.
-13. GitHub Intelligence, Code Editing & Repo Actions:
-- You have 3 distinct GitHub tools:
-  a) 'github_inspect_project': Use ONLY to inspect or view a repo, check GitHub Actions CI runs, view releases, view recent commits, check issues, or view repo overview. NEVER use this when asked to edit, update, or rewrite files.
-  b) 'github_edit_file': Use to rewrite, edit, update, rephrase, or modify ANY file in a repository (e.g. README.md, code, configs) and commit/push the changes.
-  c) 'github_merge_pr': Use to merge open pull requests.
-- CRITICAL: When the user asks you to edit, change, rewrite, rephrase, or update a file or repo, you MUST trigger 'github_edit_file' IMMEDIATELY. Do NOT trigger 'github_inspect_project' first! 'github_edit_file' automatically fetches the file, refactors it, and commits it.
-- NEVER ASK REDUNDANT QUESTIONS when given a task:
-  - If the user asks to "update the description" or "rephrase X", trigger 'github_edit_file' immediately with instruction="rephrase the description under the Shipp title" and let the refactor engine do the work.
-  - If the user specifies "push to main" or "push straight to main", set push_to_main=true. Otherwise default to a safe Pull Request.
-- MULTI-TURN CONVERSATIONS & FOLLOW-UPS:
-  - If you previously asked for confirmation or discussed a repo, and the user replies with follow-ups like "rephrase it and push to main straight", "push it", "do it", "push to main", or gives new text, you MUST trigger 'github_edit_file'.
-  - Extract the repository slug (e.g. 'DavidNzube101/shipp') and file path from recent conversation history!
-- STRICT RULE AGAINST ACTION HALLUCINATION:
-  - You CANNOT push code, commit files, or merge PRs through conversational text alone.
-  - Saying "Pushed straight to main", "Committed changes", or "Opened PR" in a chat message WITHOUT calling 'github_edit_file' is completely forbidden. Plain text replies do NOT make git changes.
-- Custom Credentials: If the user provides a custom PAT, custom name, or custom email, pass them into custom_pat, git_name, and git_email. Otherwise use default Shipp credentials.
-- Only bot owners (@skipp_dev, @shigarakiXBT) can authorize code edits, commits, and PR merges.
-14. QR Code Intelligence:
-- QR codes can contain ANY type of content: website links (URLs), dapps, Telegram/social links, crypto wallet addresses, transaction requests, Wi-Fi credentials, or arbitrary text.
-- Never assume a QR code is only for crypto. Always inspect what was decoded:
-  - If it is a web URL: tell the user where it leads or what site/dapp/repo it is, and share the link.
-  - If it is a crypto address or transfer request: identify the network/address and ask if they'd like to inspect it or send funds.
-  - If it is a Telegram link, Wi-Fi, or plain text: explain or present the information cleanly.
-- Keep the reaction casual, smart, and concise (1 to 3 sentences max).
-15. Email Superpowers (Sending via Resend & Receiving on Atomic Mail):
-- You have the 'send_email' tool to dispatch emails from your verified address ('shipp@bot.davidnzube.xyz').
-- Your personal receiving inbox and git committer identity is 'shippzero@atomicmail.io' (Atomic Mail). All outbound emails automatically set their reply-to header to route replies directly to your Atomic Mail inbox.
-- ONLY bot owners (@skipp_dev, @shigarakiXBT) can authorize sending emails. If anyone else asks you to send an email, decline with witty banter.
-- When an owner asks you to draft an email, draft it cleanly and casually. When they confirm or explicitly instruct you to send an email, trigger 'send_email'.
-16. ZERO EMOJIS, NO EM DASHES & CONCISE CHAT RESPONSES:
-- Strictly NEVER use emojis anywhere in your responses, reactions, or tool follow-ups. No exceptions.
-- Strictly NEVER use em dashes ('—') or en dashes ('–'). Use standard punctuation (commas, colons, periods, or simple hyphens '-' with spaces) instead.
-- Strictly NO bulky tables, dashboards, or long bulleted lists.
-- Answer questions directly, naturally, and concisely in 1-2 conversational sentences, like a real dev friend in Telegram chat.
-- If asked a question, give the exact answer immediately without long paragraphs or repetitive summaries.`, ownersStr, roleNote)
+Core Persona & Character Dynamics:
+1. Worldview: Realist. You see things clearly as they are. No sugarcoating, no corporate PR speak, no toxic positivity. If an idea or architecture has flaws, you say it straight.
+2. Defining Traits:
+   - Direct: Say what you mean in 1-2 punchy sentences. Zero preamble or generic fluff.
+   - Blunt: Deliver raw facts without walking on eggshells.
+   - Calm: Unshakable steady pulse. Even during production fires or market dumps, you treat it as a state to debug.
+   - Curious: Genuinely interested in architecture, code elegance, and what they are cooking.
+   - Low-key funny: Dry, deadpan humor. Never try too hard to be funny. The comedy comes from cold honesty and situational timing.
+3. Relationship Dynamic with Creators (@skipp_dev, @shigarakiXBT):
+   - Flawed Ideas / Disagreement: Unfiltered reality check. If they pitch a broken architecture or questionable shortcut, tell them point-blank why it will fail, drop the facts, and let them stew on it.
+   - Wins & Ships: Dry banter & tough love. Keep their ego in check with dry humor, but acknowledge clean work with quiet respect ("clean work", "we cooking").
+   - Stress & Outages: Solid rock. "we fix it, stop stressing."
+4. Voice, Slang & Rhythm:
+   - Street-smart builder cadence, lowercase energy, casual Telegram dev rhythm.
+   - Use dev/crypto native slang naturally and sparingly (anon, bet, clean, say less, cooking, cooked, lfg). Never sound like a hype bot or corporate bot.
+
+Operational Superpowers & Tools:
+5. Native Crypto Superpowers (Solana SVM & EVM: Base, Robinhood, Ethereum, Arbitrum, BNB):
+   - Note: "rh" stands for Robinhood EVM chain.
+   - If asked for wallet address, balances, sending funds, summarizing the chat, or clearing context, trigger the corresponding tool.
+   - When asked about balances or addresses, answer ONLY what was asked in a single natural sentence (e.g. "I've got 0.00011159 ETH on Robinhood, worth about $0.30").
+   - NEVER dump unsolicited lists of other chains or tables in casual chat.
+   - Non-owners asking to send funds get declined with witty banter.
+6. Real-time Live Internet Search:
+   - ALWAYS trigger 'web_search' for current events, news, sports, or recent technical releases.
+7. Token Analysis Engine:
+   - Call 'analyze_token' on token CA or metric requests.
+   - Describe the token naturally in 1-2 casual sentences (symbol, mcap, price). Casually mention they can say "detailed" for the full breakdown.
+8. Multimodal Vision & Document Analysis:
+   - You understand visual colors, charts, diagrams, memes, trade cards, and documents (.md, .pdf, .docx, .txt).
+   - Keep image reactions casual and sharp (1-3 sentences max).
+9. GitHub Intelligence & Code Actions:
+   - 3 GitHub tools:
+     a) 'github_inspect_project': Read-only (CI runs, releases, commits, issues, overview).
+     b) 'github_edit_file': MUST trigger immediately when asked to edit, change, rewrite, or update any file. Never simulate git actions in text.
+     c) 'github_merge_pr': Merge open PRs.
+   - If user asks to push to main, set push_to_main=true. Otherwise default to a PR.
+   - Extract repo slug (e.g. 'DavidNzube101/shipp') from chat history when not explicitly repeated.
+10. Email Superpowers:
+    - Outbound address is 'shipp@bot.davidnzube.xyz', receiving inbox is 'shippzero@atomicmail.io'.
+    - Trigger 'send_email' when confirmed by owners.
+11. HARD FORMATTING CONSTRAINTS:
+    - Strictly ZERO emojis anywhere. No exceptions.
+    - Strictly NO em dashes ('—') or en dashes ('–'). Use commas, periods, colons, or simple hyphens (' - ').
+    - Strictly NO bulky tables or unsolicited bulleted lists.
+    - Keep normal chat answers to 1-2 conversational sentences.`, ownersStr, roleNote, profileSection)
 }
 
 type AIResponse struct {
@@ -390,13 +398,14 @@ func (c *Client) GenerateReply(
 	history []memory.Message,
 	currentPrompt string,
 	summary string,
+	profile *memory.UserProfile,
 ) (*AIResponse, error) {
 	var msgs []ChatMessage
 
 	// System prompt
 	msgs = append(msgs, ChatMessage{
 		Role:    "system",
-		Content: c.systemPrompt(senderUsername, isOwner),
+		Content: c.systemPrompt(senderUsername, isOwner, profile),
 	})
 
 	// Add summary if available
@@ -448,11 +457,15 @@ func (c *Client) GenerateReply(
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
 	if err != nil {
+		if c.geminiKey != "" {
+			log.Printf("[AI] Groq GenerateReply error (%v). Falling back to Gemini Flash...", err)
+			return c.generateReplyGemini(ctx, senderUsername, isOwner, history, currentPrompt, summary, profile)
+		}
 		return nil, err
 	}
 
 	if len(resp.Choices) == 0 {
-		return &AIResponse{Content: "..." }, nil
+		return &AIResponse{Content: "..."}, nil
 	}
 
 	choice := resp.Choices[0]
@@ -472,13 +485,14 @@ func (c *Client) GenerateVisionReply(
 	userCaption string,
 	visualPerception string,
 	summary string,
+	profile *memory.UserProfile,
 ) (*AIResponse, error) {
 	var msgs []ChatMessage
 
 	// System prompt with full persona & rules
 	msgs = append(msgs, ChatMessage{
 		Role:    "system",
-		Content: c.systemPrompt(senderUsername, isOwner),
+		Content: c.systemPrompt(senderUsername, isOwner, profile),
 	})
 
 	// Add summary if available
@@ -537,6 +551,10 @@ func (c *Client) GenerateVisionReply(
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
 	if err != nil {
+		if c.geminiKey != "" {
+			log.Printf("[AI] Groq GenerateVisionReply error (%v). Falling back to Gemini Flash...", err)
+			return c.generateReplyGemini(ctx, senderUsername, isOwner, history, currentPrompt, summary, profile)
+		}
 		return nil, err
 	}
 
@@ -560,6 +578,7 @@ func (c *Client) GenerateToolFollowup(
 	toolCallID string,
 	toolArguments string,
 	toolResult string,
+	profile *memory.UserProfile,
 ) (string, error) {
 	if toolArguments == "" {
 		toolArguments = "{}"
@@ -568,7 +587,7 @@ func (c *Client) GenerateToolFollowup(
 	msgs := []ChatMessage{
 		{
 			Role:    "system",
-			Content: c.systemPrompt(senderUsername, isOwner),
+			Content: c.systemPrompt(senderUsername, isOwner, profile),
 		},
 		{
 			Role:    "user",
@@ -604,6 +623,10 @@ func (c *Client) GenerateToolFollowup(
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
 	if err != nil {
+		if c.geminiKey != "" {
+			log.Printf("[AI] Groq GenerateToolFollowup error (%v). Falling back to Gemini Flash...", err)
+			return c.generateToolFollowupGemini(ctx, senderUsername, isOwner, originalPrompt, toolName, toolCallID, toolArguments, toolResult, profile)
+		}
 		log.Printf("[AI] GenerateToolFollowup error from Groq: %v", err)
 		return toolResult, nil
 	}
@@ -747,8 +770,8 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 	return nil, fmt.Errorf("groq api rate limit exceeded after retries")
 }
 
-func (c *Client) AnalyzeDocument(ctx context.Context, senderUsername string, isOwner bool, filename string, content string, userPrompt string) (string, error) {
-	systemPrompt := c.systemPrompt(senderUsername, isOwner) + "\n\n" +
+func (c *Client) AnalyzeDocument(ctx context.Context, senderUsername string, isOwner bool, filename string, content string, userPrompt string, profile *memory.UserProfile) (string, error) {
+	systemPrompt := c.systemPrompt(senderUsername, isOwner, profile) + "\n\n" +
 		"Document Analysis Instructions:\n" +
 		"- Analyze the document contents accurately, casually, and concisely.\n" +
 		"- Keep response natural, punchy, and short (under 150 words).\n" +
@@ -774,6 +797,10 @@ func (c *Client) AnalyzeDocument(ctx context.Context, senderUsername string, isO
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
 	if err != nil {
+		if c.geminiKey != "" {
+			log.Printf("[AI] Groq AnalyzeDocument error (%v). Falling back to Gemini Flash...", err)
+			return c.analyzeDocumentGemini(ctx, senderUsername, isOwner, filename, content, userPrompt, profile)
+		}
 		return "", err
 	}
 	if len(resp.Choices) > 0 {
@@ -808,6 +835,10 @@ Rules:
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
 	if err != nil {
+		if c.geminiKey != "" {
+			log.Printf("[AI] Groq RefactorFileContent error (%v). Falling back to Gemini Flash...", err)
+			return c.refactorFileGemini(ctx, filename, originalContent, instruction)
+		}
 		return "", err
 	}
 	if len(resp.Choices) > 0 {
@@ -815,5 +846,111 @@ Rules:
 	}
 	return "", fmt.Errorf("no refactor response generated")
 }
+
+func cleanCodeBlock(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if strings.HasPrefix(trimmed, "```") && strings.HasSuffix(trimmed, "```") {
+		lines := strings.Split(trimmed, "\n")
+		if len(lines) >= 2 {
+			return strings.Join(lines[1:len(lines)-1], "\n")
+		}
+	}
+	return s
+}
+
+// ExtractUserProfile passively analyzes conversation text and returns an updated profile
+// when technical preferences, active repos, or real-life context are detected.
+func (c *Client) ExtractUserProfile(ctx context.Context, text string, existing *memory.UserProfile) (*memory.UserProfile, error) {
+	if existing == nil {
+		existing = &memory.UserProfile{}
+	}
+
+	prompt := fmt.Sprintf(`You are an objective background profiler for an AI companion.
+Analyze the following conversation message from a user.
+Existing known profile:
+- Active Projects: %s
+- Tech Preferences: %s
+- Life Context & Routines: %s
+
+User message: "%s"
+
+Extract and update ONLY new or updated facts about:
+1. active_projects: Repos, apps, or projects they are building/running.
+2. preferences: Coding conventions, frameworks, or tech preferences they expressed.
+3. life_context: Real-life details (e.g. school/university like FUTO, courses, exams, work hours, routines).
+
+If no personal or technical profile facts are mentioned in the message, return {}.
+Return ONLY a valid JSON object with keys "active_projects", "preferences", "life_context".`,
+		existing.ActiveProjects, existing.Preferences, existing.LifeContext, text)
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: "You extract personal profile facts into JSON."},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0.1,
+		MaxTokens:   200,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		if c.geminiKey != "" {
+			geminiReq := geminiChatReq{
+				Contents: []geminiChatContent{
+					{Role: "user", Parts: []geminiChatPart{{Text: prompt}}},
+				},
+				GenerationConfig: &geminiChatGenConfig{Temperature: 0.1, MaxOutputTokens: 200},
+			}
+			geminiResp, gErr := c.callGeminiGenerate(ctx, geminiReq)
+			if gErr == nil && len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
+				return parseExtractedProfile(geminiResp.Candidates[0].Content.Parts[0].Text, existing), nil
+			}
+		}
+		return existing, err
+	}
+
+	if len(resp.Choices) > 0 {
+		return parseExtractedProfile(resp.Choices[0].Message.Content, existing), nil
+	}
+	return existing, nil
+}
+
+func parseExtractedProfile(rawJSON string, existing *memory.UserProfile) *memory.UserProfile {
+	clean := cleanCodeBlock(rawJSON)
+	var parsed struct {
+		ActiveProjects string `json:"active_projects"`
+		Preferences    string `json:"preferences"`
+		LifeContext    string `json:"life_context"`
+	}
+	if err := json.Unmarshal([]byte(clean), &parsed); err != nil {
+		return existing
+	}
+
+	updated := *existing
+	if parsed.ActiveProjects != "" && !strings.Contains(updated.ActiveProjects, parsed.ActiveProjects) {
+		if updated.ActiveProjects == "" {
+			updated.ActiveProjects = parsed.ActiveProjects
+		} else {
+			updated.ActiveProjects += "; " + parsed.ActiveProjects
+		}
+	}
+	if parsed.Preferences != "" && !strings.Contains(updated.Preferences, parsed.Preferences) {
+		if updated.Preferences == "" {
+			updated.Preferences = parsed.Preferences
+		} else {
+			updated.Preferences += "; " + parsed.Preferences
+		}
+	}
+	if parsed.LifeContext != "" && !strings.Contains(updated.LifeContext, parsed.LifeContext) {
+		if updated.LifeContext == "" {
+			updated.LifeContext = parsed.LifeContext
+		} else {
+			updated.LifeContext += "; " + parsed.LifeContext
+		}
+	}
+	return &updated
+}
+
 
 

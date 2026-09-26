@@ -77,4 +77,25 @@ func TestHybridStoreInMemoryFallback(t *testing.T) {
 	if clearedSummary != "" {
 		t.Errorf("expected empty summary after clear, got %q", clearedSummary)
 	}
+
+	// Test SaveUserProfile & GetUserProfile
+	profile := UserProfile{
+		ChatID:         chatID,
+		Preferences:    "prefers concise code, direct commits over PRs",
+		ActiveProjects: "DavidNzube101/shipp",
+		LifeContext:    "CS student at FUTO, 300 level",
+	}
+	if err := store.SaveUserProfile(ctx, profile); err != nil {
+		t.Fatalf("SaveUserProfile failed: %v", err)
+	}
+	retrievedProfile, err := store.GetUserProfile(ctx, chatID)
+	if err != nil {
+		t.Fatalf("GetUserProfile failed: %v", err)
+	}
+	if retrievedProfile == nil {
+		t.Fatalf("expected profile, got nil")
+	}
+	if retrievedProfile.ActiveProjects != "DavidNzube101/shipp" || retrievedProfile.LifeContext != "CS student at FUTO, 300 level" {
+		t.Errorf("profile mismatch: %+v", retrievedProfile)
+	}
 }

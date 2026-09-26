@@ -22,6 +22,7 @@ type HybridStore struct {
 	mu          sync.RWMutex
 	memMessages map[int64][]Message
 	memSummary  map[int64]string
+	memProfiles map[int64]*UserProfile
 	activeChats map[int64]bool
 }
 
@@ -29,6 +30,7 @@ func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
 	store := &HybridStore{
 		memMessages: make(map[int64][]Message),
 		memSummary:  make(map[int64]string),
+		memProfiles: make(map[int64]*UserProfile),
 		activeChats: make(map[int64]bool),
 	}
 
@@ -94,6 +96,13 @@ func (s *HybridStore) initPostgresSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS chat_summaries (
 			chat_id BIGINT PRIMARY KEY,
 			summary TEXT NOT NULL,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		);`,
+		`CREATE TABLE IF NOT EXISTS user_profiles (
+			chat_id BIGINT PRIMARY KEY,
+			preferences TEXT NOT NULL DEFAULT '',
+			active_projects TEXT NOT NULL DEFAULT '',
+			life_context TEXT NOT NULL DEFAULT '',
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		);`,
 	}
@@ -286,6 +295,72 @@ func (s *HybridStore) GetSummary(ctx context.Context, chatID int64) (string, err
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.memSummary[chatID], nil
+}
+
+func (s *HybridStore) SaveUserProfile(ctx context.Context, profile UserProfile) error {
+	profile.UpdatedAt = time.Now()
+
+	// In-memory
+	s.mu.Lock()
+	s.memProfiles[profile.ChatID] = &profile
+	s.mu.Unlock()
+
+	// Redis
+	if s.rdb != nil {
+		key := fmt.Sprintf("shipp:chat:%d:profile", profile.ChatID)
+		if data, err := json.Marshal(profile); err == nil {
+			_ = s.rdb.Set(ctx, key, data, 90*24*time.Hour).Err()
+		}
+	}
+
+	// Postgres
+	if s.db != nil {
+		query := `INSERT INTO user_profiles (chat_id, preferences, active_projects, life_context, updated_at) 
+				  VALUES ($1, $2, $3, $4, NOW()) 
+				  ON CONFLICT (chat_id) 
+				  DO UPDATE SET preferences = EXCLUDED.preferences, 
+				                active_projects = EXCLUDED.active_projects, 
+				                life_context = EXCLUDED.life_context, 
+				                updated_at = NOW()`
+		_, err := s.db.ExecContext(ctx, query, profile.ChatID, profile.Preferences, profile.ActiveProjects, profile.LifeContext)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *HybridStore) GetUserProfile(ctx context.Context, chatID int64) (*UserProfile, error) {
+	// Redis
+	if s.rdb != nil {
+		key := fmt.Sprintf("shipp:chat:%d:profile", chatID)
+		data, err := s.rdb.Get(ctx, key).Bytes()
+		if err == nil && len(data) > 0 {
+			var p UserProfile
+			if err := json.Unmarshal(data, &p); err == nil {
+				return &p, nil
+			}
+		}
+	}
+
+	// Postgres
+	if s.db != nil {
+		var p UserProfile
+		p.ChatID = chatID
+		err := s.db.QueryRowContext(ctx, `SELECT preferences, active_projects, life_context, updated_at FROM user_profiles WHERE chat_id = $1`, chatID).
+			Scan(&p.Preferences, &p.ActiveProjects, &p.LifeContext, &p.UpdatedAt)
+		if err == nil {
+			return &p, nil
+		}
+	}
+
+	// In-memory
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p, ok := s.memProfiles[chatID]; ok {
+		return p, nil
+	}
+	return nil, nil
 }
 
 func (s *HybridStore) GetActiveChatIDs(ctx context.Context) ([]int64, error) {

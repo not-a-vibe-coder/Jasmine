@@ -62,8 +62,8 @@ func main() {
 	log.Printf("[Main] Crypto Service initialized | SVM: %s | EVM: %s", svmAddr, evmAddr)
 
 	// 4. Initialize AI Client & Search Service
-	aiClient := ai.NewClient(cfg.GroqAPIKey, cfg.GroqModel, cfg.Owners)
-	log.Printf("[Main] AI Client initialized with Groq model: %s", cfg.GroqModel)
+	aiClient := ai.NewClient(cfg.GroqAPIKey, cfg.GroqModel, cfg.GeminiAPIKey, cfg.Owners)
+	log.Printf("[Main] AI Client initialized with Groq model: %s (Gemini Flash fallback active)", cfg.GroqModel)
 
 	searchSvc := search.NewService(cfg.TavilyAPIKey)
 	log.Printf("[Main] Web Search Service initialized (DuckDuckGo + Wikipedia active)")

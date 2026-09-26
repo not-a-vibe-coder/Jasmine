@@ -353,8 +353,9 @@ func (b *Bot) handleNLPAndChat(
 	// 1. Fetch recent history (8 messages to stay well within Groq rate limits)
 	history, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
 
-	// 2. Fetch past summary if available
+	// 2. Fetch past summary and learned user profile
 	summary, _ := b.memory.GetSummary(ctx, chatID)
+	profile, _ := b.memory.GetUserProfile(ctx, chatID)
 
 	lowerPrompt := strings.ToLower(prompt)
 
@@ -362,16 +363,18 @@ func (b *Bot) handleNLPAndChat(
 	//     call github_edit_file directly to avoid clarification loops.
 	if isOwner {
 		if b.trySmartDispatch(ctx, msg, prompt, lowerPrompt, username, isOwner, history) {
+			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 			return
 		}
 	}
 
 	// 3. Ask AI with tool declarations
-	aiResp, err := b.ai.GenerateReply(ctx, username, isOwner, history, prompt, summary)
+	aiResp, err := b.ai.GenerateReply(ctx, username, isOwner, history, prompt, summary, profile)
 	if err != nil {
 		log.Printf("[Bot] AI generate error: %v", err)
 		// Even on rate-limit / error, still try interceptors so merge/edit commands aren't lost.
 		if isOwner && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, "") {
+			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 			return
 		}
 		b.sendReply(chatID, msg.MessageID, b.getRandomChatFallback())
@@ -387,34 +390,36 @@ func (b *Bot) handleNLPAndChat(
 				tcCopy := tc
 				go func() {
 					toolResult := b.executeToolCall(ctx, chatID, tcCopy.Function.Name, tcCopy.Function.Arguments, username, isOwner)
-					followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tcCopy.Function.Name, tcCopy.ID, tcCopy.Function.Arguments, toolResult)
+					followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tcCopy.Function.Name, tcCopy.ID, tcCopy.Function.Arguments, toolResult, profile)
 					if err != nil || followup == "" {
 						followup = toolResult
 					}
 					b.sendSimpleMessage(chatID, followup)
 					_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", followup)
 				}()
+				go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 				return
 			}
 
 			toolResult := b.executeToolCall(ctx, chatID, tc.Function.Name, tc.Function.Arguments, username, isOwner)
 
 			// Generate conversational response incorporating tool result
-			followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult)
+			followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult, profile)
 			if err != nil || followup == "" {
 				followup = toolResult
 			}
 
 			b.sendReply(chatID, msg.MessageID, followup)
 			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", followup)
+			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 			return
 		}
 	}
 
-
 	// 5. Intercept hallucinated git actions or explicit push/merge commands that bypassed tool calls
 	replyText := strings.TrimSpace(aiResp.Content)
 	if isOwner && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, replyText) {
+		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 		return
 	}
 
@@ -424,6 +429,7 @@ func (b *Bot) handleNLPAndChat(
 
 	b.sendReply(chatID, msg.MessageID, replyText)
 	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", replyText)
+	go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 }
 
 // trySmartDispatch fires github_edit_file directly when the prompt has a GitHub URL + an edit verb,
@@ -1381,22 +1387,23 @@ func (b *Bot) processImage(
 	}
 	_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userMemory)
 
-	// 3. Reasoning & Persona Layer (Groq = "The Brain & Voice")
+	// 3. Reasoning & Persona Layer (Groq = "The Brain & Voice", Gemini = Fallback)
 	history, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
 	summary, _ := b.memory.GetSummary(ctx, chatID)
+	profile, _ := b.memory.GetUserProfile(ctx, chatID)
 
-	aiResp, err := b.ai.GenerateVisionReply(ctx, username, isOwner, history, cleanCaption, perception, summary)
+	aiResp, err := b.ai.GenerateVisionReply(ctx, username, isOwner, history, cleanCaption, perception, summary, profile)
 	if err != nil {
 		log.Printf("[Bot] AI vision reasoning error: %v", err)
 		b.sendReply(chatID, replyToMsgID, b.getRandomVisionFallback())
 		return
 	}
 
-	// Handle tools if Groq decided to invoke one (e.g. analyze_token or get_balances)
+	// Handle tools if Groq/Gemini decided to invoke one (e.g. analyze_token or get_balances)
 	if len(aiResp.ToolCalls) > 0 {
 		for _, tc := range aiResp.ToolCalls {
 			toolResult := b.executeToolCall(ctx, chatID, tc.Function.Name, tc.Function.Arguments, username, isOwner)
-			followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, cleanCaption, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult)
+			followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, cleanCaption, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult, profile)
 			if err != nil || followup == "" {
 				followup = toolResult
 			}
@@ -1509,7 +1516,8 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 	}
 	_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userDocLog)
 
-	analysis, err := b.ai.AnalyzeDocument(ctx, username, isOwner, doc.FileName, extractedText, cleanCaption)
+	profile, _ := b.memory.GetUserProfile(ctx, chatID)
+	analysis, err := b.ai.AnalyzeDocument(ctx, username, isOwner, doc.FileName, extractedText, cleanCaption, profile)
 	if err != nil || analysis == "" {
 		b.sendReply(chatID, msg.MessageID, "I extracted the document text, but couldn't generate the analysis.")
 		return
@@ -1517,6 +1525,41 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 
 	b.sendReply(chatID, msg.MessageID, analysis)
 	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", analysis)
+}
+
+var profileTriggerWords = []string{
+	"futo", "cs", "course", "courses", "exam", "exams", "school", "assignment", "semester",
+	"repo", "github.com", "stack", "react", "next", "vue", "go", "golang",
+	"solana", "evm", "postgres", "redis", "tailwind", "render",
+	"prefer", "i like", "always use", "never use", "building", "project",
+}
+
+func (b *Bot) maybeUpdateUserProfile(ctx context.Context, chatID int64, prompt string) {
+	lower := strings.ToLower(prompt)
+	hasTrigger := false
+	for _, w := range profileTriggerWords {
+		if strings.Contains(lower, w) {
+			hasTrigger = true
+			break
+		}
+	}
+	if !hasTrigger {
+		return
+	}
+
+	existing, _ := b.memory.GetUserProfile(ctx, chatID)
+	updated, err := b.ai.ExtractUserProfile(ctx, prompt, existing)
+	if err != nil || updated == nil {
+		return
+	}
+
+	updated.ChatID = chatID
+	if err := b.memory.SaveUserProfile(ctx, *updated); err != nil {
+		log.Printf("[Bot] Failed to save updated UserProfile for chat %d: %v", chatID, err)
+	} else {
+		log.Printf("[Bot] UserProfile updated for chat %d: projects='%s' prefs='%s' life='%s'",
+			chatID, updated.ActiveProjects, updated.Preferences, updated.LifeContext)
+	}
 }
 
 var emojiPattern = regexp.MustCompile(`[\x{1F600}-\x{1F64F}\x{1F300}-\x{1F5FF}\x{1F680}-\x{1F6FF}\x{1F700}-\x{1F77F}\x{1F780}-\x{1F7FF}\x{1F800}-\x{1F8FF}\x{1F900}-\x{1F9FF}\x{1FA00}-\x{1FAFF}\x{2600}-\x{26FF}\x{2700}-\x{27BF}]`)

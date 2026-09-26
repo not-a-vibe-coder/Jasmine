@@ -7,13 +7,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"shipp/internal/memory"
 )
 
 func TestSystemPrompt(t *testing.T) {
-	client := NewClient("mock_key", "qwen/qwen3.8-27b", []string{"skipp_dev", "shigarakixbt"})
+	client := NewClient("mock_key", "qwen/qwen3.8-27b", "mock_gemini_key", []string{"skipp_dev", "shigarakixbt"})
 
 	// Test Owner prompt
-	ownerPrompt := client.systemPrompt("skipp_dev", true)
+	ownerPrompt := client.systemPrompt("skipp_dev", true, nil)
 	if !strings.Contains(ownerPrompt, "@skipp_dev") {
 		t.Errorf("expected owner prompt to contain @skipp_dev")
 	}
@@ -22,14 +24,25 @@ func TestSystemPrompt(t *testing.T) {
 	}
 
 	// Test Non-Owner prompt
-	guestPrompt := client.systemPrompt("anon123", false)
+	guestPrompt := client.systemPrompt("anon123", false, nil)
 	if !strings.Contains(guestPrompt, "CANNOT authorize sending crypto") {
 		t.Errorf("expected guest prompt to restrict crypto send")
+	}
+
+	// Test UserProfile injection
+	profile := &memory.UserProfile{
+		ActiveProjects: "DavidNzube101/shipp",
+		Preferences:    "prefers Go over Python",
+		LifeContext:    "FUTO 300 level CS",
+	}
+	profilePrompt := client.systemPrompt("skipp_dev", true, profile)
+	if !strings.Contains(profilePrompt, "DavidNzube101/shipp") || !strings.Contains(profilePrompt, "FUTO 300 level CS") {
+		t.Errorf("expected profile context to be injected into prompt")
 	}
 }
 
 func TestToolsDefinition(t *testing.T) {
-	client := NewClient("mock_key", "qwen/qwen3.8-27b", []string{"skipp_dev"})
+	client := NewClient("mock_key", "qwen/qwen3.8-27b", "mock_gemini_key", []string{"skipp_dev"})
 	tools := client.buildTools()
 
 	expectedTools := map[string]bool{
@@ -92,7 +105,7 @@ func TestMockChatCompletionWithToolCall(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("mock_key", "qwen/qwen3.8-27b", []string{"skipp_dev"})
+	client := NewClient("mock_key", "qwen/qwen3.8-27b", "mock_gemini_key", []string{"skipp_dev"})
 	client.httpClient = server.Client()
 
 	reqBody := ChatCompletionRequest{
@@ -123,17 +136,14 @@ func TestMockChatCompletionWithToolCall(t *testing.T) {
 }
 
 func TestSystemPromptVisionAndMemoryRules(t *testing.T) {
-	client := NewClient("mock_key", "qwen/qwen3.8-27b", []string{"skipp_dev"})
-	prompt := client.systemPrompt("skipp_dev", true)
+	client := NewClient("mock_key", "qwen/qwen3.8-27b", "mock_gemini_key", []string{"skipp_dev"})
+	prompt := client.systemPrompt("skipp_dev", true, nil)
 
-	if !strings.Contains(prompt, "1 to 3 sentences max") {
-		t.Errorf("expected prompt to restrict image reactions to 1 to 3 sentences max")
+	if !strings.Contains(prompt, "1-3 sentences max") {
+		t.Errorf("expected prompt to restrict image reactions to 1-3 sentences max")
 	}
-	if !strings.Contains(prompt, "visual perception subsystem") {
-		t.Errorf("expected prompt to mention visual perception subsystem")
-	}
-	if !strings.Contains(prompt, "Gemini operates solely as your objective \"eyes\"") {
-		t.Errorf("expected prompt to clarify eyes vs brain architecture")
+	if !strings.Contains(prompt, "Realist") {
+		t.Errorf("expected prompt to state Realist worldview")
 	}
 }
 
@@ -163,7 +173,7 @@ func TestGenerateVisionReplyMock(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("mock_key", "qwen/qwen3.8-27b", []string{"skipp_dev"})
+	client := NewClient("mock_key", "qwen/qwen3.8-27b", "mock_gemini_key", []string{"skipp_dev"})
 	client.httpClient = server.Client()
 
 	// Direct call to sendChatCompletion with mock server by swapping DefaultGroqURL logic or testing request structure
@@ -171,7 +181,7 @@ func TestGenerateVisionReplyMock(t *testing.T) {
 	req := ChatCompletionRequest{
 		Model: client.model,
 		Messages: []ChatMessage{
-			{Role: "system", Content: client.systemPrompt("skipp_dev", true)},
+			{Role: "system", Content: client.systemPrompt("skipp_dev", true, nil)},
 			{Role: "user", Content: "[User sent an image]\n[Visual Perception: BTC Long 40x on Bayse, +32.75%]\n\nUser caption: look at this"},
 		},
 		MaxTokens: 350,
