@@ -1925,7 +1925,7 @@ var doubleBoldRegex = regexp.MustCompile(`\*\*(.+?)\*\*`)
 var doubleUnderscoreRegex = regexp.MustCompile(`__(.+?)__`)
 var leakedToolCallRegex = regexp.MustCompile(`(?si)<(?:toolcall|tool_call)[^>]*>.*?</(?:toolcall|tool_call)>`)
 var leakedFunctionRegex = regexp.MustCompile(`(?si)<function(?:=|\s+name=)[^>]*>.*?</function>`)
-var eagerPromptRegex = regexp.MustCompile(`(?i)(?:,\s*|\.\s*|\s+)(?:what(?:'s|\s+is)\s+next\??|what\s+are\s+we\s+building(?:\s+next)?\??|what(?:'s|\s+is)\s+the\s+next\s+move\??|what\s+are\s+we\s+cooking(?:\s+next)?\??|how\s+can\s+i\s+help(?:\s+you)?\??)\s*$`)
+var eagerPromptRegex = regexp.MustCompile(`(?i)(?:,\s*|\.\s*|\s+)(?:what(?:'s|\s+is)\s+next\??|what\s+are\s+we\s+building(?:\s+next)?\??|what(?:'s|\s+is)\s+(?:the\s+)?(?:next\s+)?move\??|what\s+are\s+we\s+cooking(?:\s+next)?\??|what\s+are\s+we\s+doing(?:\s+next)?\??|how\s+can\s+i\s+help(?:\s+you)?\??)\s*$`)
 
 // toTelegramMarkdown converts GitHub-flavored markdown to Telegram Markdown v1.
 // Telegram uses *bold* and _italic_, not **bold** / __italic__.

@@ -254,6 +254,10 @@ func TestCleanNoEmojisEagerScrubber(t *testing.T) {
 			expected: "TeraWallet mcap is $36.19K",
 		},
 		{
+			input:    "all eyes anon, what's the move?",
+			expected: "all eyes anon",
+		},
+		{
 			input:    "done and dusted, what are we cooking?",
 			expected: "done and dusted",
 		},

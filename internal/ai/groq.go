@@ -879,9 +879,50 @@ func (c *Client) RunAgenticLoop(
 
 		resp, err := c.sendChatCompletion(ctx, reqBody)
 		if err != nil {
-			// Groq failed - try Gemini for this turn
+			// Groq failed - fallback gracefully
+			log.Printf("[AI] AgenticLoop Groq error (%v). Falling back...", err)
+
+			// If tools were ALREADY executed on earlier iterations, we have live data!
+			// Never discard the live tool result by falling back with a blank prompt.
+			if len(result.ToolsUsed) > 0 {
+				lastToolName := result.ToolsUsed[len(result.ToolsUsed)-1]
+				lastToolResult := ""
+				lastToolCallID := "call_fallback"
+				lastToolArgs := "{}"
+				for j := len(runMsgs) - 1; j >= 0; j-- {
+					if runMsgs[j].Role == "tool" {
+						lastToolResult = runMsgs[j].Content
+						lastToolCallID = runMsgs[j].ToolCallID
+						break
+					}
+				}
+				for j := len(runMsgs) - 1; j >= 0; j-- {
+					if runMsgs[j].Role == "assistant" && len(runMsgs[j].ToolCalls) > 0 {
+						for _, tc := range runMsgs[j].ToolCalls {
+							if tc.ID == lastToolCallID || tc.Function.Name == lastToolName {
+								lastToolArgs = tc.Function.Arguments
+								break
+							}
+						}
+						break
+					}
+				}
+
+				if lastToolResult != "" && c.geminiKey != "" {
+					followup, gerr := c.generateToolFollowupGemini(ctx, senderUsername, isOwner, userPrompt, lastToolName, lastToolCallID, lastToolArgs, lastToolResult, profile)
+					if gerr == nil && strings.TrimSpace(followup) != "" {
+						result.FinalText = strings.TrimSpace(followup)
+						return result
+					}
+				}
+				if lastToolResult != "" {
+					result.FinalText = lastToolResult
+					return result
+				}
+			}
+
+			// No tools were executed yet - standard Gemini reply
 			if c.geminiKey != "" {
-				log.Printf("[AI] AgenticLoop Groq error (%v). Falling back to Gemini...", err)
 				fallback, ferr := c.generateReplyGemini(ctx, senderUsername, isOwner, history, userPrompt, summary, profile)
 				if ferr == nil && fallback != nil {
 					result.FinalText = strings.TrimSpace(fallback.Content)
@@ -1207,7 +1248,9 @@ Keep it short (1-2 sentences max). Do NOT introduce yourself or say "Hey guys, a
 }
 
 var defaultGroqModelPool = []string{
+	"llama-3.3-70b-versatile",
 	"qwen/qwen3.8-27b",
+	"llama-3.1-8b-instant",
 	"openai/gpt-oss-120b",
 }
 
