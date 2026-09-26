@@ -236,3 +236,36 @@ func TestFormatEmergencyBalanceFallback(t *testing.T) {
 	}
 }
 
+func TestCleanNoEmojisEagerScrubber(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{
+			input:    "latest action run succeeded on main. what's next?",
+			expected: "latest action run succeeded on main",
+		},
+		{
+			input:    "action run succeeded, green across the board. what are we building next?",
+			expected: "action run succeeded, green across the board",
+		},
+		{
+			input:    "TeraWallet mcap is $36.19K. what's the next move?",
+			expected: "TeraWallet mcap is $36.19K",
+		},
+		{
+			input:    "done and dusted, what are we cooking?",
+			expected: "done and dusted",
+		},
+	}
+
+	for _, c := range cases {
+		got := cleanNoEmojis(c.input)
+		// Trailing periods may be conditionally trimmed
+		gotTrimmed := strings.TrimSuffix(got, ".")
+		wantTrimmed := strings.TrimSuffix(c.expected, ".")
+		if gotTrimmed != wantTrimmed {
+			t.Errorf("cleanNoEmojis(%q)\n  got:      %q\n  expected: %q", c.input, got, c.expected)
+		}
+	}
+}

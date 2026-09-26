@@ -334,8 +334,33 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// Send typing indicator
 	b.sendChatAction(chatID, tgbotapi.ChatTyping)
 
+	// If this message is a reply to another message, include the quoted context
+	promptWithContext := cleanPrompt
+	if msg.ReplyToMessage != nil {
+		quotedText := msg.ReplyToMessage.Text
+		if quotedText == "" {
+			quotedText = msg.ReplyToMessage.Caption
+		}
+		if quotedText != "" {
+			quotedSender := ""
+			if msg.ReplyToMessage.From != nil {
+				quotedSender = msg.ReplyToMessage.From.UserName
+				if quotedSender == "" {
+					quotedSender = msg.ReplyToMessage.From.FirstName
+				}
+			}
+			if b.api != nil && b.api.Self.UserName != "" && quotedSender == b.api.Self.UserName {
+				promptWithContext = fmt.Sprintf("[Replying to your previous message: %q]\n%s", quotedText, cleanPrompt)
+			} else if quotedSender != "" {
+				promptWithContext = fmt.Sprintf("[Replying to @%s: %q]\n%s", quotedSender, quotedText, cleanPrompt)
+			} else {
+				promptWithContext = fmt.Sprintf("[Replying to: %q]\n%s", quotedText, cleanPrompt)
+			}
+		}
+	}
+
 	// 3. Process via AI & NLP Tool Engine
-	b.handleNLPAndChat(ctx, msg, cleanPrompt, username, isOwner)
+	b.handleNLPAndChat(ctx, msg, promptWithContext, username, isOwner)
 }
 
 var shippWordRegex = regexp.MustCompile(`(?i)\bshipp\b`)
@@ -1900,6 +1925,7 @@ var doubleBoldRegex = regexp.MustCompile(`\*\*(.+?)\*\*`)
 var doubleUnderscoreRegex = regexp.MustCompile(`__(.+?)__`)
 var leakedToolCallRegex = regexp.MustCompile(`(?si)<(?:toolcall|tool_call)[^>]*>.*?</(?:toolcall|tool_call)>`)
 var leakedFunctionRegex = regexp.MustCompile(`(?si)<function(?:=|\s+name=)[^>]*>.*?</function>`)
+var eagerPromptRegex = regexp.MustCompile(`(?i)(?:,\s*|\.\s*|\s+)(?:what(?:'s|\s+is)\s+next\??|what\s+are\s+we\s+building(?:\s+next)?\??|what(?:'s|\s+is)\s+the\s+next\s+move\??|what\s+are\s+we\s+cooking(?:\s+next)?\??|how\s+can\s+i\s+help(?:\s+you)?\??)\s*$`)
 
 // toTelegramMarkdown converts GitHub-flavored markdown to Telegram Markdown v1.
 // Telegram uses *bold* and _italic_, not **bold** / __italic__.
@@ -2060,6 +2086,7 @@ func formatEmergencyAddressFallback(toolResult string) string {
 func cleanNoEmojis(text string) string {
 	cleaned := leakedToolCallRegex.ReplaceAllString(text, "")
 	cleaned = leakedFunctionRegex.ReplaceAllString(cleaned, "")
+	cleaned = eagerPromptRegex.ReplaceAllString(cleaned, "")
 	cleaned = emojiPattern.ReplaceAllString(cleaned, "")
 	// Replace em dashes (—) and en dashes (–) with standard hyphens
 	cleaned = strings.ReplaceAll(cleaned, "—", " - ")
