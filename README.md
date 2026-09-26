@@ -47,30 +47,23 @@ A sharp, witty personal AI companion with native crypto superpowers on Solana an
 
 ## 🚀 Deployment on Render
 
-### Build & Start Commands:
-* **Build Command:**
-  ```bash
-  go build -o bin/shipp cmd/bot/main.go
-  ```
-* **Start Command:**
-  ```bash
-  ./bin/shipp
-  ```
+**Build:**
+```bash
+go build -o bin/shipp cmd/bot/main.go
+```
 
-### Required Environment Variables:
-Copy the variables from `.env.example` into your Render service environment settings:
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_BOT_USERNAME`
-- `OWNERS_USERNAME` (e.g. `@skipp_dev,@shigarakiXBT`)
-- `GROQ_API_KEY`
-- `GROQ_MODEL` (`qwen/qwen3.8-27b`)
-- `REDIS_URL`
-- `DATABASE_URL`
-- `SVM_WALLET_PUBLIC_KEY`
-- `SVM_WALLET_PRIVATE_KEY`
-- `EVM_WALLET_PUBLIC_KEY`
-- `EVM_WALLET_PRIVATE_KEY`
-- `SVM_RPC_URL`
+**Start:**
+```bash
+./bin/shipp
+```
+
+**Env Vars:**
+Copy from `.env.example` to Render settings:
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `OWNERS_USERNAME`
+- `GROQ_API_KEY`, `GROQ_MODEL`
+- `REDIS_URL`, `DATABASE_URL`
+- `SVM_WALLET_PUBLIC_KEY`, `SVM_WALLET_PRIVATE_KEY`, `SVM_RPC_URL`
+- `EVM_WALLET_PUBLIC_KEY`, `EVM_WALLET_PRIVATE_KEY`
 - `BASE_RPC_URL`, `ETHEREUM_RPC_URL`, `ARBITRUM_RPC_URL`, `BNB_RPC_URL`
 
 ---
