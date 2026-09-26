@@ -160,7 +160,7 @@ func NewService(
 		Symbol:   "ETH",
 		ChainID:  4663,
 		RPCURL:   rhRPC,
-		Explorer: "https://explorer.robinhood.com/tx/",
+		Explorer: "https://robinhoodchain.blockscout.com/tx/",
 	}
 	s.chains["robinhood"] = rhChain
 	s.chains["rh"] = rhChain
