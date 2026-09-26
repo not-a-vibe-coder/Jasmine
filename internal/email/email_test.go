@@ -71,7 +71,7 @@ func TestEmailSendMock(t *testing.T) {
 	}
 
 	formatted := FormatEmailSent(res)
-	if !strings.Contains(formatted, "recipient@example.com") || !strings.Contains(formatted, "msg_test_12345") {
+	if !strings.Contains(formatted, "recipient@example.com") || !strings.Contains(formatted, "Test Subject") {
 		t.Errorf("formatted message missing details: %s", formatted)
 	}
 }

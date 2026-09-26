@@ -160,19 +160,7 @@ func formatHTMLBody(text string) string {
 // FormatEmailSent formats a confirmation message for Telegram
 func FormatEmailSent(res *SendResult) string {
 	if res == nil {
-		return "Email dispatched successfully."
+		return "Sent that email."
 	}
-
-	var sb strings.Builder
-	sb.WriteString("✉️ **Email Dispatched Successfully!**\n\n")
-	sb.WriteString(fmt.Sprintf("• **To:** `%s`\n", res.To))
-	sb.WriteString(fmt.Sprintf("• **Subject:** %s\n", res.Subject))
-	sb.WriteString(fmt.Sprintf("• **From:** `%s`\n", res.From))
-	if res.ReplyTo != "" {
-		sb.WriteString(fmt.Sprintf("• **Reply-To:** `%s`\n", res.ReplyTo))
-	}
-	if res.ID != "" {
-		sb.WriteString(fmt.Sprintf("• **Resend ID:** `%s`\n", res.ID))
-	}
-	return strings.TrimSpace(sb.String())
+	return fmt.Sprintf("Sent that email to %s (subject: '%s').", res.To, res.Subject)
 }

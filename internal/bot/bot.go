@@ -495,11 +495,11 @@ func (b *Bot) executeToolCall(
 			return "Couldn't generate summary right now."
 		}
 		_ = b.memory.SaveSummary(ctx, chatID, summary)
-		return fmt.Sprintf("📝 **Conversation Recap:**\n\n%s", summary)
+		return fmt.Sprintf("Conversation recap:\n\n%s", summary)
 
 	case "clear_context":
 		_ = b.memory.ClearContext(ctx, chatID)
-		return "🧹 Context and memory have been wiped clean for this chat. Clean slate!"
+		return "Context and memory have been cleared for this chat."
 
 	case "web_search":
 		var args struct {
@@ -616,7 +616,7 @@ func (b *Bot) executeToolCall(
 				if len(preview) > 1500 {
 					preview = preview[:1500] + "\n... (truncated preview)"
 				}
-				return fmt.Sprintf("📄 **%s/%s (%s):**\n\n```markdown\n%s\n```", owner, repoName, targetPath, preview)
+				return fmt.Sprintf("%s/%s (%s):\n\n```\n%s\n```", owner, repoName, targetPath, preview)
 			}
 
 			// List files in repo root or directory
@@ -628,7 +628,7 @@ func (b *Bot) executeToolCall(
 			if dirName == "" {
 				dirName = "root"
 			}
-			return fmt.Sprintf("📂 Repository **%s/%s** (%s):\n• %s", owner, repoName, dirName, strings.Join(files, "\n• "))
+			return fmt.Sprintf("Files in %s/%s (%s): %s", owner, repoName, dirName, strings.Join(files, ", "))
 		}
 
 	case "github_edit_file":
@@ -706,7 +706,7 @@ func (b *Bot) executeToolCall(
 			if err != nil {
 				return fmt.Sprintf("Commit to %s failed: %v", defaultBranch, err)
 			}
-			return fmt.Sprintf("🚀 Pushed directly to **%s** on `%s/%s`!\n[View File](%s)", defaultBranch, owner, repoName, commitURL)
+			return fmt.Sprintf("Pushed directly to %s on %s/%s: %s", defaultBranch, owner, repoName, commitURL)
 		}
 
 		// Safe PR-first default
@@ -735,7 +735,7 @@ func (b *Bot) executeToolCall(
 			return fmt.Sprintf("Committed to branch '%s', but failed to open PR: %v", branchName, err)
 		}
 
-		return fmt.Sprintf("🚀 **Opened PR #%d on %s/%s!**\n\n[Review PR on GitHub](%s)\n\nGive it a look and say **'merge it'** whenever you're ready to merge!", prNum, owner, repoName, prURL)
+		return fmt.Sprintf("Opened PR #%d on %s/%s: %s\nSay 'merge it' whenever you're ready.", prNum, owner, repoName, prURL)
 
 	case "github_merge_pr":
 		if !isOwner {
@@ -757,11 +757,11 @@ func (b *Bot) executeToolCall(
 			return fmt.Sprintf("Invalid repo format: %v", err)
 		}
 
-		res, err := b.github.MergePullRequestWithToken(ctx, owner, repoName, args.PRNumber, args.CustomPAT)
+		_, err = b.github.MergePullRequestWithToken(ctx, owner, repoName, args.PRNumber, args.CustomPAT)
 		if err != nil {
-			return fmt.Sprintf("❌ Merge failed: %v", err)
+			return fmt.Sprintf("Merge failed: %v", err)
 		}
-		return fmt.Sprintf("🎉 **%s** on `%s/%s`!", res, owner, repoName)
+		return fmt.Sprintf("Merged PR #%d on %s/%s.", args.PRNumber, owner, repoName)
 
 	case "send_email":
 		if !isOwner {
@@ -783,7 +783,7 @@ func (b *Bot) executeToolCall(
 
 		res, err := b.email.Send(ctx, args.To, args.Subject, args.Body)
 		if err != nil {
-			return fmt.Sprintf("❌ Failed to send email to %s: %v", args.To, err)
+			return fmt.Sprintf("Failed to send email to %s: %v", args.To, err)
 		}
 		return email.FormatEmailSent(res)
 
@@ -794,7 +794,7 @@ func (b *Bot) executeToolCall(
 
 func (b *Bot) handleSendCommand(ctx context.Context, msg *tgbotapi.Message, args []string, isOwner bool) {
 	if !isOwner {
-		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("🔒 Nice try anon! Only bot owners (@%s) can authorize crypto transfers.", strings.Join(b.cfg.Owners, ", @")))
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("Nice try anon! Only bot owners (@%s) can authorize crypto transfers.", strings.Join(b.cfg.Owners, ", @")))
 		return
 	}
 
@@ -822,23 +822,25 @@ func (b *Bot) executeCryptoSend(ctx context.Context, chain, toAddress string, am
 	if chainLower == "sol" || chainLower == "solana" || chainLower == "svm" {
 		txHash, explorer, err := b.crypto.SendSVM(ctx, toAddress, amount)
 		if err != nil {
-			return fmt.Sprintf("❌ Solana Transfer Failed: %v", err)
+			return fmt.Sprintf("Solana transfer failed: %v", err)
 		}
-		return fmt.Sprintf("🚀 **Solana Transfer Successful!**\n\nAmount: `%.4f SOL`\nTo: `%s`\nTx Hash: `%s`\n[View on Solscan](%s)", amount, toAddress, txHash, explorer)
+		_ = txHash
+		return fmt.Sprintf("Sent %.4f SOL to %s: %s", amount, toAddress, explorer)
 	}
 
 	// EVM transfer
 	txHash, explorer, err := b.crypto.SendEVM(ctx, chainLower, toAddress, amount)
 	if err != nil {
-		return fmt.Sprintf("❌ EVM Transfer Failed (%s): %v", chain, err)
+		return fmt.Sprintf("%s transfer failed: %v", chain, err)
 	}
+	_ = txHash
 
-	return fmt.Sprintf("🚀 **EVM Transfer Successful!**\n\nChain: **%s**\nAmount: `%.6f`\nTo: `%s`\nTx Hash: `%s`\n[View Explorer](%s)", strings.ToUpper(chainLower), amount, toAddress, txHash, explorer)
+	return fmt.Sprintf("Sent %.6f %s to %s: %s", amount, strings.ToUpper(chainLower), toAddress, explorer)
 }
 
 func (b *Bot) handleEmailCommand(ctx context.Context, msg *tgbotapi.Message, args []string, isOwner bool) {
 	if !isOwner {
-		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("🔒 Nice try anon! Only bot owners (@%s) can authorize dispatching emails from Shipp.", strings.Join(b.cfg.Owners, ", @")))
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("Nice try anon! Only bot owners (@%s) can authorize dispatching emails from Shipp.", strings.Join(b.cfg.Owners, ", @")))
 		return
 	}
 
@@ -883,7 +885,7 @@ func (b *Bot) handleEmailCommand(ctx context.Context, msg *tgbotapi.Message, arg
 	b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
 	res, err := b.email.Send(ctx, to, subject, body)
 	if err != nil {
-		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("❌ Failed to dispatch email: %v", err))
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("Failed to dispatch email: %v", err))
 		return
 	}
 
@@ -904,7 +906,7 @@ func (b *Bot) handleSummarizeCommand(ctx context.Context, msg *tgbotapi.Message)
 	}
 
 	_ = b.memory.SaveSummary(ctx, msg.Chat.ID, summary)
-	b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("📝 **Conversation Recap:**\n\n%s", summary))
+	b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("Conversation recap:\n\n%s", summary))
 }
 
 func (b *Bot) handleClearCommand(ctx context.Context, msg *tgbotapi.Message, isOwner bool) {
@@ -913,7 +915,7 @@ func (b *Bot) handleClearCommand(ctx context.Context, msg *tgbotapi.Message, isO
 		b.sendReply(msg.Chat.ID, msg.MessageID, "Error clearing memory context.")
 		return
 	}
-	b.sendReply(msg.Chat.ID, msg.MessageID, "🧹 Memory cleared! I've wiped our conversation context for this chat.")
+	b.sendReply(msg.Chat.ID, msg.MessageID, "Memory cleared. I've wiped our conversation context for this chat.")
 }
 
 func (b *Bot) handleProactiveCommand(msg *tgbotapi.Message, args []string, isOwner bool) {
@@ -934,10 +936,10 @@ func (b *Bot) handleProactiveCommand(msg *tgbotapi.Message, args []string, isOwn
 
 	if setting == "off" || setting == "disable" {
 		b.proactiveDisabled[msg.Chat.ID] = true
-		b.sendReply(msg.Chat.ID, msg.MessageID, "🤐 Proactive messaging turned **OFF**. I'll only speak when spoken to.")
+		b.sendReply(msg.Chat.ID, msg.MessageID, "Proactive messaging turned off. I'll only speak when spoken to.")
 	} else if setting == "on" || setting == "enable" {
 		b.proactiveDisabled[msg.Chat.ID] = false
-		b.sendReply(msg.Chat.ID, msg.MessageID, "⚡ Proactive messaging turned **ON**. I'll occasionally chime in with thoughts and vibes.")
+		b.sendReply(msg.Chat.ID, msg.MessageID, "Proactive messaging turned on. I'll occasionally chime in.")
 	}
 }
 
@@ -1041,19 +1043,19 @@ func (b *Bot) triggerProactiveMessage(ctx context.Context) {
 func (b *Bot) formatStartMessage(username string, isOwner bool) string {
 	roleGreeting := "Hey"
 	if isOwner {
-		roleGreeting = "Welcome boss"
+		roleGreeting = "Welcome"
 	}
-	return fmt.Sprintf(`👋 %s! I'm **Shipp**, your personal AI companion with native crypto powers.
+	return fmt.Sprintf(`%s! I'm Shipp, your personal AI companion with native crypto powers.
 
 I'm built for both group chats and private DMs. You can talk to me completely naturally or use slash commands!
 
-⚡ **What I can do:**
-• **Natural Chat & Banter:** Tag me (@%s) or reply to me. Powered by Groq fast inference.
-• **Proactive Presence:** I'll chime in spontaneously to keep the chat lively.
-• **Crypto Deposits:** Ask "what's your address?" or use /wallet.
-• **Check Balances:** Ask "how much sol do you have?" or use /balance.
-• **Send Funds (Owner Only):** Send native tokens on Solana, Base, Ethereum, Arbitrum, BNB.
-• **Memory & Recaps:** Ask me to recap what we talked about or use /summarize.
+What I can do:
+• Natural Chat & Banter: Tag me (@%s) or reply to me. Powered by Groq fast inference.
+• Proactive Presence: I'll chime in spontaneously to keep the chat lively.
+• Crypto Deposits: Ask "what's your address?" or use /wallet.
+• Check Balances: Ask "how much sol do you have?" or use /balance.
+• Send Funds (Owner Only): Send native tokens on Solana, Base, Ethereum, Arbitrum, BNB.
+• Memory & Recaps: Ask me to recap what we talked about or use /summarize.
 
 Type /help to see all commands and examples!`, roleGreeting, b.api.Self.UserName)
 }
@@ -1061,11 +1063,11 @@ Type /help to see all commands and examples!`, roleGreeting, b.api.Self.UserName
 func (b *Bot) formatHelpMessage(isOwner bool) string {
 	ownerNote := ""
 	if isOwner {
-		ownerNote = "\n👑 *Owner Commands:*\n• `/send <chain> <to> <amount>` - Transfer funds (e.g. `/send base 0x123... 0.01`)\n• `/email <to> <subject> | <body>` - Dispatch email (e.g. `/email dev@example.com Hi | Hello!`)"
+		ownerNote = "\nOwner Commands:\n• `/send <chain> <to> <amount>` - Transfer funds (e.g. `/send base 0x123... 0.01`)\n• `/email <to> <subject> | <body>` - Dispatch email (e.g. `/email dev@example.com Hi | Hello!`)"
 	}
 
-	return "🤖 *Shipp Command & NLP Reference*\n\n" +
-		"💬 *Natural Language:*\n" +
+	return "Shipp Command & NLP Reference\n\n" +
+		"Natural Language:\n" +
 		"You don't need slashes! You can say:\n" +
 		"• \"Shipp, what's your sol address?\"\n" +
 		"• \"Check your balances across chains\"\n" +
@@ -1074,7 +1076,7 @@ func (b *Bot) formatHelpMessage(isOwner bool) string {
 		"• \"Clear memory context\"\n" +
 		"• \"Send 0.01 eth to 0x... on base\" (Owner only)\n" +
 		"• \"Email dev@example.com about the release update\" (Owner only)\n\n" +
-		"⚡ *Slash Commands:*\n" +
+		"Slash Commands:\n" +
 		"• `/ca <address>` or `/token <address>` - Analyze token metrics (MCap, Vol, LP)\n" +
 		"• `/wallet` or `/deposit` - View deposit addresses\n" +
 		"• `/balance` - Check live balances (Solana & EVM)\n" +
@@ -1086,16 +1088,16 @@ func (b *Bot) formatHelpMessage(isOwner bool) string {
 
 func (b *Bot) formatWalletAddressMessage() string {
 	svmAddr, evmAddr := b.crypto.GetAddresses()
-	return fmt.Sprintf("💳 *Shipp Deposit Addresses*\n\n"+
-		"🟣 *Solana (SVM):*\n`%s`\n\n"+
-		"🔵 *EVM (Base, Robinhood, Ethereum, Arbitrum, BSC):*\n`%s`\n\n"+
+	return fmt.Sprintf("Shipp Deposit Addresses\n\n"+
+		"Solana (SVM):\n`%s`\n\n"+
+		"EVM (Base, Robinhood, Ethereum, Arbitrum, BSC):\n`%s`\n\n"+
 		"*(Tap any address above to copy it)*", svmAddr, evmAddr)
 }
 
 func (b *Bot) formatBalanceMessage(ctx context.Context) string {
 	balances, err := b.crypto.GetAllBalances(ctx)
 	if err != nil {
-		return "⚠️ Failed to fetch wallet balances. Please try again in a moment."
+		return "Failed to fetch wallet balances. Please try again in a moment."
 	}
 
 	prices := b.price.GetPrices(ctx)
@@ -1107,16 +1109,16 @@ func (b *Bot) formatBalanceMessage(ctx context.Context) string {
 	bnbUSD := price.ConvertToUSD(balances.BnbVal, "BNB", prices)
 	totalUSD := solUSD + baseUSD + rhUSD + arbUSD + ethUSD + bnbUSD
 
-	return fmt.Sprintf(`💰 **Live Wallet Balances**
+	return fmt.Sprintf(`Wallet Balances:
 
-🟣 **Solana:** %s (%s)
-🔵 **Base:** %s (%s)
-🟢 **Robinhood:** %s (%s)
-🔷 **Arbitrum:** %s (%s)
-💠 **Ethereum:** %s (%s)
-🟡 **BNB Chain:** %s (%s)
+Solana: %s (%s)
+Base: %s (%s)
+Robinhood: %s (%s)
+Arbitrum: %s (%s)
+Ethereum: %s (%s)
+BNB Chain: %s (%s)
 
-💵 **Total Net Worth:** ~%s USD`,
+Total Net Worth: ~%s USD`,
 		balances.Solana, price.FormatUSD(solUSD),
 		balances.Base, price.FormatUSD(baseUSD),
 		balances.Robinhood, price.FormatUSD(rhUSD),
@@ -1341,7 +1343,19 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", analysis)
 }
 
+var emojiPattern = regexp.MustCompile(`[\x{1F600}-\x{1F64F}\x{1F300}-\x{1F5FF}\x{1F680}-\x{1F6FF}\x{1F700}-\x{1F77F}\x{1F780}-\x{1F7FF}\x{1F800}-\x{1F8FF}\x{1F900}-\x{1F9FF}\x{1FA00}-\x{1FAFF}\x{2600}-\x{26FF}\x{2700}-\x{27BF}]`)
+
+func cleanNoEmojis(text string) string {
+	cleaned := emojiPattern.ReplaceAllString(text, "")
+	lines := strings.Split(cleaned, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimLeft(l, " ")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
 func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {
+	text = cleanNoEmojis(text)
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
 	if replyToMsgID > 0 {
@@ -1356,6 +1370,7 @@ func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {
 }
 
 func (b *Bot) sendSimpleMessage(chatID int64, text string) {
+	text = cleanNoEmojis(text)
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
 	_, err := b.api.Send(msg)

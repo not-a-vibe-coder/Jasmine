@@ -632,128 +632,70 @@ func (s *Service) GetRepoOverview(ctx context.Context, owner, repo, customToken 
 
 func FormatWorkflowRuns(owner, repo string, runs []WorkflowRun) string {
 	if len(runs) == 0 {
-		return fmt.Sprintf("No recent GitHub Actions workflow runs found on `%s/%s`.", owner, repo)
+		return fmt.Sprintf("No recent GitHub Actions workflow runs found on %s/%s.", owner, repo)
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("⚡ **Recent GitHub Actions on `%s/%s`:**\n\n", owner, repo))
-	for _, r := range runs {
-		statusIcon := "⏳"
-		if r.Status == "completed" {
-			if r.Conclusion == "success" {
-				statusIcon = "✅"
-			} else if r.Conclusion == "failure" {
-				statusIcon = "❌"
-			} else {
-				statusIcon = "⚠️"
-			}
-		}
-
-		commitMsg := r.HeadCommit.Message
-		if len(commitMsg) > 50 {
-			commitMsg = commitMsg[:47] + "..."
-		}
-		commitMsg = strings.ReplaceAll(commitMsg, "\n", " ")
-
-		headSHA := r.HeadSHA
-		if len(headSHA) > 7 {
-			headSHA = headSHA[:7]
-		}
-
-		sb.WriteString(fmt.Sprintf("%s **%s** (`%s`)\n• Status: `%s` (%s) on `%s`\n• Commit: `%s` (%s) by @%s\n• [View Run](%s)\n\n",
-			statusIcon, r.Name, headSHA, r.Status, r.Conclusion, r.HeadBranch, commitMsg, headSHA, r.Actor.Login, r.HTMLURL))
+	latest := runs[0]
+	name := latest.Name
+	if name == "" {
+		name = "Workflow"
 	}
 
-	return strings.TrimSpace(sb.String())
+	statusDesc := latest.Status
+	if latest.Conclusion != "" {
+		statusDesc = latest.Conclusion
+	}
+
+	return fmt.Sprintf("The latest '%s' run on %s/%s is %s on %s: %s",
+		name, owner, repo, statusDesc, latest.HeadBranch, latest.HTMLURL)
 }
 
 func FormatReleases(owner, repo string, releases []Release) string {
 	if len(releases) == 0 {
-		return fmt.Sprintf("No releases published yet on `%s/%s`.", owner, repo)
+		return fmt.Sprintf("No releases published yet on %s/%s.", owner, repo)
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🏷️ **Releases on `%s/%s`:**\n\n", owner, repo))
-	for _, rel := range releases {
-		name := rel.Name
-		if name == "" {
-			name = rel.TagName
-		}
-
-		pubDate := ""
-		if rel.PublishedAt != nil {
-			pubDate = rel.PublishedAt.Format("Jan 02, 2006")
-		}
-
-		bodyPreview := rel.Body
-		if len(bodyPreview) > 120 {
-			bodyPreview = bodyPreview[:117] + "..."
-		}
-		bodyPreview = strings.ReplaceAll(bodyPreview, "\n", " ")
-
-		sb.WriteString(fmt.Sprintf("📦 **%s** (`%s`) - %s\n• Notes: %s\n• Assets: %d file(s)\n• [View Release](%s)\n\n",
-			name, rel.TagName, pubDate, bodyPreview, len(rel.Assets), rel.HTMLURL))
+	latest := releases[0]
+	tag := latest.TagName
+	if tag == "" {
+		tag = latest.Name
+	}
+	dateStr := ""
+	if latest.PublishedAt != nil {
+		dateStr = " (" + latest.PublishedAt.Format("Jan 02, 2006") + ")"
 	}
 
-	return strings.TrimSpace(sb.String())
+	return fmt.Sprintf("Latest release on %s/%s is %s%s: %s", owner, repo, tag, dateStr, latest.HTMLURL)
 }
 
 func FormatCommits(owner, repo string, commits []CommitInfo) string {
 	if len(commits) == 0 {
-		return fmt.Sprintf("No commits found on `%s/%s`.", owner, repo)
+		return fmt.Sprintf("No commits found on %s/%s.", owner, repo)
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📜 **Recent Commits on `%s/%s`:**\n\n", owner, repo))
-	for _, c := range commits {
-		shortSHA := c.SHA
-		if len(shortSHA) > 7 {
-			shortSHA = shortSHA[:7]
-		}
-
-		firstLine := strings.Split(c.Commit.Message, "\n")[0]
-		if len(firstLine) > 60 {
-			firstLine = firstLine[:57] + "..."
-		}
-
-		author := c.Commit.Author.Name
-		if c.Author.Login != "" {
-			author = "@" + c.Author.Login
-		}
-
-		sb.WriteString(fmt.Sprintf("• [`%s`](%s) %s *(by %s)*\n", shortSHA, c.HTMLURL, firstLine, author))
+	latest := commits[0]
+	shortSHA := latest.SHA
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	firstLine := strings.Split(latest.Commit.Message, "\n")[0]
+	author := latest.Commit.Author.Name
+	if latest.Author.Login != "" {
+		author = "@" + latest.Author.Login
 	}
 
-	return strings.TrimSpace(sb.String())
+	return fmt.Sprintf("Latest commit on %s/%s is '%s' (%s) by %s: %s",
+		owner, repo, firstLine, shortSHA, author, latest.HTMLURL)
 }
 
 func FormatIssues(owner, repo string, issues []IssueInfo) string {
 	if len(issues) == 0 {
-		return fmt.Sprintf("No issues found on `%s/%s`.", owner, repo)
+		return fmt.Sprintf("No open issues found on %s/%s.", owner, repo)
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🐛 **Issues on `%s/%s`:**\n\n", owner, repo))
-	for _, it := range issues {
-		stateIcon := "🟢"
-		if it.State == "closed" {
-			stateIcon = "🔴"
-		}
-
-		var labels []string
-		for _, l := range it.Labels {
-			labels = append(labels, l.Name)
-		}
-		labelStr := ""
-		if len(labels) > 0 {
-			labelStr = fmt.Sprintf(" [%s]", strings.Join(labels, ", "))
-		}
-
-		sb.WriteString(fmt.Sprintf("%s **#%d** [%s]%s: %s *(by @%s)*\n  [View Issue](%s)\n\n",
-			stateIcon, it.Number, strings.ToUpper(it.State), labelStr, it.Title, it.User.Login, it.HTMLURL))
-	}
-
-	return strings.TrimSpace(sb.String())
+	latest := issues[0]
+	return fmt.Sprintf("%s/%s has %d issue(s). Latest is #%d: '%s' by @%s (%s)",
+		owner, repo, len(issues), latest.Number, latest.Title, latest.User.Login, latest.HTMLURL)
 }
 
 func FormatRepoOverview(overview *RepoOverview) string {
@@ -761,14 +703,11 @@ func FormatRepoOverview(overview *RepoOverview) string {
 		return "No repository details available."
 	}
 
-	return fmt.Sprintf("📦 **Repository Overview (%s)**:\n\n• Description: %s\n• Default Branch: `%s`\n• Primary Language: **%s**\n• Stars: ⭐ %d | Forks: 🍴 %d | Open Issues: 🐛 %d\n• Link: %s",
-		overview.FullName,
-		overview.Description,
-		overview.DefaultBranch,
-		overview.Language,
-		overview.Stargazers,
-		overview.Forks,
-		overview.OpenIssues,
-		overview.HTMLURL,
-	)
+	desc := overview.Description
+	if desc == "" {
+		desc = "no description"
+	}
+
+	return fmt.Sprintf("%s (%s, branch: %s): %s | %d stars, %d forks. %s",
+		overview.FullName, overview.Language, overview.DefaultBranch, desc, overview.Stargazers, overview.Forks, overview.HTMLURL)
 }

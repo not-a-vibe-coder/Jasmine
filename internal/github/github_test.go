@@ -226,7 +226,7 @@ func TestGitHubMockEndpoints(t *testing.T) {
 		t.Fatalf("GetWorkflowRuns failed: %v", err)
 	}
 	formattedRuns := FormatWorkflowRuns("davidnzube101", "shipp", runs)
-	if !strings.Contains(formattedRuns, "CI") || !strings.Contains(formattedRuns, "completed") {
+	if !strings.Contains(formattedRuns, "CI") || !strings.Contains(formattedRuns, "success") {
 		t.Errorf("unexpected formatted runs: %s", formattedRuns)
 	}
 

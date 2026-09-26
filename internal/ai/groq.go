@@ -361,7 +361,12 @@ Core Personality & Rules:
 - You have the 'send_email' tool to dispatch emails from your verified address ('shipp@bot.davidnzube.xyz').
 - Your personal receiving inbox and git committer identity is 'shippzero@atomicmail.io' (Atomic Mail). All outbound emails automatically set their reply-to header to route replies directly to your Atomic Mail inbox.
 - ONLY bot owners (@skipp_dev, @shigarakiXBT) can authorize sending emails. If anyone else asks you to send an email, decline with witty banter.
-- When an owner asks you to draft an email, draft it cleanly and casually. When they confirm or explicitly instruct you to send an email, trigger 'send_email'.`, ownersStr, roleNote)
+- When an owner asks you to draft an email, draft it cleanly and casually. When they confirm or explicitly instruct you to send an email, trigger 'send_email'.
+16. ZERO EMOJIS & CONCISE CHAT RESPONSES:
+- Strictly NEVER use emojis anywhere in your responses, reactions, or tool follow-ups. No exceptions.
+- Strictly NO bulky tables, dashboards, or long bulleted lists.
+- Answer questions directly, naturally, and concisely in 1-2 conversational sentences, like a real dev friend in Telegram chat.
+- If asked a question, give the exact answer immediately without long paragraphs or repetitive summaries.`, ownersStr, roleNote)
 }
 
 type AIResponse struct {
@@ -584,8 +589,8 @@ func (c *Client) GenerateToolFollowup(
 	reqBody := ChatCompletionRequest{
 		Model:       c.model,
 		Messages:    msgs,
-		Temperature: 0.6,
-		MaxTokens:   600,
+		Temperature: 0.5,
+		MaxTokens:   250,
 	}
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
