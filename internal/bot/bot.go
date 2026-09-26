@@ -360,7 +360,7 @@ func (b *Bot) handleNLPAndChat(
 	aiResp, err := b.ai.GenerateReply(ctx, username, isOwner, history, prompt, summary)
 	if err != nil {
 		log.Printf("[Bot] AI generate error: %v", err)
-		b.sendReply(chatID, msg.MessageID, "my brain lagged for a second, run that back?")
+		b.sendReply(chatID, msg.MessageID, b.getRandomChatFallback())
 		return
 	}
 
@@ -384,7 +384,7 @@ func (b *Bot) handleNLPAndChat(
 	// 5. Normal conversational reply
 	replyText := strings.TrimSpace(aiResp.Content)
 	if replyText == "" {
-		replyText = "yo, i'm with you."
+		replyText = b.getRandomEmptyAck()
 	}
 
 	b.sendReply(chatID, msg.MessageID, replyText)
@@ -1210,7 +1210,7 @@ func (b *Bot) processImage(
 	aiResp, err := b.ai.GenerateVisionReply(ctx, username, isOwner, history, cleanCaption, perception, summary)
 	if err != nil {
 		log.Printf("[Bot] AI vision reasoning error: %v", err)
-		b.sendReply(chatID, replyToMsgID, "Saw the image, but my brain lagged for a second.")
+		b.sendReply(chatID, replyToMsgID, b.getRandomVisionFallback())
 		return
 	}
 
@@ -1368,4 +1368,45 @@ func (b *Bot) sendSimpleMessage(chatID int64, text string) {
 func (b *Bot) sendChatAction(chatID int64, action string) {
 	chatAction := tgbotapi.NewChatAction(chatID, action)
 	_, _ = b.api.Send(chatAction)
+}
+
+var dynamicChatFallbacks = []string{
+	"my brain lagged for a second, run that back?",
+	"hit a quick hiccup on my end, say that again?",
+	"got distracted by the memepool for a sec, what'd you say?",
+	"dropped a packet there, run it back bro?",
+	"tripped on the chain for a second, what were you saying?",
+	"whoops, mind blipped for a sec. what's that again?",
+	"glitched out for a second, say that one more time?",
+	"lag spiked on my end, run that by me again?",
+	"lost my train of thought for a sec, hit me again anon",
+	"stuttered for a second there, what'd you say?",
+}
+
+var dynamicVisionFallbacks = []string{
+	"Saw the image, but hit a quick glitch processing it. run that back?",
+	"Caught the pic, but my brain lagged for a second. say that again?",
+	"Looked at the image, but tripped over a wire. what are we checking?",
+	"Peeped that, but dropped a frame there. hit me with it again?",
+	"Saw that image, but my eyes blurred for a sec. what's up with it?",
+}
+
+var dynamicEmptyAcks = []string{
+	"yo, i'm with you.",
+	"heard that, what's good?",
+	"got you, what's next?",
+	"locked in, talk to me.",
+	"all eyes anon, what's the move?",
+}
+
+func (b *Bot) getRandomChatFallback() string {
+	return dynamicChatFallbacks[rand.Intn(len(dynamicChatFallbacks))]
+}
+
+func (b *Bot) getRandomVisionFallback() string {
+	return dynamicVisionFallbacks[rand.Intn(len(dynamicVisionFallbacks))]
+}
+
+func (b *Bot) getRandomEmptyAck() string {
+	return dynamicEmptyAcks[rand.Intn(len(dynamicEmptyAcks))]
 }
