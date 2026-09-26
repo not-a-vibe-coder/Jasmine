@@ -350,8 +350,8 @@ func (b *Bot) handleNLPAndChat(
 ) {
 	chatID := msg.Chat.ID
 
-	// 1. Fetch recent history (15 messages)
-	history, _ := b.memory.GetRecentMessages(ctx, chatID, 15)
+	// 1. Fetch recent history (8 messages to stay well within Groq rate limits)
+	history, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
 
 	// 2. Fetch past summary if available
 	summary, _ := b.memory.GetSummary(ctx, chatID)
@@ -1204,7 +1204,7 @@ func (b *Bot) processImage(
 	_ = b.memory.SaveMessage(ctx, chatID, senderID, username, "user", userMemory)
 
 	// 3. Reasoning & Persona Layer (Groq = "The Brain & Voice")
-	history, _ := b.memory.GetRecentMessages(ctx, chatID, 15)
+	history, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
 	summary, _ := b.memory.GetSummary(ctx, chatID)
 
 	aiResp, err := b.ai.GenerateVisionReply(ctx, username, isOwner, history, cleanCaption, perception, summary)

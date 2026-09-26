@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -28,10 +30,26 @@ func NewClient(apiKey, model string, owners []string) *Client {
 		model = "qwen/qwen3.8-27b"
 	}
 	c := &Client{
-		apiKey:     apiKey,
-		model:      model,
-		owners:     owners,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		apiKey: apiKey,
+		model:  model,
+		owners: owners,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					dialer := &net.Dialer{Timeout: 10 * time.Second}
+					conn, err := dialer.DialContext(ctx, network, addr)
+					if err != nil {
+						// Fallback to IPv4 if dual-stack/IPv6 fails with no route to host
+						return dialer.DialContext(ctx, "tcp4", addr)
+					}
+					return conn, nil
+				},
+				ForceAttemptHTTP2:   true,
+				TLSHandshakeTimeout: 10 * time.Second,
+			},
+		},
 	}
 	c.tools = c.buildTools()
 	return c
@@ -166,7 +184,7 @@ func (c *Client) buildTools() []ToolDefinition {
 					"properties": map[string]interface{}{
 						"repo": map[string]interface{}{
 							"type":        "string",
-							"description": "The repository in 'owner/repo' format (e.g. 'davidnzube101/shipp')",
+							"description": "The repository slug in 'owner/repo' format (e.g. 'davidnzube101/shipp') or full GitHub URL (e.g. 'https://github.com/DavidNzube101/shipp'). Both are accepted.",
 						},
 						"view": map[string]interface{}{
 							"type":        "string",
@@ -199,7 +217,7 @@ func (c *Client) buildTools() []ToolDefinition {
 					"properties": map[string]interface{}{
 						"repo": map[string]interface{}{
 							"type":        "string",
-							"description": "The repository in 'owner/repo' format (e.g. 'davidnzube101/shipp')",
+							"description": "The repository in 'owner/repo' format or full GitHub URL.",
 						},
 						"path": map[string]interface{}{
 							"type":        "string",
@@ -240,7 +258,7 @@ func (c *Client) buildTools() []ToolDefinition {
 					"properties": map[string]interface{}{
 						"repo": map[string]interface{}{
 							"type":        "string",
-							"description": "The repository in 'owner/repo' format (e.g. 'davidnzube101/shipp')",
+							"description": "The repository in 'owner/repo' format or full GitHub URL.",
 						},
 						"pr_number": map[string]interface{}{
 							"type":        "integer",
@@ -326,6 +344,7 @@ Core Personality & Rules:
 13. GitHub Code Analysis, Project Intelligence & Editing:
 - You have tools to inspect projects ('github_inspect_project'), edit code/docs ('github_edit_file'), and merge PRs ('github_merge_pr').
 - Project Intelligence: You can check GitHub Actions workflow runs (CI status), releases & download assets, recent commits, open/closed issues, and project overviews. Answer questions about these naturally and concisely.
+- URL Handling: Whether the user specifies a repo slug (e.g. 'davidnzube101/shipp') or a full GitHub link (e.g. 'https://github.com/DavidNzube101/shipp'), ALWAYS immediately trigger 'github_inspect_project'. NEVER ask redundant confirmation questions like 'Did you mean owner/repo?' or complain that a URL is short.
 - Safe PR-first default: When asked to edit a repo, default to opening a Pull Request unless the user explicitly asks to "push to main" or "commit directly to main".
 - If it's ambiguous, feel free to ask naturally: "Want me to open a PR for you to review first, or push straight to main?"
 - Custom Credentials: If the user provides a custom PAT, custom name, or custom email to use for the repo, pass them into custom_pat, git_name, and git_email. Otherwise, leave them empty to use your default Shipp identity.
@@ -384,9 +403,13 @@ func (c *Client) GenerateReply(
 		if h.Sender != "" && role == "user" {
 			prefix = fmt.Sprintf("@%s: ", h.Sender)
 		}
+		content := h.Content
+		if len(content) > 350 {
+			content = content[:350] + "..."
+		}
 		msgs = append(msgs, ChatMessage{
 			Role:    role,
-			Content: prefix + h.Content,
+			Content: prefix + content,
 		})
 	}
 
@@ -462,9 +485,13 @@ func (c *Client) GenerateVisionReply(
 		if h.Sender != "" && role == "user" {
 			prefix = fmt.Sprintf("@%s: ", h.Sender)
 		}
+		content := h.Content
+		if len(content) > 350 {
+			content = content[:350] + "..."
+		}
 		msgs = append(msgs, ChatMessage{
 			Role:    role,
-			Content: prefix + h.Content,
+			Content: prefix + content,
 		})
 	}
 
@@ -660,29 +687,50 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", DefaultGroqURL, bytes.NewBuffer(data))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	maxRetries := 2
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", DefaultGroqURL, bytes.NewBuffer(data))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
 
-	var chatResp ChatCompletionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return nil, err
+		respBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		var chatResp ChatCompletionResponse
+		_ = json.Unmarshal(respBytes, &chatResp)
+
+		// Handle rate limit (429 or token exhaustion) with automatic backoff retry
+		if resp.StatusCode == http.StatusTooManyRequests || (chatResp.Error != nil && strings.Contains(strings.ToLower(chatResp.Error.Message), "rate limit")) {
+			if attempt < maxRetries {
+				log.Printf("[AI] Groq rate limit reached (attempt %d/%d). Pausing 2.8s for window reset...", attempt+1, maxRetries)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(2800 * time.Millisecond):
+					continue
+				}
+			}
+		}
+
+		if chatResp.Error != nil {
+			return nil, fmt.Errorf("groq api error: %s (%s)", chatResp.Error.Message, chatResp.Error.Type)
+		}
+
+		return &chatResp, nil
 	}
 
-	if chatResp.Error != nil {
-		return nil, fmt.Errorf("groq api error: %s (%s)", chatResp.Error.Message, chatResp.Error.Type)
-	}
-
-	return &chatResp, nil
+	return nil, fmt.Errorf("groq api rate limit exceeded after retries")
 }
 
 func (c *Client) AnalyzeDocument(ctx context.Context, senderUsername string, isOwner bool, filename string, content string, userPrompt string) (string, error) {
