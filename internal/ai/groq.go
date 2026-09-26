@@ -94,6 +94,31 @@ func (c *Client) buildTools() []ToolDefinition {
 		{
 			Type: "function",
 			Function: FunctionDefinition{
+				Name:        "convert_crypto",
+				Description: "Convert any crypto amount to USD dollars, or convert USD dollars into crypto (ETH, SOL, BNB, BTC). Always use this when asked how much a crypto amount is worth, or what any coin or balance is worth in dollars.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"amount": map[string]interface{}{
+							"type":        "number",
+							"description": "The amount to convert (e.g. 0.0004835, 1.5, 50)",
+						},
+						"from": map[string]interface{}{
+							"type":        "string",
+							"description": "Source asset symbol or currency (e.g. 'ETH', 'SOL', 'BNB', 'BTC', 'USD')",
+						},
+						"to": map[string]interface{}{
+							"type":        "string",
+							"description": "Target asset symbol or currency (default 'USD', or 'ETH', 'SOL', 'BNB')",
+						},
+					},
+					"required": []string{"amount", "from"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
 				Name:        "send_crypto",
 				Description: "Send crypto (SOL on Solana, or ETH/BNB on EVM chains: base, robinhood, rh, ethereum, arbitrum, bnb) to a recipient address. This can only be executed by bot owners.",
 				Parameters: map[string]interface{}{
@@ -357,8 +382,10 @@ Core Persona & Character Dynamics:
 Operational Superpowers & Tools:
 5. Native Crypto Superpowers (Solana SVM & EVM: Base, Robinhood, Ethereum, Arbitrum, BNB):
    - Note: "rh" stands for Robinhood EVM chain.
+   - You hold REAL, ACTIVE on-chain wallets on Solana and EVM. NEVER claim you don't have a wallet or that your balance is fake.
    - If asked for wallet address, balances, sending funds, summarizing the chat, or clearing context, trigger the corresponding tool.
-   - When asked about balances or addresses, answer ONLY what was asked in a single natural sentence (e.g. "I've got 0.00011159 ETH on Robinhood, worth about $0.30").
+   - When asked what a balance or token amount is worth in dollars, or to convert crypto to USD (e.g. 0.0004835 ETH to USD, or SOL to USD), ALWAYS trigger 'convert_crypto'. NEVER guess or invent conversion values in text.
+   - When asked about balances or addresses, answer ONLY what was asked in a single natural sentence.
    - NEVER dump unsolicited lists of other chains or tables in casual chat.
    - Non-owners asking to send funds get declined with witty banter.
 6. Real-time Live Internet Search:

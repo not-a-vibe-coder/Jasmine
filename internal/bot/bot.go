@@ -643,6 +643,36 @@ func (b *Bot) executeToolCall(
 			balances.BNB, price.FormatUSD(bnbUSD),
 			price.FormatUSD(totalUSD))
 
+	case "convert_crypto":
+		var args struct {
+			Amount float64 `json:"amount"`
+			From   string  `json:"from"`
+			To     string  `json:"to"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.From == "" {
+			args.From = "ETH"
+		}
+		if args.To == "" {
+			args.To = "USD"
+		}
+		if args.Amount <= 0 {
+			return "Please specify an amount greater than 0 to convert."
+		}
+
+		prices := b.price.GetPrices(ctx)
+		result, rate, err := price.Convert(args.Amount, args.From, args.To, prices)
+		if err != nil {
+			return fmt.Sprintf("Couldn't convert %g %s to %s: %v", args.Amount, strings.ToUpper(args.From), strings.ToUpper(args.To), err)
+		}
+
+		if strings.ToUpper(args.To) == "USD" {
+			return fmt.Sprintf("%g %s is worth %s USD (rate: %s/%s).",
+				args.Amount, strings.ToUpper(args.From), price.FormatUSD(result), price.FormatUSD(rate), strings.ToUpper(args.From))
+		}
+		return fmt.Sprintf("%g %s is approximately %s %s.",
+			args.Amount, strings.ToUpper(args.From), price.FormatCrypto(result, args.To), strings.ToUpper(args.To))
+
 	case "send_crypto":
 		var args ai.SendCryptoArgs
 		if err := json.Unmarshal([]byte(arguments), &args); err != nil {

@@ -27,6 +27,30 @@ func TestPriceConversion(t *testing.T) {
 	if tiny != "$0.0042" {
 		t.Errorf("expected $0.0042, got %s", tiny)
 	}
+
+	// Test 0.0004835 ETH (the exact amount from Robinhood)
+	rhUSD, rate, err := Convert(0.0004835, "ETH", "USD", p)
+	if err != nil {
+		t.Fatalf("unexpected error converting ETH: %v", err)
+	}
+	if rhUSD < 1.25 || rhUSD > 1.27 {
+		t.Errorf("expected ~1.26 USD, got %f", rhUSD)
+	}
+	if FormatUSD(rhUSD) != "$1.26" {
+		t.Errorf("expected $1.26, got %s", FormatUSD(rhUSD))
+	}
+	if rate != 2600.0 {
+		t.Errorf("expected rate 2600.0, got %f", rate)
+	}
+
+	// Test USD to SOL
+	solAmount, _, err := Convert(50.0, "USD", "SOL", p)
+	if err != nil {
+		t.Fatalf("unexpected error converting USD to SOL: %v", err)
+	}
+	if solAmount < 0.33 || solAmount > 0.34 {
+		t.Errorf("expected ~0.333 SOL, got %f", solAmount)
+	}
 }
 
 func TestPriceServiceLiveOrFallback(t *testing.T) {

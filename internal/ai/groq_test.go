@@ -48,6 +48,7 @@ func TestToolsDefinition(t *testing.T) {
 	expectedTools := map[string]bool{
 		"get_wallet_address":     false,
 		"get_balances":           false,
+		"convert_crypto":          false,
 		"send_crypto":            false,
 		"summarize_context":      false,
 		"clear_context":          false,
