@@ -508,6 +508,8 @@ func (b *Bot) handleNLPAndChat(
 					followup = formatEmergencyBalanceFallback(toolResult)
 				} else if tc.Function.Name == "convert_crypto" {
 					followup = formatEmergencyConvertFallback(toolResult)
+				} else if tc.Function.Name == "get_wallet_address" {
+					followup = formatEmergencyAddressFallback(toolResult)
 				} else {
 					followup = toolResult
 				}
@@ -684,13 +686,24 @@ func (b *Bot) executeToolCall(
 		svmAddr, evmAddr := b.crypto.GetAddresses()
 		chain := strings.ToLower(strings.TrimSpace(args.Chain))
 		if chain == "sol" || chain == "solana" || chain == "svm" {
-			return fmt.Sprintf("Solana deposit address: %s", svmAddr)
-		} else if chain == "rh" || chain == "robinhood" {
-			return fmt.Sprintf("Robinhood (RH) deposit address: %s", evmAddr)
+			data, _ := json.Marshal(map[string]interface{}{
+				"chain":   "solana",
+				"address": svmAddr,
+			})
+			return string(data)
 		} else if chain != "" && chain != "all" {
-			return fmt.Sprintf("EVM (%s) deposit address: %s", strings.ToUpper(chain), evmAddr)
+			data, _ := json.Marshal(map[string]interface{}{
+				"chain":   chain,
+				"address": evmAddr,
+			})
+			return string(data)
 		}
-		return fmt.Sprintf("Solana (SVM): %s\nEVM (Base, Robinhood, Ethereum, Arbitrum, BSC): %s", svmAddr, evmAddr)
+		data, _ := json.Marshal(map[string]interface{}{
+			"solana_address":       svmAddr,
+			"evm_address":          evmAddr,
+			"supported_evm_chains": []string{"base", "robinhood", "ethereum", "arbitrum", "bnb"},
+		})
+		return string(data)
 
 	case "get_balances":
 		var args struct {
@@ -1942,6 +1955,23 @@ func formatEmergencyConvertFallback(toolResult string) string {
 		return fmt.Sprintf("%.6f %s is about $%.2f USD.", data.Amount, data.From, data.Result)
 	}
 	return fmt.Sprintf("%.2f %s is about %.6f %s.", data.Amount, data.From, data.Result, data.To)
+}
+
+func formatEmergencyAddressFallback(toolResult string) string {
+	var data struct {
+		SolanaAddr string   `json:"solana_address"`
+		EVMAddr    string   `json:"evm_address"`
+		Chain      string   `json:"chain"`
+		Address    string   `json:"address"`
+		EVMChains  []string `json:"supported_evm_chains"`
+	}
+	if err := json.Unmarshal([]byte(toolResult), &data); err != nil {
+		return toolResult
+	}
+	if data.Chain != "" {
+		return fmt.Sprintf("%s deposit address: `%s`", strings.ToUpper(data.Chain), data.Address)
+	}
+	return fmt.Sprintf("Solana: `%s`\nEVM: `%s`", data.SolanaAddr, data.EVMAddr)
 }
 
 func cleanNoEmojis(text string) string {

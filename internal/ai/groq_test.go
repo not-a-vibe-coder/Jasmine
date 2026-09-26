@@ -213,15 +213,27 @@ func TestLiveModelDynamicToolFollowup(t *testing.T) {
 
 	ctx := context.Background()
 	c := NewClient(groqKey, "qwen/qwen3.8-27b", geminiKey, []string{"skipp_dev"})
-	rawData := `{"total_usd_value": "$1.30", "active_holdings": [{"chain": "robinhood", "token": "ETH", "amount": "0.0004835", "usd": "$1.30"}], "dry_chains": ["solana", "base", "ethereum", "arbitrum", "bnb"]}`
 
-	out, err := c.GenerateToolFollowup(ctx, "skipp_dev", true, "How much you got?", "get_balances", "call_1", `{}`, rawData, nil)
+	// 1. Dynamic balance followup test
+	rawBalData := `{"total_usd_value": "$1.30", "active_holdings": [{"chain": "robinhood", "token": "ETH", "amount": "0.0004835", "usd": "$1.30"}], "dry_chains": ["solana", "base", "ethereum", "arbitrum", "bnb"]}`
+	outBal, err := c.GenerateToolFollowup(ctx, "skipp_dev", true, "How much you got?", "get_balances", "call_1", `{}`, rawBalData, nil)
 	if err != nil {
-		t.Fatalf("GenerateToolFollowup failed: %v", err)
+		t.Fatalf("GenerateToolFollowup balance failed: %v", err)
 	}
-	t.Logf("Generated dynamic followup: %s", out)
-	if strings.TrimSpace(out) == "" {
-		t.Errorf("expected non-empty output")
+	t.Logf("Generated dynamic balance followup: %s", outBal)
+	if strings.TrimSpace(outBal) == "" {
+		t.Errorf("expected non-empty balance output")
+	}
+
+	// 2. Dynamic address followup test
+	rawAddrData := `{"solana_address": "8N3V7dZKpU19kL", "evm_address": "0x4b7e1234567890", "supported_evm_chains": ["base", "robinhood", "ethereum", "arbitrum", "bnb"]}`
+	outAddr, err := c.GenerateToolFollowup(ctx, "skipp_dev", true, "where can i send you some funds?", "get_wallet_address", "call_2", `{}`, rawAddrData, nil)
+	if err != nil {
+		t.Fatalf("GenerateToolFollowup address failed: %v", err)
+	}
+	t.Logf("Generated dynamic address followup: %s", outAddr)
+	if strings.TrimSpace(outAddr) == "" {
+		t.Errorf("expected non-empty address output")
 	}
 }
 
