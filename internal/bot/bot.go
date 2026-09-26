@@ -381,6 +381,22 @@ func (b *Bot) handleNLPAndChat(
 	// 4. Handle Tool Calls if any
 	if len(aiResp.ToolCalls) > 0 {
 		for _, tc := range aiResp.ToolCalls {
+			// For long-running tools (github edit), ack immediately and run async.
+			if tc.Function.Name == "github_edit_file" {
+				b.sendReply(chatID, msg.MessageID, b.getRandomWorkingAck())
+				tcCopy := tc
+				go func() {
+					toolResult := b.executeToolCall(ctx, chatID, tcCopy.Function.Name, tcCopy.Function.Arguments, username, isOwner)
+					followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, tcCopy.Function.Name, tcCopy.ID, tcCopy.Function.Arguments, toolResult)
+					if err != nil || followup == "" {
+						followup = toolResult
+					}
+					b.sendSimpleMessage(chatID, followup)
+					_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", followup)
+				}()
+				return
+			}
+
 			toolResult := b.executeToolCall(ctx, chatID, tc.Function.Name, tc.Function.Arguments, username, isOwner)
 
 			// Generate conversational response incorporating tool result
@@ -394,6 +410,7 @@ func (b *Bot) handleNLPAndChat(
 			return
 		}
 	}
+
 
 	// 5. Intercept hallucinated git actions or explicit push/merge commands that bypassed tool calls
 	replyText := strings.TrimSpace(aiResp.Content)
@@ -449,9 +466,14 @@ func (b *Bot) trySmartDispatch(
 		"instruction":  prompt,
 		"push_to_main": pushToMain,
 	})
-	toolResult := b.executeToolCall(ctx, msg.Chat.ID, "github_edit_file", string(argsJSON), username, isOwner)
-	b.sendReply(msg.Chat.ID, msg.MessageID, toolResult)
-	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+
+	// Ack immediately, then do the work in background and follow up when done.
+	b.sendReply(msg.Chat.ID, msg.MessageID, b.getRandomWorkingAck())
+	go func() {
+		toolResult := b.executeToolCall(ctx, msg.Chat.ID, "github_edit_file", string(argsJSON), username, isOwner)
+		b.sendSimpleMessage(msg.Chat.ID, toolResult)
+		_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+	}()
 	return true
 }
 
@@ -496,12 +518,17 @@ func (b *Bot) tryInterceptAction(
 				"instruction":  instruction,
 				"push_to_main": pushToMain,
 			})
-			toolResult := b.executeToolCall(ctx, chatID, "github_edit_file", string(argsJSON), username, isOwner)
-			b.sendReply(chatID, msg.MessageID, toolResult)
-			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+			// Ack first, then work in background.
+			b.sendReply(chatID, msg.MessageID, b.getRandomWorkingAck())
+			go func() {
+				toolResult := b.executeToolCall(ctx, chatID, "github_edit_file", string(argsJSON), username, isOwner)
+				b.sendSimpleMessage(chatID, toolResult)
+				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+			}()
 			return true
 		}
 	}
+
 
 	// Merge interception — catches "merge", "merge it", "merge pr", "merge the pr", etc.
 	isMergeRequest := strings.Contains(lowerPrompt, "merge")
@@ -1620,6 +1647,17 @@ var dynamicEmptyAcks = []string{
 	"all eyes anon, what's the move?",
 }
 
+var dynamicWorkingAcks = []string{
+	"on it.",
+	"give me a sec.",
+	"working on it.",
+	"one sec.",
+	"got it, gimme a moment.",
+	"already on it.",
+	"on it, just a sec.",
+	"let me handle that real quick.",
+}
+
 func (b *Bot) getRandomChatFallback() string {
 	return dynamicChatFallbacks[rand.Intn(len(dynamicChatFallbacks))]
 }
@@ -1630,4 +1668,8 @@ func (b *Bot) getRandomVisionFallback() string {
 
 func (b *Bot) getRandomEmptyAck() string {
 	return dynamicEmptyAcks[rand.Intn(len(dynamicEmptyAcks))]
+}
+
+func (b *Bot) getRandomWorkingAck() string {
+	return dynamicWorkingAcks[rand.Intn(len(dynamicWorkingAcks))]
 }
