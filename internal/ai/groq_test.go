@@ -40,6 +40,9 @@ func TestToolsDefinition(t *testing.T) {
 		"clear_context":      false,
 		"web_search":         false,
 		"analyze_token":      false,
+		"github_view_repo":   false,
+		"github_edit_file":   false,
+		"github_merge_pr":    false,
 	}
 
 	for _, tool := range tools {

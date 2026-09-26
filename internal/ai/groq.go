@@ -156,6 +156,81 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "github_view_repo",
+				Description: "Inspect a GitHub repository, view file contents (e.g. README.md, code files), or list repository files. Use whenever asked to check, view, or review a GitHub repo or file.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"repo": map[string]interface{}{
+							"type":        "string",
+							"description": "The repository in 'owner/repo' format (e.g. 'davidnzube101/shipp')",
+						},
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional file path to view (e.g. 'README.md', 'cmd/bot/main.go'). Leave empty to list files in repo root.",
+						},
+						"branch": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional branch name. Defaults to the repository's default branch.",
+						},
+					},
+					"required": []string{"repo"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "github_edit_file",
+				Description: "Analyze, rewrite, edit, or refactor a file (e.g. README.md, documentation, source code) on a GitHub repository. Safely creates a branch and opens a Pull Request by default. If the user explicitly asks to 'push to main' or 'commit directly to main', set push_to_main to true.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"repo": map[string]interface{}{
+							"type":        "string",
+							"description": "The repository in 'owner/repo' format (e.g. 'davidnzube101/shipp')",
+						},
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "Path of the file to edit (e.g. 'README.md', 'internal/bot/bot.go'). Defaults to 'README.md' if editing headers or documentation.",
+						},
+						"instruction": map[string]interface{}{
+							"type":        "string",
+							"description": "Clear description of the edits to make (e.g. 'rephrase the description under the Shipp title to be more concise')",
+						},
+						"push_to_main": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Set to true ONLY if user explicitly requested to push or commit directly to the default branch (main). Defaults to false (safe PR creation).",
+						},
+					},
+					"required": []string{"repo", "instruction"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "github_merge_pr",
+				Description: "Merge an open Pull Request on a GitHub repository. Use whenever the owner asks to merge a PR (e.g. 'merge it', 'merge PR #4'). Only bot owners can merge PRs.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"repo": map[string]interface{}{
+							"type":        "string",
+							"description": "The repository in 'owner/repo' format (e.g. 'davidnzube101/shipp')",
+						},
+						"pr_number": map[string]interface{}{
+							"type":        "integer",
+							"description": "The Pull Request number to merge (e.g. 4)",
+						},
+					},
+					"required": []string{"repo", "pr_number"},
+				},
+			},
+		},
 	}
 }
 
@@ -198,8 +273,13 @@ Core Personality & Rules:
 - Keep your response casual, sharp, and natural (1 to 3 sentences max).
 - Sound like a cool, witty friend reacting in the Telegram chat, NOT an essay writer or formal AI.
 - Highlight the key visual facts (numbers, profits, coin, colors, what it actually is) with quick banter.
-- Never write long essays or dump bulleted lists unless the user explicitly asked for a detailed breakdown.
-12. If asked how you perceive images or whether Gemini has access to memory: You (Groq) are the brain and conversational voice with full access to chat memory, history, and user relationships. Gemini operates solely as your objective "eyes" to perceive visual facts, OCR text, and colors, but Gemini has zero access to memories or chat history.`, ownersStr, roleNote)
+12. If asked how you perceive images or whether Gemini has access to memory: You (Groq) are the brain and conversational voice with full access to chat memory, history, and user relationships. Gemini operates solely as your objective "eyes" to perceive visual facts, OCR text, and colors, but Gemini has zero access to memories or chat history.
+13. GitHub Code Analysis & Editing:
+- You have tools to view repositories ('github_view_repo'), edit code/docs ('github_edit_file'), and merge PRs ('github_merge_pr').
+- Safe PR-first default: When asked to edit a repo, default to opening a Pull Request unless the user explicitly asks to "push to main" or "commit directly to main".
+- If it's ambiguous or you feel like asking, feel free to ask naturally: "Want me to open a PR for you to review first, or push straight to main?"
+- If the file, title, or section the user asked to change does NOT exist in the repo, explain factually what you saw in the repo and ask for clarification rather than making assumptions or hallucinating.
+- Only bot owners (@skipp_dev, @shigarakiXBT) can authorize code edits, commits, and PR merges.`, ownersStr, roleNote)
 }
 
 type AIResponse struct {
@@ -576,4 +656,39 @@ func (c *Client) AnalyzeDocument(ctx context.Context, senderUsername string, isO
 	}
 	return "Couldn't generate document analysis right now.", nil
 }
+
+// RefactorFileContent uses Groq to apply user instructions accurately to a file's content.
+// If the target section or text doesn't exist, it flags it cleanly with [TARGET_NOT_FOUND: ...]
+func (c *Client) RefactorFileContent(ctx context.Context, filename string, originalContent string, instruction string) (string, error) {
+	systemPrompt := `You are an expert software developer and technical writer.
+You are given a file's existing content and an instruction on how to edit or refactor it.
+Rules:
+1. Apply the user's instruction accurately.
+2. If the user's instruction asks to edit a specific title, header, function, or section that DOES NOT EXIST in the file, DO NOT invent or fabricate it. Instead, start your response with:
+"[TARGET_NOT_FOUND: <clear 1-sentence explanation>]" followed by an overview of the existing sections or key parts found in the file.
+3. Preserve all other unrelated content, markdown formatting, comments, and structure intact.
+4. If successful, output the FULL complete updated file content with NO conversational chit-chat and NO markdown code fences wrapping the entire response (unless the file itself is markdown).`
+
+	prompt := fmt.Sprintf("File: %s\n\nInstruction: %s\n\n--- Current Content ---\n%s", filename, instruction, originalContent)
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0.2,
+		MaxTokens:   2500,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) > 0 {
+		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+	}
+	return "", fmt.Errorf("no refactor response generated")
+}
+
 

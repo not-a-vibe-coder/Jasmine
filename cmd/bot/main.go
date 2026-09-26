@@ -12,6 +12,7 @@ import (
 	"shipp/internal/bot"
 	"shipp/internal/config"
 	"shipp/internal/crypto"
+	"shipp/internal/github"
 	"shipp/internal/memory"
 	"shipp/internal/price"
 	"shipp/internal/search"
@@ -75,8 +76,11 @@ func main() {
 	visionSvc := vision.NewService(cfg.GeminiAPIKey)
 	log.Printf("[Main] Vision Service initialized (Gemini Flash Multimodal active)")
 
+	githubSvc := github.NewService(cfg.GithubPAT, cfg.GithubUsername)
+	log.Printf("[Main] GitHub Service initialized for user @%s", cfg.GithubUsername)
+
 	// 5. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc)
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}

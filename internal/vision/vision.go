@@ -38,18 +38,24 @@ func (s *Service) PerceiveImage(ctx context.Context, imageBytes []byte, mimeType
 		mimeType = "image/jpeg"
 	}
 
+	// 0. Instant Deterministic QR Code Detection (pure Go, 100% precision)
+	var qrPrefix string
+	if qrData, err := DecodeQRCode(imageBytes); err == nil && qrData != "" {
+		qrPrefix = fmt.Sprintf("[Deterministic QR Code Decoded: \"%s\"]\n\n", qrData)
+	}
+
 	// 1. Primary: Gemini Vision (2.5 Flash)
 	if s.geminiKey != "" {
 		res, err := s.callGemini(ctx, "gemini-2.5-flash", imageBytes, mimeType, userPrompt)
 		if err == nil && strings.TrimSpace(res) != "" {
-			return res, nil
+			return qrPrefix + res, nil
 		}
 		log.Printf("[VisionService] Gemini 2.5 Flash failed: %v. Retrying with gemini-flash-latest...", err)
 
 		// 1b. Fallback Gemini model
 		res, err = s.callGemini(ctx, "gemini-flash-latest", imageBytes, mimeType, userPrompt)
 		if err == nil && strings.TrimSpace(res) != "" {
-			return res, nil
+			return qrPrefix + res, nil
 		}
 		log.Printf("[VisionService] Gemini fallback model failed: %v. Falling back to OCR...", err)
 	}
@@ -57,7 +63,11 @@ func (s *Service) PerceiveImage(ctx context.Context, imageBytes []byte, mimeType
 	// 2. Secondary Fallback: OCR text extraction
 	ocrText, ocrErr := s.fallbackOCR(ctx, imageBytes)
 	if ocrErr == nil && strings.TrimSpace(ocrText) != "" {
-		return fmt.Sprintf("[Visual OCR Text Extracted]:\n%s", strings.TrimSpace(ocrText)), nil
+		return qrPrefix + fmt.Sprintf("[Visual OCR Text Extracted]:\n%s", strings.TrimSpace(ocrText)), nil
+	}
+
+	if qrPrefix != "" {
+		return strings.TrimSpace(qrPrefix), nil
 	}
 
 	return "", fmt.Errorf("unable to visually perceive image or extract OCR text")
