@@ -381,8 +381,62 @@ func (b *Bot) handleNLPAndChat(
 		}
 	}
 
-	// 5. Normal conversational reply
+	// 5. Intercept hallucinated git actions or explicit push/merge commands that bypassed tool calls
 	replyText := strings.TrimSpace(aiResp.Content)
+	lowerReply := strings.ToLower(replyText)
+	lowerPrompt := strings.ToLower(prompt)
+
+	isPushOrEditRequest := strings.Contains(lowerPrompt, "push to main") ||
+		strings.Contains(lowerPrompt, "push straight") ||
+		strings.Contains(lowerPrompt, "rephrase it and push") ||
+		strings.Contains(lowerPrompt, "commit to main")
+	isClaimingPushed := strings.Contains(lowerReply, "pushed straight to main") ||
+		strings.Contains(lowerReply, "pushed to main") ||
+		strings.Contains(lowerReply, "pushed directly") ||
+		(strings.Contains(lowerReply, "opened pr") && !strings.Contains(lowerReply, "want me to open a pr"))
+
+	if isOwner && (isPushOrEditRequest || isClaimingPushed) {
+		recoveredRepo := extractRepoFromHistory(history, prompt)
+		if recoveredRepo != "" {
+			log.Printf("[Bot] Intercepted push without tool execution. Executing github_edit_file on %s", recoveredRepo)
+			pushToMain := strings.Contains(lowerPrompt, "main") || strings.Contains(lowerReply, "main")
+			filePath := "README.md"
+			instruction := prompt
+			for i := len(history) - 1; i >= 0; i-- {
+				if history[i].Role == "user" && !strings.Contains(strings.ToLower(history[i].Content), "push to main") {
+					instruction = history[i].Content + " - " + prompt
+					break
+				}
+			}
+			argsJSON, _ := json.Marshal(map[string]interface{}{
+				"repo":         recoveredRepo,
+				"path":         filePath,
+				"instruction":  instruction,
+				"push_to_main": pushToMain,
+			})
+			toolResult := b.executeToolCall(ctx, chatID, "github_edit_file", string(argsJSON), username, isOwner)
+			replyText = toolResult
+		}
+	}
+
+	isMergeRequest := strings.Contains(lowerPrompt, "merge it") || strings.Contains(lowerPrompt, "merge pr")
+	isClaimingMerged := strings.Contains(lowerReply, "merged pr") || strings.Contains(lowerReply, "merged pull request")
+	if isOwner && (isMergeRequest || isClaimingMerged) {
+		recoveredRepo := extractRepoFromHistory(history, prompt)
+		if recoveredRepo != "" {
+			prNum := extractPRNumber(history, prompt)
+			if prNum > 0 {
+				log.Printf("[Bot] Intercepted merge without tool execution. Executing github_merge_pr on %s #%d", recoveredRepo, prNum)
+				argsJSON, _ := json.Marshal(map[string]interface{}{
+					"repo":      recoveredRepo,
+					"pr_number": prNum,
+				})
+				toolResult := b.executeToolCall(ctx, chatID, "github_merge_pr", string(argsJSON), username, isOwner)
+				replyText = toolResult
+			}
+		}
+	}
+
 	if replyText == "" {
 		replyText = b.getRandomEmptyAck()
 	}
@@ -646,6 +700,10 @@ func (b *Bot) executeToolCall(
 			GitEmail    string `json:"git_email"`
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.Repo == "" {
+			recent, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
+			args.Repo = extractRepoFromHistory(recent, "")
+		}
 		if args.Repo == "" || args.Instruction == "" {
 			return "Please specify both the repository and what changes you want me to make."
 		}
@@ -748,6 +806,14 @@ func (b *Bot) executeToolCall(
 			CustomPAT string `json:"custom_pat"`
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.Repo == "" {
+			recent, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
+			args.Repo = extractRepoFromHistory(recent, "")
+		}
+		if args.PRNumber <= 0 {
+			recent, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
+			args.PRNumber = extractPRNumber(recent, "")
+		}
 		if args.Repo == "" || args.PRNumber <= 0 {
 			return "Please specify the repository and PR number (e.g. 'merge PR #4 on davidnzube101/shipp')."
 		}
@@ -1344,14 +1410,71 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 }
 
 var emojiPattern = regexp.MustCompile(`[\x{1F600}-\x{1F64F}\x{1F300}-\x{1F5FF}\x{1F680}-\x{1F6FF}\x{1F700}-\x{1F77F}\x{1F780}-\x{1F7FF}\x{1F800}-\x{1F8FF}\x{1F900}-\x{1F9FF}\x{1FA00}-\x{1FAFF}\x{2600}-\x{26FF}\x{2700}-\x{27BF}]`)
+var githubURLRegex = regexp.MustCompile(`(?i)github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)`)
+var repoSlugRegex = regexp.MustCompile(`\b([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)\b`)
+var prRegex = regexp.MustCompile(`(?i)(?:pr|pull\s*request)\s*#?(\d+)`)
 
 func cleanNoEmojis(text string) string {
 	cleaned := emojiPattern.ReplaceAllString(text, "")
+	// Replace em dashes (—) and en dashes (–) with standard hyphens
+	cleaned = strings.ReplaceAll(cleaned, "—", " - ")
+	cleaned = strings.ReplaceAll(cleaned, "–", " - ")
+	cleaned = regexp.MustCompile(`[ \t]{2,}`).ReplaceAllString(cleaned, " ")
 	lines := strings.Split(cleaned, "\n")
 	for i, l := range lines {
 		lines[i] = strings.TrimLeft(l, " ")
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func extractRepoFromHistory(history []memory.Message, currentPrompt string) string {
+	// 1. Check current prompt for full github URL
+	if m := githubURLRegex.FindStringSubmatch(currentPrompt); len(m) > 1 {
+		return strings.TrimSuffix(m[1], ".git")
+	}
+
+	// 2. Check recent messages in reverse order
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i].Content
+		if m := githubURLRegex.FindStringSubmatch(msg); len(m) > 1 {
+			return strings.TrimSuffix(m[1], ".git")
+		}
+	}
+
+	// 3. Fallback: check for slug pattern in recent user messages
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role != "user" {
+			continue
+		}
+		msg := history[i].Content
+		if m := repoSlugRegex.FindStringSubmatch(msg); len(m) > 1 {
+			candidate := m[1]
+			lower := strings.ToLower(candidate)
+			if !strings.Contains(lower, "text/") &&
+				!strings.Contains(lower, "application/") &&
+				!strings.Contains(lower, "and/or") &&
+				!strings.Contains(lower, "w/") {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func extractPRNumber(history []memory.Message, prompt string) int {
+	if m := prRegex.FindStringSubmatch(prompt); len(m) > 1 {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			return n
+		}
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if m := prRegex.FindStringSubmatch(history[i].Content); len(m) > 1 {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {
