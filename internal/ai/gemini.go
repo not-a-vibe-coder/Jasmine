@@ -70,6 +70,11 @@ type geminiChatResp struct {
 		} `json:"content"`
 		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
+	UsageMetadata *struct {
+		PromptTokenCount     int `json:"promptTokenCount"`
+		CandidatesTokenCount int `json:"candidatesTokenCount"`
+		TotalTokenCount      int `json:"totalTokenCount"`
+	} `json:"usageMetadata"`
 	Error *struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
@@ -99,7 +104,7 @@ func (c *Client) callGeminiGenerate(ctx context.Context, payload geminiChatReq) 
 		return nil, fmt.Errorf("failed to marshal gemini payload: %w", err)
 	}
 
-	models := []string{"gemini-2.5-flash", "gemini-flash-latest"}
+	models := []string{"gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-flash-latest"}
 	var lastErr error
 
 	for _, model := range models {
@@ -140,19 +145,23 @@ func (c *Client) callGeminiGenerate(ctx context.Context, payload geminiChatReq) 
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("gemini api error (status %d): %s", resp.StatusCode, string(respBytes))
+			lastErr = fmt.Errorf("gemini api error (status %d, model %s): %s", resp.StatusCode, model, string(respBytes))
 			continue
 		}
 
 		var geminiResp geminiChatResp
 		if err := json.Unmarshal(respBytes, &geminiResp); err != nil {
-			lastErr = fmt.Errorf("failed to decode gemini response: %w", err)
+			lastErr = fmt.Errorf("failed to decode gemini response (%s): %w", model, err)
 			continue
 		}
 
 		if geminiResp.Error != nil {
-			lastErr = fmt.Errorf("gemini returned error %d: %s", geminiResp.Error.Code, geminiResp.Error.Message)
+			lastErr = fmt.Errorf("gemini returned error %d (%s): %s", geminiResp.Error.Code, model, geminiResp.Error.Message)
 			continue
+		}
+
+		if geminiResp.UsageMetadata != nil && c.tracker != nil {
+			c.tracker.Record(model, geminiResp.UsageMetadata.PromptTokenCount, geminiResp.UsageMetadata.CandidatesTokenCount)
 		}
 
 		return &geminiResp, nil

@@ -24,6 +24,7 @@ type Client struct {
 	owners     []string
 	httpClient *http.Client
 	tools      []ToolDefinition
+	tracker    *TokenTracker
 }
 
 func NewClient(apiKey, model, geminiKey string, owners []string) *Client {
@@ -35,6 +36,7 @@ func NewClient(apiKey, model, geminiKey string, owners []string) *Client {
 		model:     model,
 		geminiKey: geminiKey,
 		owners:    owners,
+		tracker:   NewTokenTracker(),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -55,6 +57,13 @@ func NewClient(apiKey, model, geminiKey string, owners []string) *Client {
 	}
 	c.tools = c.buildTools()
 	return c
+}
+
+func (c *Client) GetTokenReport() string {
+	if c.tracker != nil {
+		return c.tracker.FormatReport()
+	}
+	return "Token tracker not initialized."
 }
 
 func (c *Client) buildTools() []ToolDefinition {
@@ -325,6 +334,48 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "run_sandbox_task",
+				Description: "Execute an isolated, ephemeral bash command or research/dev script in a background Linux runner (GitHub Actions VM). Use for heavy workloads like compiling, running test suites, web scrapers, data scripts, or repository audits. Asynchronous: runs in background and notifies chat when finished. Only bot owners can authorize running commands.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"command": map[string]interface{}{
+							"type":        "string",
+							"description": "The exact bash command to execute in the ephemeral runner (e.g. 'go test ./...', 'curl -s ...', 'python3 script.py')",
+						},
+						"repo": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional GitHub repository runner to target (defaults to 'DavidNzube101/shipp')",
+						},
+					},
+					"required": []string{"command"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "send_dm",
+				Description: "Send a direct message (DM) to a Telegram user. Only bot owners can authorize sending DMs. Note that Telegram requires the recipient to have started a chat with the bot before a DM can be delivered.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"recipient": map[string]interface{}{
+							"type":        "string",
+							"description": "The Telegram username of the recipient (e.g. '@someone')",
+						},
+						"message": map[string]interface{}{
+							"type":        "string",
+							"description": "The message text to send to them in their DM",
+						},
+					},
+					"required": []string{"recipient", "message"},
+				},
+			},
+		},
 	}
 }
 
@@ -406,7 +457,11 @@ Operational Superpowers & Tools:
 10. Email Superpowers:
     - Outbound address is 'shipp@bot.davidnzube.xyz', receiving inbox is 'shippzero@atomicmail.io'.
     - Trigger 'send_email' when confirmed by owners.
-11. HARD FORMATTING CONSTRAINTS:
+11. Ephemeral Sandbox Runner:
+    - Trigger 'run_sandbox_task' when asked to execute bash commands, run test suites, execute python/node/bash scripts, scrape data, or audit repositories. Runs in an isolated Linux runner asynchronously.
+12. Direct Telegram Messaging:
+    - Trigger 'send_dm' when owners ask you to message, text, or ping someone in DM.
+13. HARD FORMATTING CONSTRAINTS:
     - Strictly ZERO emojis anywhere. No exceptions.
     - Strictly NO em dashes ('—') or en dashes ('–'). Use commas, periods, colons, or simple hyphens (' - ').
     - Strictly NO bulky tables or unsolicited bulleted lists.
@@ -745,56 +800,91 @@ Keep it short (1-2 sentences max). Do NOT introduce yourself or say "Hey guys, a
 	return "yo, what is everyone building today?", nil
 }
 
+var defaultGroqModelPool = []string{
+	"qwen/qwen3.8-27b",
+	"openai/gpt-oss-120b",
+	"openai/gpt-oss-20b",
+}
+
 func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionRequest) (*ChatCompletionResponse, error) {
-	data, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, err
+	candidateModels := []string{c.model}
+	for _, m := range defaultGroqModelPool {
+		if m != c.model {
+			candidateModels = append(candidateModels, m)
+		}
 	}
 
-	maxRetries := 2
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "POST", DefaultGroqURL, bytes.NewBuffer(data))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-		req.Header.Set("Content-Type", "application/json")
+	var lastErr error
 
-		resp, err := c.httpClient.Do(req)
+	for _, model := range candidateModels {
+		reqBody.Model = model
+		data, err := json.Marshal(reqBody)
 		if err != nil {
 			return nil, err
 		}
 
-		respBytes, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, err
-		}
-
-		var chatResp ChatCompletionResponse
-		_ = json.Unmarshal(respBytes, &chatResp)
-
-		// Handle rate limit (429 or token exhaustion) with automatic backoff retry
-		if resp.StatusCode == http.StatusTooManyRequests || (chatResp.Error != nil && strings.Contains(strings.ToLower(chatResp.Error.Message), "rate limit")) {
-			if attempt < maxRetries {
-				log.Printf("[AI] Groq rate limit reached (attempt %d/%d). Pausing 2.8s for window reset...", attempt+1, maxRetries)
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(2800 * time.Millisecond):
-					continue
-				}
+		maxRetries := 1
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			req, err := http.NewRequestWithContext(ctx, "POST", DefaultGroqURL, bytes.NewBuffer(data))
+			if err != nil {
+				lastErr = err
+				break
 			}
-		}
+			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+			req.Header.Set("Content-Type", "application/json")
 
-		if chatResp.Error != nil {
-			return nil, fmt.Errorf("groq api error: %s (%s)", chatResp.Error.Message, chatResp.Error.Type)
-		}
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				lastErr = err
+				break
+			}
 
-		return &chatResp, nil
+			respBytes, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				lastErr = err
+				break
+			}
+
+			var chatResp ChatCompletionResponse
+			_ = json.Unmarshal(respBytes, &chatResp)
+
+			if chatResp.Error != nil {
+				errMsg := strings.ToLower(chatResp.Error.Message)
+				isDailyQuota := strings.Contains(errMsg, "tokens per day") ||
+					strings.Contains(errMsg, "tpd") ||
+					strings.Contains(errMsg, "daily limit")
+				isRateLimit := resp.StatusCode == http.StatusTooManyRequests || strings.Contains(errMsg, "rate limit")
+
+				if isDailyQuota {
+					log.Printf("[AI] Groq model %s daily token quota exhausted. Cascading to next pooled model...", model)
+					lastErr = fmt.Errorf("groq api error (%s): %s", model, chatResp.Error.Message)
+					break
+				}
+
+				if isRateLimit && attempt < maxRetries {
+					log.Printf("[AI] Groq rate limit reached for %s (attempt %d/%d). Pausing 2.5s...", model, attempt+1, maxRetries)
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(2500 * time.Millisecond):
+						continue
+					}
+				}
+
+				lastErr = fmt.Errorf("groq api error (%s): %s (%s)", model, chatResp.Error.Message, chatResp.Error.Type)
+				break
+			}
+
+			// Successfully received response
+			if c.tracker != nil {
+				c.tracker.Record(model, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
+			}
+			return &chatResp, nil
+		}
 	}
 
-	return nil, fmt.Errorf("groq api rate limit exceeded after retries")
+	return nil, fmt.Errorf("all groq pooled models exhausted: %w", lastErr)
 }
 
 func (c *Client) AnalyzeDocument(ctx context.Context, senderUsername string, isOwner bool, filename string, content string, userPrompt string, profile *memory.UserProfile) (string, error) {

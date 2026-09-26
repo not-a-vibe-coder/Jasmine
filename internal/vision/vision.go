@@ -44,20 +44,17 @@ func (s *Service) PerceiveImage(ctx context.Context, imageBytes []byte, mimeType
 		qrPrefix = FormatQRPerception(qrData) + "\n\n"
 	}
 
-	// 1. Primary: Gemini Vision (2.5 Flash)
+	// 1. Primary: Gemini Vision Cascade
 	if s.geminiKey != "" {
-		res, err := s.callGemini(ctx, "gemini-2.5-flash", imageBytes, mimeType, userPrompt)
-		if err == nil && strings.TrimSpace(res) != "" {
-			return qrPrefix + res, nil
+		visionModels := []string{"gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-flash-latest"}
+		for _, m := range visionModels {
+			res, err := s.callGemini(ctx, m, imageBytes, mimeType, userPrompt)
+			if err == nil && strings.TrimSpace(res) != "" {
+				return qrPrefix + res, nil
+			}
+			log.Printf("[VisionService] Gemini model %s failed: %v. Trying next model...", m, err)
 		}
-		log.Printf("[VisionService] Gemini 2.5 Flash failed: %v. Retrying with gemini-flash-latest...", err)
-
-		// 1b. Fallback Gemini model
-		res, err = s.callGemini(ctx, "gemini-flash-latest", imageBytes, mimeType, userPrompt)
-		if err == nil && strings.TrimSpace(res) != "" {
-			return qrPrefix + res, nil
-		}
-		log.Printf("[VisionService] Gemini fallback model failed: %v. Falling back to OCR...", err)
+		log.Printf("[VisionService] All Gemini vision models failed. Falling back to OCR...")
 	}
 
 	// 2. Secondary Fallback: OCR text extraction

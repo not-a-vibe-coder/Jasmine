@@ -16,6 +16,7 @@ import (
 	"shipp/internal/github"
 	"shipp/internal/memory"
 	"shipp/internal/price"
+	"shipp/internal/sandbox"
 	"shipp/internal/search"
 	"shipp/internal/server"
 	"shipp/internal/token"
@@ -87,15 +88,20 @@ func main() {
 		log.Printf("[Main] Resend Email Service not configured (RESEND_API_KEY missing)")
 	}
 
-	// 5. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc, emailSvc)
+	// 5. Initialize Ephemeral Sandbox Service (Blink Compute pattern)
+	sandboxSvc := sandbox.NewService(cfg.GithubPAT, "DavidNzube101/shipp", "https://bot.davidnzube.xyz/api/sandbox/callback")
+	log.Printf("[Main] Sandbox Service initialized (GitHub Actions ephemeral VM runner active)")
+
+	// 6. Initialize Telegram Bot
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc, emailSvc, sandboxSvc)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}
 
-	// 6. Initialize & Start HTTP Server for Render Healthchecks & Telegram Webhooks
+	// 7. Initialize & Start HTTP Server for Render Healthchecks & Webhooks
 	httpServer := server.NewServer(cfg.Port, memStore.GetDB(), memStore.GetRedis())
 	httpServer.RegisterHandler("/webhook", tgBot.WebhookHandler)
+	httpServer.RegisterHandler("/api/sandbox/callback", sandboxSvc.CallbackHTTPHandler)
 	go func() {
 		if err := httpServer.Start(); err != nil {
 			log.Printf("[Main] HTTP server exited: %v", err)

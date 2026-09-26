@@ -22,11 +22,22 @@ import (
 )
 
 type ChainInfo struct {
-	Name     string
-	Symbol   string
-	ChainID  int64
-	RPCURL   string
-	Explorer string
+	Name         string
+	Symbol       string
+	ChainID      int64
+	RPCURL       string
+	FallbackRPCs []string
+	Explorer     string
+}
+
+func (c *ChainInfo) GetAllRPCs() []string {
+	urls := []string{c.RPCURL}
+	for _, u := range c.FallbackRPCs {
+		if u != "" && u != c.RPCURL {
+			urls = append(urls, u)
+		}
+	}
+	return urls
 }
 
 type Balances struct {
@@ -133,40 +144,45 @@ func NewService(
 	}
 
 	s.chains["base"] = ChainInfo{
-		Name:     "Base",
-		Symbol:   "ETH",
-		ChainID:  8453,
-		RPCURL:   baseRPC,
-		Explorer: "https://basescan.org/tx/",
+		Name:         "Base",
+		Symbol:       "ETH",
+		ChainID:      8453,
+		RPCURL:       baseRPC,
+		FallbackRPCs: []string{"https://base.llamarpc.com", "https://1rpc.io/base", "https://mainnet.base.org"},
+		Explorer:     "https://basescan.org/tx/",
 	}
 	s.chains["ethereum"] = ChainInfo{
-		Name:     "Ethereum",
-		Symbol:   "ETH",
-		ChainID:  1,
-		RPCURL:   ethRPC,
-		Explorer: "https://etherscan.io/tx/",
+		Name:         "Ethereum",
+		Symbol:       "ETH",
+		ChainID:      1,
+		RPCURL:       ethRPC,
+		FallbackRPCs: []string{"https://rpc.ankr.com/eth", "https://cloudflare-eth.com", "https://eth.llamarpc.com"},
+		Explorer:     "https://etherscan.io/tx/",
 	}
 	s.chains["arbitrum"] = ChainInfo{
-		Name:     "Arbitrum",
-		Symbol:   "ETH",
-		ChainID:  42161,
-		RPCURL:   arbRPC,
-		Explorer: "https://arbiscan.io/tx/",
+		Name:         "Arbitrum",
+		Symbol:       "ETH",
+		ChainID:      42161,
+		RPCURL:       arbRPC,
+		FallbackRPCs: []string{"https://arbitrum.llamarpc.com", "https://rpc.ankr.com/arbitrum", "https://arb1.arbitrum.io/rpc"},
+		Explorer:     "https://arbiscan.io/tx/",
 	}
 	s.chains["bnb"] = ChainInfo{
-		Name:     "BNB Smart Chain",
-		Symbol:   "BNB",
-		ChainID:  56,
-		RPCURL:   bnbRPC,
-		Explorer: "https://bscscan.com/tx/",
+		Name:         "BNB Smart Chain",
+		Symbol:       "BNB",
+		ChainID:      56,
+		RPCURL:       bnbRPC,
+		FallbackRPCs: []string{"https://bsc-dataseed.binance.org", "https://bsc-dataseed1.defibit.io", "https://binance.llamarpc.com"},
+		Explorer:     "https://bscscan.com/tx/",
 	}
 
 	rhChain := ChainInfo{
-		Name:     "Robinhood Chain",
-		Symbol:   "ETH",
-		ChainID:  4663,
-		RPCURL:   rhRPC,
-		Explorer: "https://robinhoodchain.blockscout.com/tx/",
+		Name:         "Robinhood Chain",
+		Symbol:       "ETH",
+		ChainID:      4663,
+		RPCURL:       rhRPC,
+		FallbackRPCs: []string{"https://rpc.robinhood.com"},
+		Explorer:     "https://robinhoodchain.blockscout.com/tx/",
 	}
 	s.chains["robinhood"] = rhChain
 	s.chains["rh"] = rhChain
@@ -329,18 +345,37 @@ func (s *Service) GetEVMBalance(ctx context.Context, chainName string) (*big.Flo
 	if !exists {
 		return nil, fmt.Errorf("unknown EVM chain: %s", chainName)
 	}
-	if chain.RPCURL == "" {
+
+	urls := chain.GetAllRPCs()
+	if len(urls) == 0 {
 		return nil, fmt.Errorf("RPC URL not configured for %s", chainName)
 	}
+
+	var lastErr error
+	for _, rpcURL := range urls {
+		if rpcURL == "" {
+			continue
+		}
+		val, err := s.fetchEVMBalance(ctx, rpcURL, s.evmPubKey)
+		if err == nil {
+			return val, nil
+		}
+		lastErr = err
+	}
+
+	return nil, fmt.Errorf("%s balance fetch failed: %v", chainName, lastErr)
+}
+
+func (s *Service) fetchEVMBalance(ctx context.Context, rpcURL, address string) (*big.Float, error) {
 
 	reqBody := rpcRequest{
 		JSONRPC: "2.0",
 		Method:  "eth_getBalance",
-		Params:  []interface{}{s.evmPubKey, "latest"},
+		Params:  []interface{}{address, "latest"},
 		ID:      1,
 	}
 	data, _ := json.Marshal(reqBody)
-	req, err := http.NewRequestWithContext(ctx, "POST", chain.RPCURL, bytes.NewBuffer(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", rpcURL, bytes.NewBuffer(data))
 	if err != nil {
 		return nil, err
 	}

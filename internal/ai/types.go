@@ -40,13 +40,21 @@ type ChatCompletionRequest struct {
 	MaxTokens   int              `json:"max_tokens,omitempty"`
 }
 
+type UsageInfo struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 type ChatCompletionResponse struct {
 	ID      string `json:"id"`
+	Model   string `json:"model"`
 	Choices []struct {
 		Index        int         `json:"index"`
 		Message      ChatMessage `json:"message"`
 		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
+	Usage UsageInfo `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`

@@ -26,6 +26,7 @@ import (
 	"shipp/internal/github"
 	"shipp/internal/memory"
 	"shipp/internal/price"
+	"shipp/internal/sandbox"
 	"shipp/internal/search"
 	"shipp/internal/token"
 	"shipp/internal/vision"
@@ -43,7 +44,12 @@ type Bot struct {
 	vision      *vision.Service
 	github      *github.Service
 	email       *email.Service
+	sandbox     *sandbox.Service
 	updatesChan chan tgbotapi.Update
+
+	// DM tracking (username -> chat_id for private DMs)
+	dmMu        sync.RWMutex
+	userDMChats map[string]int64
 
 	// Proactive settings per chat
 	proactiveMu       sync.RWMutex
@@ -62,6 +68,7 @@ func NewBot(
 	visionSvc *vision.Service,
 	githubSvc *github.Service,
 	emailSvc *email.Service,
+	sandboxSvc *sandbox.Service,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
@@ -70,7 +77,7 @@ func NewBot(
 
 	log.Printf("[Bot] Authorized on account @%s (ID: %d)", api.Self.UserName, api.Self.ID)
 
-	return &Bot{
+	b := &Bot{
 		api:               api,
 		cfg:               cfg,
 		ai:                aiClient,
@@ -82,10 +89,22 @@ func NewBot(
 		vision:            visionSvc,
 		github:            githubSvc,
 		email:             emailSvc,
+		sandbox:           sandboxSvc,
 		updatesChan:       make(chan tgbotapi.Update, 100),
+		userDMChats:       make(map[string]int64),
 		proactiveDisabled: make(map[int64]bool),
 		lastProactiveTime: make(map[int64]time.Time),
-	}, nil
+	}
+
+	if sandboxSvc != nil {
+		sandboxSvc.SetHandlers(func(payload sandbox.CallbackPayload) {
+			b.handleSandboxCompletion(payload)
+		}, func(task *sandbox.Task) {
+			b.handleSandboxTimeout(task)
+		})
+	}
+
+	return b, nil
 }
 
 func (b *Bot) WebhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +173,14 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	username := msg.From.UserName
 	if username == "" {
 		username = msg.From.FirstName
+	}
+
+	// Record private chat ID for DMs
+	if msg.From != nil && msg.From.UserName != "" && msg.Chat.IsPrivate() {
+		uClean := strings.ToLower(strings.TrimPrefix(msg.From.UserName, "@"))
+		b.dmMu.Lock()
+		b.userDMChats[uClean] = msg.Chat.ID
+		b.dmMu.Unlock()
 	}
 
 	// 0. Handle Photos
@@ -336,6 +363,62 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 	case "/email":
 		b.handleEmailCommand(ctx, msg, parts[1:], isOwner)
 
+	case "/tokens", "/usage":
+		if !isOwner {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "only owners can view token consumption metrics.")
+			return
+		}
+		b.sendReply(msg.Chat.ID, msg.MessageID, b.ai.GetTokenReport())
+
+	case "/bash", "/sandbox", "/exec":
+		if !isOwner {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "only owners can execute sandbox commands.")
+			return
+		}
+		cmdToRun := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]))
+		if cmdToRun == "" {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/bash <command>` (e.g. `/bash go test ./...`)")
+			return
+		}
+		if b.sandbox == nil {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "sandbox service not initialized (GITHUB_PAT missing).")
+			return
+		}
+		taskID, err := b.sandbox.Dispatch(ctx, msg.Chat.ID, cmdToRun, "")
+		if err != nil {
+			log.Printf("[Bot] Sandbox dispatch error: %v", err)
+			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to launch sandbox runner: %v", err))
+			return
+		}
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("spinning up ephemeral runner to run `%s` (task %s). i'll alert you when it finishes.", cmdToRun, taskID))
+
+	case "/dm":
+		if !isOwner {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "only owners can authorize sending DMs.")
+			return
+		}
+		if len(parts) < 3 {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/dm @username <message>`")
+			return
+		}
+		targetUser := strings.ToLower(strings.TrimPrefix(parts[1], "@"))
+		textToSend := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]+" "+parts[1]))
+		b.dmMu.RLock()
+		dmChatID, exists := b.userDMChats[targetUser]
+		b.dmMu.RUnlock()
+
+		if !exists {
+			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("cant dm @%s directly yet because telegram restricts bots from cold-dm'ing users until they message the bot first. tell @%s to open a chat with @%s and send /start.", targetUser, targetUser, b.api.Self.UserName))
+			return
+		}
+
+		dmMsg := tgbotapi.NewMessage(dmChatID, fmt.Sprintf("Message from @%s via Shipp:\n\n%s", msg.From.UserName, textToSend))
+		if _, err := b.api.Send(dmMsg); err != nil {
+			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to send dm to @%s: %v", targetUser, err))
+			return
+		}
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("sent direct message to @%s.", targetUser))
+
 	default:
 		// Unknown slash command
 	}
@@ -359,7 +442,17 @@ func (b *Bot) handleNLPAndChat(
 
 	lowerPrompt := strings.ToLower(prompt)
 
-	// 2a. Pre-AI dispatch: if the prompt has a GitHub URL + edit verb, skip the LLM and
+	// 2a. Pre-AI balance dispatch: skip LLM to prevent hallucinating made-up numbers
+	if ok, targetChain := isBalanceIntent(prompt); ok {
+		b.sendChatAction(chatID, tgbotapi.ChatTyping)
+		toolResult := b.executeToolCall(ctx, chatID, "get_balances", fmt.Sprintf(`{"chain":"%s"}`, targetChain), username, isOwner)
+		b.sendReply(chatID, msg.MessageID, toolResult)
+		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
+		return
+	}
+
+	// 2b. Pre-AI dispatch: if the prompt has a GitHub URL + edit verb, skip the LLM and
 	//     call github_edit_file directly to avoid clarification loops.
 	if isOwner {
 		if b.trySmartDispatch(ctx, msg, prompt, lowerPrompt, username, isOwner, history) {
@@ -384,8 +477,8 @@ func (b *Bot) handleNLPAndChat(
 	// 4. Handle Tool Calls if any
 	if len(aiResp.ToolCalls) > 0 {
 		for _, tc := range aiResp.ToolCalls {
-			// For long-running tools (github edit), ack immediately and run async.
-			if tc.Function.Name == "github_edit_file" {
+			// For long-running tools (github edit, sandbox), ack immediately and run async.
+			if tc.Function.Name == "github_edit_file" || tc.Function.Name == "run_sandbox_task" {
 				b.sendReply(chatID, msg.MessageID, b.getRandomWorkingAck())
 				tcCopy := tc
 				go func() {
@@ -999,6 +1092,55 @@ func (b *Bot) executeToolCall(
 		}
 		return email.FormatEmailSent(res)
 
+	case "run_sandbox_task":
+		if !isOwner {
+			return fmt.Sprintf("Access Denied: Only bot owners (@%s) can authorize running sandbox tasks.", strings.Join(b.cfg.Owners, ", @"))
+		}
+		if b.sandbox == nil {
+			return "Sandbox runner is not configured (GITHUB_PAT missing)."
+		}
+		var args struct {
+			Command string `json:"command"`
+			Repo    string `json:"repo"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.Command == "" {
+			return "No command provided for sandbox runner."
+		}
+		taskID, err := b.sandbox.Dispatch(ctx, chatID, args.Command, args.Repo)
+		if err != nil {
+			return fmt.Sprintf("Failed to launch sandbox runner: %v", err)
+		}
+		return fmt.Sprintf("Ephemeral runner spawned for `%s` (task %s). Executing in background on GitHub Actions runner; will notify here when finished.", args.Command, taskID)
+
+	case "send_dm":
+		if !isOwner {
+			return fmt.Sprintf("Access Denied: Only bot owners (@%s) can authorize sending direct messages.", strings.Join(b.cfg.Owners, ", @"))
+		}
+		var args struct {
+			Recipient string `json:"recipient"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		targetUser := strings.ToLower(strings.TrimPrefix(args.Recipient, "@"))
+		if targetUser == "" || args.Message == "" {
+			return "Missing recipient username or message content."
+		}
+
+		b.dmMu.RLock()
+		dmChatID, exists := b.userDMChats[targetUser]
+		b.dmMu.RUnlock()
+
+		if !exists {
+			return fmt.Sprintf("Cannot DM @%s directly yet. Telegram prohibits bots from sending unprompted DMs until the user initiates a conversation by sending /start to @%s.", targetUser, b.api.Self.UserName)
+		}
+
+		dmMsg := tgbotapi.NewMessage(dmChatID, fmt.Sprintf("Message from @%s via Shipp:\n\n%s", username, args.Message))
+		if _, err := b.api.Send(dmMsg); err != nil {
+			return fmt.Sprintf("Failed to send DM to @%s: %v", targetUser, err)
+		}
+		return fmt.Sprintf("Successfully sent direct message to @%s.", targetUser)
+
 	default:
 		return "Unknown action."
 	}
@@ -1275,7 +1417,7 @@ Type /help to see all commands and examples!`, roleGreeting, b.api.Self.UserName
 func (b *Bot) formatHelpMessage(isOwner bool) string {
 	ownerNote := ""
 	if isOwner {
-		ownerNote = "\nOwner Commands:\n• `/send <chain> <to> <amount>` - Transfer funds (e.g. `/send base 0x123... 0.01`)\n• `/email <to> <subject> | <body>` - Dispatch email (e.g. `/email dev@example.com Hi | Hello!`)"
+		ownerNote = "\nOwner Commands:\n• `/tokens` or `/usage` - View daily & total token consumption\n• `/bash <command>` - Ephemeral runner execution (e.g. `/bash go test ./...`)\n• `/dm @username <msg>` - Send direct message to user\n• `/send <chain> <to> <amount>` - Transfer funds (e.g. `/send base 0x123... 0.01`)\n• `/email <to> <subject> | <body>` - Dispatch email (e.g. `/email dev@example.com Hi | Hello!`)"
 	}
 
 	return "Shipp Command & NLP Reference\n\n" +
@@ -1759,3 +1901,79 @@ func (b *Bot) getRandomEmptyAck() string {
 func (b *Bot) getRandomWorkingAck() string {
 	return dynamicWorkingAcks[rand.Intn(len(dynamicWorkingAcks))]
 }
+
+func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
+	if payload.ChatID == 0 {
+		return
+	}
+	cleanOutput := strings.TrimSpace(cleanNoEmojis(payload.Output))
+	if len(cleanOutput) > 3000 {
+		cleanOutput = cleanOutput[:3000] + "\n... (output truncated)"
+	}
+
+	if payload.ExitCode == 0 {
+		if cleanOutput == "" {
+			b.sendSimpleMessage(payload.ChatID, fmt.Sprintf("runner completed cleanly in %ds (exit code 0).", payload.DurationSeconds))
+		} else {
+			b.sendSimpleMessage(payload.ChatID, fmt.Sprintf("runner completed in %ds (exit code 0):\n```\n%s\n```", payload.DurationSeconds, cleanOutput))
+		}
+	} else {
+		if cleanOutput == "" {
+			b.sendSimpleMessage(payload.ChatID, fmt.Sprintf("runner failed (exit code %d) in %ds.", payload.ExitCode, payload.DurationSeconds))
+		} else {
+			b.sendSimpleMessage(payload.ChatID, fmt.Sprintf("runner failed (exit code %d) in %ds:\n```\n%s\n```", payload.ExitCode, payload.DurationSeconds, cleanOutput))
+		}
+	}
+}
+
+func (b *Bot) handleSandboxTimeout(task *sandbox.Task) {
+	if task == nil || task.ChatID == 0 {
+		return
+	}
+	b.sendSimpleMessage(task.ChatID, fmt.Sprintf("sandbox task %s timed out after 6 minutes with no callback.", task.ID))
+}
+
+func isBalanceIntent(prompt string) (bool, string) {
+	lower := strings.ToLower(prompt)
+	hasBalanceWord := strings.Contains(lower, "balance") ||
+		strings.Contains(lower, "how much do you have") ||
+		strings.Contains(lower, "how much you got") ||
+		strings.Contains(lower, "how much money") ||
+		strings.Contains(lower, "what you got") ||
+		strings.Contains(lower, "check wallet") ||
+		strings.Contains(lower, "wallet balance") ||
+		strings.Contains(lower, "show balance") ||
+		strings.Contains(lower, "show wallet")
+
+	if !hasBalanceWord {
+		return false, ""
+	}
+
+	// Exclude non-balance concepts
+	if strings.Contains(lower, "balance sheet") || strings.Contains(lower, "tree") {
+		return false, ""
+	}
+
+	// Detect specific chain
+	if strings.Contains(lower, "sol") || strings.Contains(lower, "solana") {
+		return true, "solana"
+	}
+	if strings.Contains(lower, "base") {
+		return true, "base"
+	}
+	if strings.Contains(lower, "robinhood") || strings.Contains(lower, "rh") {
+		return true, "robinhood"
+	}
+	if strings.Contains(lower, "arbitrum") || strings.Contains(lower, "arb") {
+		return true, "arbitrum"
+	}
+	if strings.Contains(lower, "bnb") || strings.Contains(lower, "bsc") {
+		return true, "bnb"
+	}
+	if strings.Contains(lower, "eth") || strings.Contains(lower, "ethereum") {
+		return true, "ethereum"
+	}
+
+	return true, "all"
+}
+
