@@ -1806,5 +1806,44 @@ func parseExtractedProfile(rawJSON string, existing *memory.UserProfile) *memory
 	return &updated
 }
 
+// SynthesizeSandboxResult generates a natural, casual 1-sentence explanation of terminal output
+// in Shipp's human voice, without code blocks or backticks.
+func (c *Client) SynthesizeSandboxResult(ctx context.Context, userPrompt, command string, duration int, exitCode int, output string) (string, error) {
+	systemPrompt := "You are Shipp, a sharp, casual crypto/developer agent. You just ran a script or command in your Linux sandbox for your owner (@skipp_dev). In 1 short casual sentence (no emojis, all lowercase or casual dev style, no code blocks or backticks), tell them the result or what happened naturally like a dev texting back on Telegram (e.g. 'ran that go script, result is 14' or 'clean run, got 48'). If the command threw an error, casually mention what failed."
+
+	userContent := fmt.Sprintf("My request: %s\n\nExecution output (%ds, exit code %d):\n%s", userPrompt, duration, exitCode, output)
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userContent},
+		},
+		Temperature: 0.5,
+		MaxTokens:   500,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		if c.geminiKey != "" {
+			return c.synthesizeSandboxGemini(ctx, systemPrompt, userContent)
+		}
+		return "", err
+	}
+
+	if len(resp.Choices) > 0 {
+		txt := strings.TrimSpace(resp.Choices[0].Message.Content)
+		if txt != "" {
+			return txt, nil
+		}
+	}
+
+	if c.geminiKey != "" {
+		return c.synthesizeSandboxGemini(ctx, systemPrompt, userContent)
+	}
+
+	return "", fmt.Errorf("empty response")
+}
+
 
 

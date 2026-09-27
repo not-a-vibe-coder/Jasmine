@@ -649,3 +649,35 @@ Analyze this document concisely. Strictly zero emojis, no em dashes, 1-3 sentenc
 	}
 	return strings.Join(textParts, " "), nil
 }
+
+func (c *Client) synthesizeSandboxGemini(ctx context.Context, systemPrompt, userContent string) (string, error) {
+	req := geminiChatReq{
+		SystemInstruction: &geminiChatContent{
+			Parts: []geminiChatPart{{Text: systemPrompt}},
+		},
+		Contents: []geminiChatContent{
+			{
+				Role:  "user",
+				Parts: []geminiChatPart{{Text: userContent}},
+			},
+		},
+		GenerationConfig: &geminiChatGenConfig{
+			Temperature:     0.5,
+			MaxOutputTokens: 200,
+		},
+	}
+
+	resp, err := c.callGeminiGenerate(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Candidates) == 0 {
+		return "", fmt.Errorf("empty gemini response")
+	}
+	for _, p := range resp.Candidates[0].Content.Parts {
+		if strings.TrimSpace(p.Text) != "" {
+			return strings.TrimSpace(p.Text), nil
+		}
+	}
+	return "", fmt.Errorf("empty gemini text")
+}

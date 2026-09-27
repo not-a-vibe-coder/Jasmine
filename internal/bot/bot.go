@@ -3818,48 +3818,52 @@ func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
 		}
 	}
 
-	// 1. Build Option 1 natural dev phrasing (instant and reliable fallback)
-	var introLine string
-	var fallbackText string
-	if payload.ExitCode == 0 {
-		introLine = b.getRandomSandboxSuccessAck(payload.DurationSeconds)
-		if cleanOutput == "" {
-			fallbackText = fmt.Sprintf("clean run in %ds (exit code 0).", payload.DurationSeconds)
-		} else {
-			fallbackText = fmt.Sprintf("%s\n```\n%s\n```", introLine, cleanOutput)
-		}
-	} else {
-		introLine = b.getRandomSandboxFailAck(payload.DurationSeconds, payload.ExitCode)
-		if cleanOutput == "" {
-			fallbackText = fmt.Sprintf("runner failed (exit code %d) in %ds.", payload.ExitCode, payload.DurationSeconds)
-		} else {
-			fallbackText = fmt.Sprintf("%s\n```\n%s\n```", introLine, cleanOutput)
-		}
-	}
-
-	text := fallbackText
-
-	// 2. Attempt Option 2: Full conversational AI synthesis when prompt was a natural user request
+	lineCount := strings.Count(cleanOutput, "\n") + 1
+	isShortOutput := lineCount <= 3 && len(cleanOutput) <= 250
 	isSlashCmd := strings.HasPrefix(strings.TrimSpace(taskPrompt), "/")
+
+	var text string
+
+	// 1. Attempt Option 2: Casual human AI synthesis when prompt was a conversational request
 	if b.ai != nil && taskPrompt != "" && !isSlashCmd && len(cleanOutput) > 0 {
-		ctxAI, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		toolSummary := fmt.Sprintf("Command: %s\nExit Code: %d\nDuration: %ds\nOutput:\n%s", taskCmd, payload.ExitCode, payload.DurationSeconds, cleanOutput)
-		aiReply, err := b.ai.GenerateToolFollowup(
-			ctxAI,
-			"owner",
-			true,
-			taskPrompt,
-			"run_sandbox_task",
-			payload.TaskID,
-			fmt.Sprintf(`{"command":%q}`, taskCmd),
-			toolSummary,
-			nil,
-		)
+		ctxAI, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+		aiReply, err := b.ai.SynthesizeSandboxResult(ctxAI, taskPrompt, taskCmd, payload.DurationSeconds, payload.ExitCode, cleanOutput)
 		cancel()
 
 		aiReply = strings.TrimSpace(cleanNoEmojis(aiReply))
-		if err == nil && aiReply != "" && aiReply != strings.TrimSpace(toolSummary) {
-			text = fmt.Sprintf("%s\n\n%s\n```\n%s\n```", aiReply, introLine, cleanOutput)
+		aiReply = strings.ReplaceAll(aiReply, "```", "")
+		aiReply = strings.Trim(aiReply, "`")
+
+		if err == nil && aiReply != "" {
+			if isShortOutput {
+				// The AI reply already naturally answers with the result (e.g. "ran that go script, result is 14")
+				text = aiReply
+			} else {
+				// Multi-line output gets the conversational intro and the logs below
+				text = fmt.Sprintf("%s\n\n```\n%s\n```", aiReply, cleanOutput)
+			}
+		}
+	}
+
+	// 2. Fallback (Option 1): Natural, unstylized dev phrasing matching how Shipp started
+	if text == "" {
+		if payload.ExitCode == 0 {
+			if cleanOutput == "" {
+				text = fmt.Sprintf("clean run in %ds.", payload.DurationSeconds)
+			} else if isShortOutput {
+				// Plain text, unstylized! Direct casual text
+				text = fmt.Sprintf("ran it clean in %ds, got: %s", payload.DurationSeconds, cleanOutput)
+			} else {
+				text = fmt.Sprintf("ran it clean in %ds:\n```\n%s\n```", payload.DurationSeconds, cleanOutput)
+			}
+		} else {
+			if cleanOutput == "" {
+				text = fmt.Sprintf("hit an error after %ds (exit code %d).", payload.DurationSeconds, payload.ExitCode)
+			} else if isShortOutput {
+				text = fmt.Sprintf("hit an error in %ds: %s", payload.DurationSeconds, cleanOutput)
+			} else {
+				text = fmt.Sprintf("hit an error in %ds (exit code %d):\n```\n%s\n```", payload.DurationSeconds, payload.ExitCode, cleanOutput)
+			}
 		}
 	}
 
