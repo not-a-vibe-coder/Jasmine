@@ -21,11 +21,16 @@ const DefaultGroqURL = "https://api.groq.com/openai/v1/chat/completions"
 type Client struct {
 	apiKey     string
 	model      string
+	baseURL    string
 	geminiKey  string
 	owners     []string
 	httpClient *http.Client
 	tools      []ToolDefinition
 	tracker    *TokenTracker
+}
+
+func (c *Client) SetBaseURL(u string) {
+	c.baseURL = u
 }
 
 func NewClient(apiKey, model, geminiKey string, owners []string) *Client {
@@ -248,7 +253,7 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "github_edit_file",
-				Description: "Execute code and document edits, rewrites, refactors, or updates on a GitHub repository and commit/push the changes. Safely opens a Pull Request by default, or pushes directly to main if push_to_main is true. MUST be invoked whenever the user asks to update, edit, rewrite, rephrase, or push changes to any file (e.g. README.md, code), including follow-up confirmations like 'rephrase it and push to main straight'. Never simulate this in text.",
+				Description: "Execute file creation (including initializing empty repos with README.md or new files), edits, rewrites, refactors, or updates on a GitHub repository and commit/push the changes. If the repository is empty, it initializes the repository directly on the default branch. MUST be invoked whenever the user asks to create, make, add, update, edit, rewrite, rephrase, or push changes to any file (e.g. README.md, code), including follow-up confirmations like 'create the file' or 'rephrase it and push to main straight'. Never simulate this in text.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -593,7 +598,7 @@ Operational Superpowers & Tools:
 9. GitHub Intelligence & Code Actions:
    - 3 GitHub tools:
      a) 'github_inspect_project': Read-only (CI runs, releases, commits, issues, overview).
-     b) 'github_edit_file': MUST trigger immediately when asked to edit, change, rewrite, or update any file. Never simulate git actions in text.
+     b) 'github_edit_file': MUST trigger immediately when asked to create, initialize, make, edit, change, rewrite, or update any file, including empty repositories. If repository is empty or user asks to create a file, it creates and initializes it. Never simulate git actions in text.
      c) 'github_merge_pr': Merge open PRs.
    - If user asks to push to main, set push_to_main=true. Otherwise default to a PR.
    - Extract repo slug (e.g. 'DavidNzube101/shipp') from chat history when not explicitly repeated.
@@ -1467,7 +1472,11 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 
 		maxRetries := 1
 		for attempt := 0; attempt <= maxRetries; attempt++ {
-			req, err := http.NewRequestWithContext(ctx, "POST", DefaultGroqURL, bytes.NewBuffer(data))
+			groqURL := DefaultGroqURL
+			if c.baseURL != "" {
+				groqURL = c.baseURL
+			}
+			req, err := http.NewRequestWithContext(ctx, "POST", groqURL, bytes.NewBuffer(data))
 			if err != nil {
 				lastErr = err
 				break
@@ -1613,6 +1622,41 @@ Rules:
 		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
 	}
 	return "", fmt.Errorf("no refactor response generated")
+}
+
+// GenerateNewFileContent generates complete new file contents from scratch based on instructions.
+func (c *Client) GenerateNewFileContent(ctx context.Context, filename string, instruction string) (string, error) {
+	systemPrompt := `You are an expert software developer and technical writer.
+You are tasked with generating a brand-new file from scratch based on the user's instructions.
+Rules:
+1. Generate complete, comprehensive, production-ready content for the requested file based on the instruction.
+2. If it is a README.md, make it clear, well-structured, professional, with overview, setup/installation, architecture, and key details matching what the user requested.
+3. Output ONLY the file content with NO conversational preamble, no commentary, and NO enclosing code fences wrapping the entire output (unless the file itself is markdown).`
+
+	prompt := fmt.Sprintf("File: %s\n\nInstruction: %s\n\nPlease create the full content for this file.", filename, instruction)
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: prompt},
+		},
+		Temperature: 0.3,
+		MaxTokens:   3500,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		if c.geminiKey != "" {
+			log.Printf("[AI] Groq GenerateNewFileContent error (%v). Falling back to Gemini Flash...", err)
+			return c.generateNewFileGemini(ctx, filename, instruction)
+		}
+		return "", err
+	}
+	if len(resp.Choices) > 0 {
+		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+	}
+	return "", fmt.Errorf("no file content generated")
 }
 
 func cleanCodeBlock(s string) string {

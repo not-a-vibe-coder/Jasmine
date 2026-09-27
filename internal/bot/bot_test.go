@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,9 +13,11 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"shipp/internal/ai"
 	"shipp/internal/config"
 	"shipp/internal/crypto"
 	"shipp/internal/domain"
+	"shipp/internal/github"
 	"shipp/internal/memory"
 	"shipp/internal/xhandle"
 )
@@ -1152,6 +1155,169 @@ func TestIsDocReadQuery(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isDocReadQuery(%q) = %v; want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestMessageThreadTracking(t *testing.T) {
+	b := &Bot{
+		msgThreads:     make(map[int64]map[int]int),
+		chatLastThread: make(map[int64]int),
+	}
+
+	// Initially 0
+	if tid := b.lookupMsgThread(12345, 999); tid != 0 {
+		t.Fatalf("expected 0, got %d", tid)
+	}
+	if tid := b.lookupChatThread(12345); tid != 0 {
+		t.Fatalf("expected 0, got %d", tid)
+	}
+
+	// Record thread 52 for message 999 in chat 12345
+	b.recordMsgThread(12345, 999, 52)
+
+	if tid := b.lookupMsgThread(12345, 999); tid != 52 {
+		t.Errorf("lookupMsgThread expected 52, got %d", tid)
+	}
+	if tid := b.lookupChatThread(12345); tid != 52 {
+		t.Errorf("lookupChatThread expected 52, got %d", tid)
+	}
+
+	// Unknown message in same chat falls back to chatLastThread
+	if tid := b.lookupMsgThread(12345, 888); tid != 52 {
+		t.Errorf("lookupMsgThread fallback expected 52, got %d", tid)
+	}
+
+	// Different chat returns 0
+	if tid := b.lookupMsgThread(99999, 999); tid != 0 {
+		t.Errorf("different chat expected 0, got %d", tid)
+	}
+}
+
+func TestHandleMessageWithThreadRegistersThread(t *testing.T) {
+	b := &Bot{
+		topicRegistry:  make(map[int64]map[int]string),
+		groupRegistry:  make(map[int64]*GroupInfo),
+		msgThreads:     make(map[int64]map[int]int),
+		chatLastThread: make(map[int64]int),
+	}
+
+	msg := &tgbotapi.Message{
+		MessageID: 101,
+		Chat: &tgbotapi.Chat{
+			ID:    -100123456,
+			Type:  "supergroup",
+			Title: "Test Group",
+		},
+		From: &tgbotapi.User{
+			ID:       777,
+			UserName: "tester",
+		},
+	}
+
+	// Message with threadID=42 and topicName="liege"
+	b.handleMessageWithThread(context.Background(), msg, 42, "liege")
+
+	if tid := b.lookupMsgThread(-100123456, 101); tid != 42 {
+		t.Errorf("expected threadID 42, got %d", tid)
+	}
+	if name := b.topicRegistry[-100123456][42]; name != "liege" {
+		t.Errorf("expected topic name 'liege', got %q", name)
+	}
+}
+
+func TestEmptyRepoFileCreationTool(t *testing.T) {
+	var putCalled bool
+	var putPayload map[string]interface{}
+
+	// Mock Groq AI server returning generated README content
+	aiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]string{
+						"role":    "assistant",
+						"content": "# Liege Agents\nAutonomous agent workforce on Robinhood Chain.",
+					},
+				},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer aiServer.Close()
+
+	// Mock GitHub server
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// 1. Get default branch
+		if r.Method == http.MethodGet && r.URL.Path == "/repos/liegeagents/liegeagentsapp" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"default_branch": "main",
+			})
+			return
+		}
+
+		// 2. Check branches: empty repo has 0 branches
+		if r.Method == http.MethodGet && r.URL.Path == "/repos/liegeagents/liegeagentsapp/branches" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+
+		// 3. Commit file directly to main
+		if r.Method == http.MethodPut && r.URL.Path == "/repos/liegeagents/liegeagentsapp/contents/README.md" {
+			putCalled = true
+			bodyBytes, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(bodyBytes, &putPayload)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"commit": map[string]string{"sha": "root_commit_sha_123"},
+				"content": map[string]string{
+					"html_url": "https://github.com/liegeagents/liegeagentsapp/blob/main/README.md",
+				},
+			})
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ghServer.Close()
+
+	aiClient := ai.NewClient("test_groq_key", "qwen/qwen3.8-27b", "", []string{"skipp_dev"})
+	aiClient.SetBaseURL(aiServer.URL)
+
+	ghSvc := github.NewService("mock_token", "ShippZero", "shipp@bot.internal")
+	ghSvc.SetBaseURL(ghServer.URL)
+
+	memStore, _ := memory.NewHybridStore("", "")
+
+	b := &Bot{
+		ai:            aiClient,
+		github:        ghSvc,
+		memory:        memStore,
+		topicRegistry: make(map[int64]map[int]string),
+		groupRegistry: make(map[int64]*GroupInfo),
+	}
+
+	ctx := context.Background()
+	argsJSON := `{"repo":"https://github.com/liegeagents/liegeagentsapp","path":"README.md","instruction":"make a readme file and add it"}`
+	res := b.executeToolCall(ctx, 12345, "github_edit_file", argsJSON, "skipp_dev", true)
+
+	if !putCalled {
+		t.Fatalf("expected PUT /repos/.../contents/README.md to be called on empty repo, result was: %s", res)
+	}
+
+	if !strings.Contains(res, "Initialized empty repo and created README.md directly on main") {
+		t.Errorf("expected response to announce initializing empty repo on main, got: %s", res)
+	}
+
+	if putPayload["branch"] != "main" {
+		t.Errorf("expected commit to branch 'main', got %v", putPayload["branch"])
+	}
+
+	if _, hasSHA := putPayload["sha"]; hasSHA {
+		t.Errorf("expected no sha field when creating initial file in empty repo, got %v", putPayload["sha"])
 	}
 }
 

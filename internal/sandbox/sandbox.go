@@ -15,11 +15,13 @@ import (
 )
 
 type Task struct {
-	ID        string
-	ChatID    int64
-	Command   string
-	StartTime time.Time
-	Done      chan struct{}
+	ID           string
+	ChatID       int64
+	ThreadID     int
+	ReplyToMsgID int
+	Command      string
+	StartTime    time.Time
+	Done         chan struct{}
 }
 
 type CallbackPayload struct {
@@ -75,8 +77,19 @@ func (s *Service) GetSecretToken() string {
 	return s.secretToken
 }
 
+func (s *Service) GetTask(taskID string) *Task {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tasks[taskID]
+}
+
 // Dispatch triggers a GitHub Actions ephemeral runner workflow
 func (s *Service) Dispatch(ctx context.Context, chatID int64, command, repo string) (string, error) {
+	return s.DispatchWithThread(ctx, chatID, 0, 0, command, repo)
+}
+
+// DispatchWithThread triggers a GitHub Actions ephemeral runner workflow with thread and reply info
+func (s *Service) DispatchWithThread(ctx context.Context, chatID int64, threadID, replyToMsgID int, command, repo string) (string, error) {
 	if s.githubPAT == "" {
 		return "", fmt.Errorf("GITHUB_PAT is not configured")
 	}
@@ -90,11 +103,13 @@ func (s *Service) Dispatch(ctx context.Context, chatID int64, command, repo stri
 	taskID := fmt.Sprintf("task_%x", taskIDBytes)
 
 	task := &Task{
-		ID:        taskID,
-		ChatID:    chatID,
-		Command:   command,
-		StartTime: time.Now(),
-		Done:      make(chan struct{}),
+		ID:           taskID,
+		ChatID:       chatID,
+		ThreadID:     threadID,
+		ReplyToMsgID: replyToMsgID,
+		Command:      command,
+		StartTime:    time.Now(),
+		Done:         make(chan struct{}),
 	}
 
 	s.mu.Lock()

@@ -86,6 +86,11 @@ type Bot struct {
 	// Conversational momentum dialog tracking per group chat
 	dialogMu      sync.RWMutex
 	activeDialogs map[int64]*ActiveDialog
+
+	// Message thread tracking: chatID -> msgID -> threadID
+	msgThreadMu    sync.RWMutex
+	msgThreads     map[int64]map[int]int
+	chatLastThread map[int64]int
 }
 
 type ActiveDialog struct {
@@ -154,6 +159,8 @@ func NewBot(
 		groupRegistry:     make(map[int64]*GroupInfo),
 		recentDocs:        make(map[int64]*RecentDocInfo),
 		activeDialogs:     make(map[int64]*ActiveDialog),
+		msgThreads:        make(map[int64]map[int]int),
+		chatLastThread:    make(map[int64]int),
 	}
 
 	b.loadGroupsFromDisk()
@@ -169,17 +176,66 @@ func NewBot(
 	return b, nil
 }
 
+func (b *Bot) recordMsgThread(chatID int64, msgID int, threadID int) {
+	if threadID == 0 {
+		return
+	}
+	b.msgThreadMu.Lock()
+	defer b.msgThreadMu.Unlock()
+	if b.msgThreads == nil {
+		b.msgThreads = make(map[int64]map[int]int)
+	}
+	if b.msgThreads[chatID] == nil {
+		b.msgThreads[chatID] = make(map[int]int)
+	}
+	b.msgThreads[chatID][msgID] = threadID
+	if b.chatLastThread == nil {
+		b.chatLastThread = make(map[int64]int)
+	}
+	b.chatLastThread[chatID] = threadID
+}
+
+func (b *Bot) lookupMsgThread(chatID int64, msgID int) int {
+	b.msgThreadMu.RLock()
+	defer b.msgThreadMu.RUnlock()
+	if b.msgThreads != nil && b.msgThreads[chatID] != nil {
+		if tid, ok := b.msgThreads[chatID][msgID]; ok && tid != 0 {
+			return tid
+		}
+	}
+	if b.chatLastThread != nil {
+		return b.chatLastThread[chatID]
+	}
+	return 0
+}
+
+func (b *Bot) lookupChatThread(chatID int64) int {
+	b.msgThreadMu.RLock()
+	defer b.msgThreadMu.RUnlock()
+	if b.chatLastThread != nil {
+		return b.chatLastThread[chatID]
+	}
+	return 0
+}
+
 // rawTelegramMessage is a lightweight struct used ONLY to extract fields that
 // tgbotapi v5.5.1 does not expose (forum thread IDs, topic creation events).
 type rawTelegramMessage struct {
-	MessageThreadID int `json:"message_thread_id"`
+	MessageID       int  `json:"message_id"`
+	MessageThreadID int  `json:"message_thread_id"`
+	IsTopicMessage  bool `json:"is_topic_message"`
+	ReplyToMessage  *struct {
+		MessageID       int `json:"message_id"`
+		MessageThreadID int `json:"message_thread_id"`
+	} `json:"reply_to_message"`
 	ForumTopicCreated *struct {
 		Name string `json:"name"`
 	} `json:"forum_topic_created"`
 }
 
 type rawTelegramUpdate struct {
-	Message *rawTelegramMessage `json:"message"`
+	UpdateID int                 `json:"update_id"`
+	Message  *rawTelegramMessage `json:"message"`
 }
 
 func (b *Bot) WebhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +264,9 @@ func (b *Bot) WebhookHandler(w http.ResponseWriter, r *http.Request) {
 		threadID = raw.Message.MessageThreadID
 		if raw.Message.ForumTopicCreated != nil {
 			topicName = raw.Message.ForumTopicCreated.Name
+		}
+		if threadID == 0 && raw.Message.ReplyToMessage != nil {
+			threadID = raw.Message.ReplyToMessage.MessageThreadID
 		}
 	}
 
@@ -244,7 +303,6 @@ func (b *Bot) Start(ctx context.Context) error {
 	_, _ = b.api.Request(tgbotapi.DeleteWebhookConfig{})
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 30
-	updates := b.api.GetUpdatesChan(u)
 
 	// Start background proactive messaging engine
 	go b.runProactiveEngine(ctx)
@@ -256,15 +314,48 @@ func (b *Bot) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			log.Printf("[Bot] Shutting down update loop...")
 			return nil
-		case update, ok := <-updates:
-			if !ok {
-				return nil
+		default:
+		}
+
+		rawResp, err := b.api.Request(u)
+		if err != nil {
+			log.Printf("[Bot] Polling error: %v. Retrying in 3s...", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		if rawResp == nil || !rawResp.Ok || len(rawResp.Result) == 0 {
+			continue
+		}
+
+		var updates []tgbotapi.Update
+		if err := json.Unmarshal(rawResp.Result, &updates); err != nil {
+			continue
+		}
+
+		var rawUpdates []rawTelegramUpdate
+		_ = json.Unmarshal(rawResp.Result, &rawUpdates)
+
+		for i, update := range updates {
+			if update.UpdateID >= u.Offset {
+				u.Offset = update.UpdateID + 1
 			}
 			if update.Message == nil {
 				continue
 			}
-			// Long polling: no raw body available, threadID defaults to 0
-			go b.handleMessageWithThread(ctx, update.Message, 0, "")
+
+			threadID := 0
+			topicName := ""
+			if i < len(rawUpdates) && rawUpdates[i].Message != nil {
+				threadID = rawUpdates[i].Message.MessageThreadID
+				if rawUpdates[i].Message.ForumTopicCreated != nil {
+					topicName = rawUpdates[i].Message.ForumTopicCreated.Name
+				}
+				if threadID == 0 && rawUpdates[i].Message.ReplyToMessage != nil {
+					threadID = rawUpdates[i].Message.ReplyToMessage.MessageThreadID
+				}
+			}
+
+			go b.handleMessageWithThread(ctx, update.Message, threadID, topicName)
 		}
 	}
 }
@@ -288,13 +379,18 @@ func (b *Bot) handleMessageWithThread(ctx context.Context, msg *tgbotapi.Message
 		}
 		b.topicRegistry[chatID][threadID] = topicName
 		b.topicMu.Unlock()
+		b.recordMsgThread(chatID, msg.MessageID, threadID)
 		log.Printf("[Bot] Registered forum topic: chatID=%d threadID=%d name=%q", chatID, threadID, topicName)
 		// Don't respond to pure service messages - just register and return
 		return
 	}
 
-	// Inject thread ID into context for thread-aware replies
+	// Record thread ID in tracking maps
 	if threadID != 0 {
+		b.recordMsgThread(chatID, msg.MessageID, threadID)
+		ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
+	} else if existingThread := b.lookupMsgThread(chatID, msg.MessageID); existingThread != 0 {
+		threadID = existingThread
 		ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
 	}
 
@@ -801,7 +897,11 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 			b.sendReply(msg.Chat.ID, msg.MessageID, "sandbox service not initialized (GITHUB_PAT missing).")
 			return
 		}
-		taskID, err := b.sandbox.Dispatch(ctx, msg.Chat.ID, cmdToRun, "")
+		threadID := 0
+		if v := ctx.Value(ctxKeyThreadID{}); v != nil {
+			threadID = v.(int)
+		}
+		taskID, err := b.sandbox.DispatchWithThread(ctx, msg.Chat.ID, threadID, msg.MessageID, cmdToRun, "")
 		if err != nil {
 			log.Printf("[Bot] Sandbox dispatch error: %v", err)
 			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to launch sandbox runner: %v", err))
@@ -928,6 +1028,11 @@ func (b *Bot) handleNLPAndChat(
 		strings.Contains(lowerPrompt, "edit") ||
 		strings.Contains(lowerPrompt, "update") ||
 		strings.Contains(lowerPrompt, "rewrite") ||
+		strings.Contains(lowerPrompt, "create") ||
+		strings.Contains(lowerPrompt, "make") ||
+		strings.Contains(lowerPrompt, "readme") ||
+		strings.Contains(lowerPrompt, "init") ||
+		strings.Contains(lowerPrompt, "generate") ||
 		strings.Contains(lowerPrompt, "run") ||
 		strings.Contains(lowerPrompt, "execute") ||
 		strings.Contains(lowerPrompt, "sandbox")
@@ -946,7 +1051,7 @@ func (b *Bot) handleNLPAndChat(
 	// Quick pre-flight: if prompt explicitly mentions a GitHub URL or sandbox,
 	// send a working ack before the loop starts so the chat doesn't feel frozen.
 	if isOwner && mightBeAsync && (extractRepoFromHistory(nil, prompt) != "" || strings.Contains(lowerPrompt, "sandbox") || strings.Contains(lowerPrompt, "run sandbox")) {
-		b.sendReply(chatID, msg.MessageID, b.getRandomWorkingAck())
+		b.sendReplyCtx(ctx, chatID, msg.MessageID, b.getRandomWorkingAck())
 		go func() {
 			agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor, chatContext)
 			finalText := agResult.FinalText
@@ -957,7 +1062,7 @@ func (b *Bot) handleNLPAndChat(
 				finalText = b.getRandomEmptyAck()
 			}
 			finalText = stripLeadingMention(finalText, username)
-			b.sendSimpleMessage(chatID, finalText)
+			b.sendReplyCtx(ctx, chatID, msg.MessageID, finalText)
 			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
 			b.recordActiveDialog(chatID, msg.MessageID, finalText, msg.From.ID, username)
 			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
@@ -987,7 +1092,7 @@ func (b *Bot) handleNLPAndChat(
 	}
 
 	finalText = stripLeadingMention(finalText, username)
-	b.sendReply(chatID, msg.MessageID, finalText)
+	b.sendReplyCtx(ctx, chatID, msg.MessageID, finalText)
 	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
 	b.recordActiveDialog(chatID, msg.MessageID, finalText, msg.From.ID, username)
 	go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
@@ -1006,6 +1111,8 @@ func (b *Bot) trySmartDispatch(
 	editVerbs := []string{
 		"update", "edit", "change", "rephrase", "rewrite", "modify",
 		"fix the description", "update the description", "update the readme",
+		"make a readme", "create a readme", "create", "make", "init", "initialize",
+		"add", "write", "readme",
 	}
 	hasEditVerb := false
 	for _, v := range editVerbs {
@@ -1035,11 +1142,11 @@ func (b *Bot) trySmartDispatch(
 		"push_to_main": pushToMain,
 	})
 
-	// Ack immediately, then do the work in background and follow up when done.
-	b.sendReply(msg.Chat.ID, msg.MessageID, b.getRandomWorkingAck())
+	// Ack immediately, then do the work in background and follow up when done in the same thread.
+	b.sendReplyCtx(ctx, msg.Chat.ID, msg.MessageID, b.getRandomWorkingAck())
 	go func() {
 		toolResult := b.executeToolCall(ctx, msg.Chat.ID, "github_edit_file", string(argsJSON), username, isOwner)
-		b.sendSimpleMessage(msg.Chat.ID, toolResult)
+		b.sendReplyCtx(ctx, msg.Chat.ID, msg.MessageID, toolResult)
 		_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
 		b.recordActiveDialog(msg.Chat.ID, msg.MessageID, toolResult, msg.From.ID, username)
 	}()
@@ -1088,10 +1195,10 @@ func (b *Bot) tryInterceptAction(
 				"push_to_main": pushToMain,
 			})
 			// Ack first, then work in background.
-			b.sendReply(chatID, msg.MessageID, b.getRandomWorkingAck())
+			b.sendReplyCtx(ctx, chatID, msg.MessageID, b.getRandomWorkingAck())
 			go func() {
 				toolResult := b.executeToolCall(ctx, chatID, "github_edit_file", string(argsJSON), username, isOwner)
-				b.sendSimpleMessage(chatID, toolResult)
+				b.sendReplyCtx(ctx, chatID, msg.MessageID, toolResult)
 				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
 			}()
 			return true
@@ -1707,16 +1814,114 @@ func (b *Bot) executeToolCall(
 		if err != nil {
 			return fmt.Sprintf("Couldn't access repo '%s/%s': %v", owner, repoName, err)
 		}
+		if defaultBranch == "" {
+			defaultBranch = "main"
+		}
+
+		// 1b. Check if repository is completely empty (0 commits / no branches)
+		isEmptyRepo, _ := b.github.IsRepoEmptyWithToken(ctx, owner, repoName, args.CustomPAT)
 
 		// 2. Fetch existing file
-		fc, currentContent, err := b.github.GetFileWithToken(ctx, owner, repoName, filePath, defaultBranch, args.CustomPAT)
-		if err != nil {
-			// Check if file doesn't exist, list available files
-			files, listErr := b.github.ListDirectoryWithToken(ctx, owner, repoName, "", defaultBranch, args.CustomPAT)
-			if listErr == nil && len(files) > 0 {
-				return fmt.Sprintf("File '%s' was not found in '%s/%s'. Found these files in repo root: %s. Would you like me to create '%s' from scratch or edit another file?", filePath, owner, repoName, strings.Join(files, ", "), filePath)
+		var fc *github.FileContent
+		var currentContent string
+		fileNotFound := false
+
+		if isEmptyRepo {
+			fileNotFound = true
+		} else {
+			fc, currentContent, err = b.github.GetFileWithToken(ctx, owner, repoName, filePath, defaultBranch, args.CustomPAT)
+			if err != nil {
+				fileNotFound = true
 			}
-			return fmt.Sprintf("Couldn't find '%s' in '%s/%s': %v", filePath, owner, repoName, err)
+		}
+
+		// Handle file creation when file doesn't exist or repo is empty
+		if fileNotFound {
+			lowerInst := strings.ToLower(args.Instruction)
+			isCreateIntent := isEmptyRepo ||
+				strings.Contains(lowerInst, "create") ||
+				strings.Contains(lowerInst, "make") ||
+				strings.Contains(lowerInst, "add") ||
+				strings.Contains(lowerInst, "write") ||
+				strings.Contains(lowerInst, "init") ||
+				strings.Contains(lowerInst, "generate") ||
+				strings.Contains(lowerInst, "new") ||
+				strings.Contains(lowerInst, "readme") ||
+				strings.Contains(lowerInst, "yes") ||
+				strings.Contains(lowerInst, "scratch")
+
+			if !isCreateIntent && !isEmptyRepo {
+				files, listErr := b.github.ListDirectoryWithToken(ctx, owner, repoName, "", defaultBranch, args.CustomPAT)
+				if listErr == nil && len(files) > 0 {
+					return fmt.Sprintf("File '%s' was not found in '%s/%s'. Found these files in repo root: %s. Would you like me to create '%s' from scratch or edit another file?", filePath, owner, repoName, strings.Join(files, ", "), filePath)
+				}
+				return fmt.Sprintf("Couldn't find '%s' in '%s/%s'. Would you like me to create it from scratch?", filePath, owner, repoName)
+			}
+
+			// Generate new file from scratch
+			genInstruction := args.Instruction
+			if recentMsgs, err := b.memory.GetRecentMessages(ctx, chatID, 6); err == nil && len(recentMsgs) > 0 {
+				var contextSnippets []string
+				for _, m := range recentMsgs {
+					if m.Role == "user" && len(m.Content) > 20 {
+						contextSnippets = append(contextSnippets, m.Content)
+					}
+				}
+				if len(contextSnippets) > 0 {
+					genInstruction = fmt.Sprintf("%s\n\nAdditional Context:\n%s", args.Instruction, strings.Join(contextSnippets, "\n---\n"))
+				}
+			}
+
+			newContent, err := b.ai.GenerateNewFileContent(ctx, filePath, genInstruction)
+			if err != nil {
+				return fmt.Sprintf("Failed to generate content for '%s': %v", filePath, err)
+			}
+
+			commitOpts := github.CommitOptions{
+				Message:     fmt.Sprintf("Initialize %s via Shipp", filePath),
+				Content:     newContent,
+				CustomPAT:   args.CustomPAT,
+				AuthorName:  args.GitName,
+				AuthorEmail: args.GitEmail,
+			}
+
+			// If empty repo, MUST commit directly to defaultBranch (no branches/PRs possible)
+			if isEmptyRepo || args.PushToMain {
+				commitOpts.Branch = defaultBranch
+				commitURL, err := b.github.CommitFileWithOptions(ctx, owner, repoName, filePath, commitOpts)
+				if err != nil {
+					return fmt.Sprintf("Commit to %s failed: %v", defaultBranch, err)
+				}
+				if isEmptyRepo {
+					return fmt.Sprintf("Initialized empty repo and created %s directly on %s (%s/%s):\n%s", filePath, defaultBranch, owner, repoName, commitURL)
+				}
+				return fmt.Sprintf("Created %s directly on %s (%s/%s):\n%s", filePath, defaultBranch, owner, repoName, commitURL)
+			}
+
+			// Non-empty repo and PushToMain is false: create branch & PR
+			branchName := fmt.Sprintf("shipp/create-%s-%d", strings.ToLower(filepath.Base(filePath)), time.Now().Unix())
+			if err := b.github.CreateBranchWithToken(ctx, owner, repoName, branchName, defaultBranch, args.CustomPAT); err != nil {
+				return fmt.Sprintf("Failed to create branch '%s': %v", branchName, err)
+			}
+			commitOpts.Branch = branchName
+			_, err = b.github.CommitFileWithOptions(ctx, owner, repoName, filePath, commitOpts)
+			if err != nil {
+				return fmt.Sprintf("Failed to commit to branch '%s': %v", branchName, err)
+			}
+			prURL, prNum, err := b.github.CreatePullRequestWithToken(
+				ctx,
+				owner,
+				repoName,
+				fmt.Sprintf("Shipp: Create %s", filePath),
+				fmt.Sprintf("Automated file creation requested by @%s:\n\n> %s", username, args.Instruction),
+				branchName,
+				defaultBranch,
+				args.CustomPAT,
+			)
+			if err != nil {
+				return fmt.Sprintf("Committed to branch '%s', but failed to open PR: %v", branchName, err)
+			}
+			return fmt.Sprintf("Created %s on branch '%s' and opened PR #%d on %s/%s:\n%s\nSay 'merge it' whenever you're ready.", filePath, branchName, prNum, owner, repoName, prURL)
 		}
 
 		// 3. AI Refactor
@@ -1852,7 +2057,11 @@ func (b *Bot) executeToolCall(
 		if args.Command == "" {
 			return "No command provided for sandbox runner."
 		}
-		taskID, err := b.sandbox.Dispatch(ctx, chatID, args.Command, args.Repo)
+		threadID := 0
+		if v := ctx.Value(ctxKeyThreadID{}); v != nil {
+			threadID = v.(int)
+		}
+		taskID, err := b.sandbox.DispatchWithThread(ctx, chatID, threadID, 0, args.Command, args.Repo)
 		if err != nil {
 			return fmt.Sprintf("Failed to launch sandbox runner: %v", err)
 		}
@@ -3328,6 +3537,12 @@ func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, 
 	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
 		threadID = v.(int)
 	}
+	if threadID == 0 && replyToMsgID > 0 {
+		threadID = b.lookupMsgThread(chatID, replyToMsgID)
+	}
+	if threadID == 0 {
+		threadID = b.lookupChatThread(chatID)
+	}
 
 	if threadID != 0 {
 		b.sendViaThreadAPI(ctx, chatID, threadID, replyToMsgID, htmlText)
@@ -3347,7 +3562,7 @@ func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, 
 	}
 }
 
-// sendSimpleMessage sends without replying to a specific message. Thread-aware via ctx.
+// sendSimpleMessage sends without replying to a specific message. Thread-aware via ctx or active chat thread.
 func (b *Bot) sendSimpleMessage(chatID int64, text string) {
 	b.sendSimpleMessageCtx(context.Background(), chatID, text)
 }
@@ -3361,6 +3576,9 @@ func (b *Bot) sendSimpleMessageCtx(ctx context.Context, chatID int64, text strin
 	threadID := 0
 	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
 		threadID = v.(int)
+	}
+	if threadID == 0 {
+		threadID = b.lookupChatThread(chatID)
 	}
 
 	if threadID != 0 {
@@ -3392,17 +3610,41 @@ func (b *Bot) sendViaThreadAPI(_ context.Context, chatID int64, threadID int, re
 	if replyToMsgID > 0 {
 		params.AddNonZero("reply_to_message_id", replyToMsgID)
 	}
-	_, err := b.api.MakeRequest("sendMessage", params)
-	if err != nil {
-		// Fallback: retry without parse mode and strip any broken HTML tags
+	resp, err := b.api.MakeRequest("sendMessage", params)
+	if err != nil || (resp != nil && !resp.Ok) {
+		// Fallback 1: retry without parse mode and strip any broken HTML tags
 		params["parse_mode"] = ""
 		params["text"] = stripHTMLTags(htmlText)
-		_, _ = b.api.MakeRequest("sendMessage", params)
+		resp2, err2 := b.api.MakeRequest("sendMessage", params)
+		if err2 != nil || (resp2 != nil && !resp2.Ok) {
+			// Fallback 2: if thread was deleted or failed, send to chat without message_thread_id
+			delete(params, "message_thread_id")
+			_, _ = b.api.MakeRequest("sendMessage", params)
+		}
 	}
 }
 
 func (b *Bot) sendChatAction(chatID int64, action string) {
+	b.sendChatActionCtx(context.Background(), chatID, action)
+}
+
+func (b *Bot) sendChatActionCtx(ctx context.Context, chatID int64, action string) {
 	if b.api == nil {
+		return
+	}
+	threadID := 0
+	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
+		threadID = v.(int)
+	}
+	if threadID == 0 {
+		threadID = b.lookupChatThread(chatID)
+	}
+	if threadID != 0 {
+		params := tgbotapi.Params{}
+		params.AddNonZero64("chat_id", chatID)
+		params.AddNonEmpty("action", action)
+		params.AddNonZero("message_thread_id", threadID)
+		_, _ = b.api.MakeRequest("sendChatAction", params)
 		return
 	}
 	chatAction := tgbotapi.NewChatAction(chatID, action)
@@ -3473,18 +3715,37 @@ func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
 		cleanOutput = cleanOutput[:3000] + "\n... (output truncated)"
 	}
 
+	var text string
 	if payload.ExitCode == 0 {
 		if cleanOutput == "" {
-			b.sendSimpleMessage(payload.ChatID, fmt.Sprintf("runner completed cleanly in %ds (exit code 0).", payload.DurationSeconds))
+			text = fmt.Sprintf("runner completed cleanly in %ds (exit code 0).", payload.DurationSeconds)
 		} else {
-			b.sendSimpleMessage(payload.ChatID, fmt.Sprintf("runner completed in %ds (exit code 0):\n```\n%s\n```", payload.DurationSeconds, cleanOutput))
+			text = fmt.Sprintf("runner completed in %ds (exit code 0):\n```\n%s\n```", payload.DurationSeconds, cleanOutput)
 		}
 	} else {
 		if cleanOutput == "" {
-			b.sendSimpleMessage(payload.ChatID, fmt.Sprintf("runner failed (exit code %d) in %ds.", payload.ExitCode, payload.DurationSeconds))
+			text = fmt.Sprintf("runner failed (exit code %d) in %ds.", payload.ExitCode, payload.DurationSeconds)
 		} else {
-			b.sendSimpleMessage(payload.ChatID, fmt.Sprintf("runner failed (exit code %d) in %ds:\n```\n%s\n```", payload.ExitCode, payload.DurationSeconds, cleanOutput))
+			text = fmt.Sprintf("runner failed (exit code %d) in %ds:\n```\n%s\n```", payload.ExitCode, payload.DurationSeconds, cleanOutput)
 		}
+	}
+
+	threadID := 0
+	replyToMsgID := 0
+	if b.sandbox != nil {
+		if task := b.sandbox.GetTask(payload.TaskID); task != nil {
+			threadID = task.ThreadID
+			replyToMsgID = task.ReplyToMsgID
+		}
+	}
+	ctx := context.Background()
+	if threadID != 0 {
+		ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
+	}
+	if replyToMsgID > 0 {
+		b.sendReplyCtx(ctx, payload.ChatID, replyToMsgID, text)
+	} else {
+		b.sendSimpleMessageCtx(ctx, payload.ChatID, text)
 	}
 }
 
@@ -3492,7 +3753,16 @@ func (b *Bot) handleSandboxTimeout(task *sandbox.Task) {
 	if task == nil || task.ChatID == 0 {
 		return
 	}
-	b.sendSimpleMessage(task.ChatID, fmt.Sprintf("sandbox task %s timed out after 6 minutes with no callback.", task.ID))
+	ctx := context.Background()
+	if task.ThreadID != 0 {
+		ctx = context.WithValue(ctx, ctxKeyThreadID{}, task.ThreadID)
+	}
+	text := fmt.Sprintf("sandbox task %s timed out after 6 minutes with no callback.", task.ID)
+	if task.ReplyToMsgID > 0 {
+		b.sendReplyCtx(ctx, task.ChatID, task.ReplyToMsgID, text)
+	} else {
+		b.sendSimpleMessageCtx(ctx, task.ChatID, text)
+	}
 }
 
 func isBalanceIntent(prompt string) (bool, string) {

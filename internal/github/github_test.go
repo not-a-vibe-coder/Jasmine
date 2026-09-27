@@ -260,3 +260,45 @@ func TestGitHubMockEndpoints(t *testing.T) {
 		t.Errorf("unexpected formatted issues: %s", formattedIssues)
 	}
 }
+
+func TestIsRepoEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/repos/empty-org/empty-repo/branches") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/repos/active-org/active-repo/branches") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"name":"main"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/repos/conflict-org/conflict-repo/branches") {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"message":"Git Repository is empty."}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	svc := NewService("token", "user", "email@example.com")
+	svc.baseURL = server.URL
+	ctx := context.Background()
+
+	empty, err := svc.IsRepoEmpty(ctx, "empty-org", "empty-repo")
+	if err != nil || !empty {
+		t.Fatalf("expected empty=true, got empty=%v, err=%v", empty, err)
+	}
+
+	active, err := svc.IsRepoEmpty(ctx, "active-org", "active-repo")
+	if err != nil || active {
+		t.Fatalf("expected active=false (not empty), got empty=%v, err=%v", active, err)
+	}
+
+	conflict, err := svc.IsRepoEmpty(ctx, "conflict-org", "conflict-repo")
+	if err != nil || !conflict {
+		t.Fatalf("expected conflict=true (empty), got empty=%v, err=%v", conflict, err)
+	}
+}

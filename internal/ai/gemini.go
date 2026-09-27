@@ -554,6 +554,51 @@ CRITICAL INSTRUCTIONS:
 	return cleanCodeBlock(sb.String()), nil
 }
 
+func (c *Client) generateNewFileGemini(
+	ctx context.Context,
+	filename string,
+	instruction string,
+) (string, error) {
+	prompt := fmt.Sprintf(`You are an expert software engineer and technical writer.
+Create a brand-new file '%s' from scratch based on this instruction:
+"%s"
+
+CRITICAL INSTRUCTIONS:
+1. Output ONLY the complete, production-ready content for the file.
+2. If it is a README.md, make it thorough, clean, and well-structured with overview, setup, and key details.
+3. Do NOT wrap the entire output in markdown backticks unless the file itself is markdown.
+4. Strictly NO conversational preamble, no "Here is the file:", no explanations.
+5. Return ONLY the raw file contents ready to be committed directly to git.`, filename, instruction)
+
+	req := geminiChatReq{
+		Contents: []geminiChatContent{
+			{
+				Role:  "user",
+				Parts: []geminiChatPart{{Text: prompt}},
+			},
+		},
+		GenerationConfig: &geminiChatGenConfig{
+			Temperature:     0.3,
+			MaxOutputTokens: 4000,
+		},
+	}
+
+	resp, err := c.callGeminiGenerate(ctx, req)
+	if err != nil {
+		return "", err
+	}
+
+	if len(resp.Candidates) == 0 {
+		return "", fmt.Errorf("gemini returned empty response for file generation")
+	}
+
+	var sb strings.Builder
+	for _, p := range resp.Candidates[0].Content.Parts {
+		sb.WriteString(p.Text)
+	}
+	return cleanCodeBlock(sb.String()), nil
+}
+
 func (c *Client) analyzeDocumentGemini(
 	ctx context.Context,
 	senderUsername string,

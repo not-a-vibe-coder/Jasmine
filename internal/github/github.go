@@ -51,6 +51,10 @@ func NewService(token, username, defaultEmail string) *Service {
 	}
 }
 
+func (s *Service) SetBaseURL(u string) {
+	s.baseURL = u
+}
+
 // ParseRepoSlug parses "owner/repo" or "repo" (defaulting to config username) or full github.com URL
 func (s *Service) ParseRepoSlug(input string) (string, string, error) {
 	cleaned := strings.TrimSpace(input)
@@ -280,6 +284,33 @@ func (s *Service) CreateBranchWithToken(ctx context.Context, owner, repo, newBra
 	return nil
 }
 
+// IsRepoEmpty checks if a repository has no commits / no branches yet.
+func (s *Service) IsRepoEmpty(ctx context.Context, owner, repo string) (bool, error) {
+	return s.IsRepoEmptyWithToken(ctx, owner, repo, "")
+}
+
+// IsRepoEmptyWithToken checks if a repository has no commits / no branches yet.
+func (s *Service) IsRepoEmptyWithToken(ctx context.Context, owner, repo, customToken string) (bool, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/branches", s.baseURL, owner, repo)
+	resp, err := s.makeRequestWithToken(ctx, http.MethodGet, url, nil, customToken)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		var branches []struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&branches); err == nil {
+			return len(branches) == 0, nil
+		}
+	} else if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusNotFound {
+		return true, nil
+	}
+	return false, nil
+}
+
 // CommitFile commits a file update or creation with optional custom author/committer credentials
 func (s *Service) CommitFileWithOptions(ctx context.Context, owner, repo, path string, opts CommitOptions) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", s.baseURL, owner, repo, strings.TrimPrefix(path, "/"))
@@ -292,6 +323,9 @@ func (s *Service) CommitFileWithOptions(ctx context.Context, owner, repo, path s
 	authorEmail := strings.TrimSpace(opts.AuthorEmail)
 	if authorEmail == "" {
 		authorEmail = s.defaultEmail
+	}
+	if authorEmail == "" {
+		authorEmail = "shippzero@atomicmail.io"
 	}
 
 	payload := map[string]interface{}{
