@@ -146,6 +146,18 @@ func TestDebugDexScreener(t *testing.T) {
 		t.Errorf("Card 2 contains emojis: %s", card2)
 	}
 	t.Logf("Solana Card:\n%s", card2)
+
+	// Test 3: TERA on Robinhood (enriched with Codex market cap)
+	res3, err := svc.AnalyzeToken(context.Background(), "0x3c12e57fa7817a86ce7c254db9ea5fe639e233f8", "robinhood")
+	if err != nil || res3.Status != StatusSuccess {
+		t.Fatalf("Robinhood test failed: %v, status: %s", err, res3.Status)
+	}
+	t.Logf("Robinhood TERA MarketCap: %v, FDV: %v, Holders: %d", res3.Metrics.MarketCap, res3.Metrics.FDV, res3.Metrics.HoldersCount)
+	if res3.Metrics.MarketCap < 35000 {
+		t.Errorf("expected MarketCap to be enriched from Codex (>35K), got: %v", res3.Metrics.MarketCap)
+	}
+	natural3 := FormatNatural(res3.Metrics)
+	t.Logf("Natural Format:\n%s", natural3)
 }
 
 

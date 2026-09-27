@@ -318,6 +318,18 @@ func (s *Service) AnalyzeToken(ctx context.Context, rawAddress string, preferred
 	if normChain != "" {
 		pairs, exists := chainPairs[normChain]
 		if !exists || len(pairs) == 0 {
+			// Try Codex for this chain before failing
+			codexMetrics := s.fetchCodexFallback(ctx, address, normChain)
+			if codexMetrics != nil {
+				res := &AnalysisResult{
+					Status:  StatusSuccess,
+					Metrics: codexMetrics,
+					Address: address,
+				}
+				s.saveCache(cacheKey, res)
+				return res, nil
+			}
+
 			// User specified chain that has no pools
 			var available []string
 			for c := range chainPairs {
@@ -555,9 +567,16 @@ func (s *Service) enrichWithCodex(ctx context.Context, metrics *TokenMetrics) {
 	if item.Top10HoldersPercent > 0 {
 		metrics.Top10HoldersPct = item.Top10HoldersPercent
 	}
-	if metrics.MarketCap == 0 {
-		mc, _ := strconv.ParseFloat(item.MarketCap, 64)
+	if mc, err := strconv.ParseFloat(item.MarketCap, 64); err == nil && mc > 0 {
 		metrics.MarketCap = mc
+		if metrics.FDV == 0 || metrics.FDV < mc {
+			metrics.FDV = mc
+		}
+	}
+	if p, err := strconv.ParseFloat(item.PriceUSD, 64); err == nil && p > 0 {
+		if metrics.PriceUSD == 0 {
+			metrics.PriceUSD = p
+		}
 	}
 	metrics.DataSource = "codex.io + dexscreener"
 }
