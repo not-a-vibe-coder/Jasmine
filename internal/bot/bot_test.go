@@ -720,6 +720,8 @@ func TestConversationalFollowup(t *testing.T) {
 		{"do they have webhooks", true},
 		{".com", true},
 		{"check .io", true},
+		{"is @liegeagents username available on X", true},
+		{"check @curtain on twitter", true},
 		{"brb lunch", false},
 		{"lol", false},
 		{"ok thanks", false},

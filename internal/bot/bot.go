@@ -485,6 +485,9 @@ func (b *Bot) isConversationalFollowup(msg *tgbotapi.Message, text string) (bool
 		return false, ""
 	}
 
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+
 	// Disqualification Gate 1: If user explicitly replied to another message (not bot)
 	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
 		if b.api != nil && msg.ReplyToMessage.From.ID != b.api.Self.ID {
@@ -492,15 +495,19 @@ func (b *Bot) isConversationalFollowup(msg *tgbotapi.Message, text string) (bool
 		}
 	}
 
-	// Disqualification Gate 2: If message tags another user (@someone), it is directed at them
-	matches := otherMentionRegex.FindAllStringSubmatch(text, -1)
-	for _, m := range matches {
-		if len(m) > 1 {
-			mentioned := m[1]
-			if b.api != nil && b.api.Self.UserName != "" && strings.EqualFold(mentioned, b.api.Self.UserName) {
-				continue
+	// Disqualification Gate 2: If message tags another user (@someone), it is directed at them.
+	// Exception: If the message is asking about an X/social handle (e.g. "is @liegeagents username available on X")
+	isHandleQuery := strings.Contains(lower, "on x") || strings.Contains(lower, "on twitter") || strings.Contains(lower, "x handle") || strings.Contains(lower, "twitter handle") || strings.Contains(lower, "username") || strings.Contains(lower, "handle")
+	if !isHandleQuery {
+		matches := otherMentionRegex.FindAllStringSubmatch(text, -1)
+		for _, m := range matches {
+			if len(m) > 1 {
+				mentioned := m[1]
+				if b.api != nil && b.api.Self.UserName != "" && strings.EqualFold(mentioned, b.api.Self.UserName) {
+					continue
+				}
+				return false, "" // directed at someone else
 			}
-			return false, "" // directed at someone else
 		}
 	}
 
@@ -527,9 +534,6 @@ func (b *Bot) isConversationalFollowup(msg *tgbotapi.Message, text string) (bool
 	if msg.From == nil || msg.From.ID != dialog.LastUserID {
 		return false, ""
 	}
-
-	trimmed := strings.TrimSpace(text)
-	lower := strings.ToLower(trimmed)
 
 	// Heuristic 1: Ends with a question mark
 	if strings.HasSuffix(lower, "?") {
@@ -560,6 +564,11 @@ func (b *Bot) isConversationalFollowup(msg *tgbotapi.Message, text string) (bool
 
 	// Heuristic 5: Short TLD extension follow-up (e.g. ".com", "check .io", ".xyz")
 	if len(fields) <= 5 && len(domain.ExtractRequestedTLDs(lower)) > 0 {
+		return true, dialog.LastBotSnippet
+	}
+
+	// Heuristic 6: Social handle / username availability query (e.g. "is @liegeagents username available on X")
+	if isHandleQuery && (strings.HasPrefix(lower, "is ") || strings.HasPrefix(lower, "check ") || strings.Contains(lower, "available") || strings.Contains(lower, "@")) {
 		return true, dialog.LastBotSnippet
 	}
 
