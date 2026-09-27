@@ -20,6 +20,7 @@ type Task struct {
 	ThreadID     int
 	ReplyToMsgID int
 	Command      string
+	Prompt       string
 	StartTime    time.Time
 	Done         chan struct{}
 }
@@ -85,11 +86,16 @@ func (s *Service) GetTask(taskID string) *Task {
 
 // Dispatch triggers a GitHub Actions ephemeral runner workflow
 func (s *Service) Dispatch(ctx context.Context, chatID int64, command, repo string) (string, error) {
-	return s.DispatchWithThread(ctx, chatID, 0, 0, command, repo)
+	return s.DispatchWithPrompt(ctx, chatID, 0, 0, command, repo, "")
 }
 
 // DispatchWithThread triggers a GitHub Actions ephemeral runner workflow with thread and reply info
 func (s *Service) DispatchWithThread(ctx context.Context, chatID int64, threadID, replyToMsgID int, command, repo string) (string, error) {
+	return s.DispatchWithPrompt(ctx, chatID, threadID, replyToMsgID, command, repo, "")
+}
+
+// DispatchWithPrompt triggers a GitHub Actions ephemeral runner workflow with thread, reply, and original prompt info
+func (s *Service) DispatchWithPrompt(ctx context.Context, chatID int64, threadID, replyToMsgID int, command, repo, prompt string) (string, error) {
 	if s.githubPAT == "" {
 		return "", fmt.Errorf("GITHUB_PAT is not configured")
 	}
@@ -108,6 +114,7 @@ func (s *Service) DispatchWithThread(ctx context.Context, chatID int64, threadID
 		ThreadID:     threadID,
 		ReplyToMsgID: replyToMsgID,
 		Command:      command,
+		Prompt:       prompt,
 		StartTime:    time.Now(),
 		Done:         make(chan struct{}),
 	}

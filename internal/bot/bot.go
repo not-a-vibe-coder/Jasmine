@@ -369,12 +369,17 @@ type ctxKeyThreadID struct{}
 // so asynchronous callbacks (like sandbox execution) reply to the exact prompt message.
 type ctxKeyReplyToMsgID struct{}
 
+// ctxKeyPrompt is the context key used to pass the original user prompt through the call chain
+// so asynchronous callbacks (like sandbox execution) can synthesize an AI response based on the original question.
+type ctxKeyPrompt struct{}
+
 // handleMessageWithThread is the primary entry point for all incoming messages.
 // It extracts the forum thread ID (from webhook raw JSON) and topic name,
 // registers new topics, injects the thread ID into context, then calls handleMessage.
 func (b *Bot) handleMessageWithThread(ctx context.Context, msg *tgbotapi.Message, threadID int, topicName string) {
 	chatID := msg.Chat.ID
 	ctx = context.WithValue(ctx, ctxKeyReplyToMsgID{}, msg.MessageID)
+	ctx = context.WithValue(ctx, ctxKeyPrompt{}, msg.Text)
 
 	// If this is a forum_topic_created service message, register the topic
 	if topicName != "" && threadID != 0 {
@@ -906,7 +911,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 		if v := ctx.Value(ctxKeyThreadID{}); v != nil {
 			threadID = v.(int)
 		}
-		taskID, err := b.sandbox.DispatchWithThread(ctx, msg.Chat.ID, threadID, msg.MessageID, cmdToRun, "")
+		taskID, err := b.sandbox.DispatchWithPrompt(ctx, msg.Chat.ID, threadID, msg.MessageID, cmdToRun, "", msg.Text)
 		if err != nil {
 			log.Printf("[Bot] Sandbox dispatch error: %v", err)
 			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to launch sandbox runner: %v", err))
@@ -2113,7 +2118,11 @@ func (b *Bot) executeToolCall(
 		if v := ctx.Value(ctxKeyReplyToMsgID{}); v != nil {
 			replyToMsgID = v.(int)
 		}
-		taskID, err := b.sandbox.DispatchWithThread(ctx, chatID, threadID, replyToMsgID, args.Command, args.Repo)
+		prompt := ""
+		if v := ctx.Value(ctxKeyPrompt{}); v != nil {
+			prompt = v.(string)
+		}
+		taskID, err := b.sandbox.DispatchWithPrompt(ctx, chatID, threadID, replyToMsgID, args.Command, args.Repo, prompt)
 		if err != nil {
 			return fmt.Sprintf("Failed to launch sandbox runner: %v", err)
 		}
@@ -3758,6 +3767,35 @@ func (b *Bot) getRandomWorkingAck() string {
 	return dynamicWorkingAcks[rand.Intn(len(dynamicWorkingAcks))]
 }
 
+var dynamicSandboxSuccessAcks = []string{
+	"ran it clean in %ds:",
+	"done in %ds, here's what came out:",
+	"clean run, took %ds:",
+	"wrapped that up in %ds:",
+	"all done (took %ds):",
+	"executed clean in %ds:",
+}
+
+var dynamicSandboxFailAcks = []string{
+	"hit an issue after %ds (exit code %d):",
+	"threw an error in %ds (exit code %d):",
+	"ran into an error after %ds (exit code %d):",
+	"tripped up with exit code %d in %ds:",
+}
+
+func (b *Bot) getRandomSandboxSuccessAck(duration int) string {
+	tmpl := dynamicSandboxSuccessAcks[rand.Intn(len(dynamicSandboxSuccessAcks))]
+	return fmt.Sprintf(tmpl, duration)
+}
+
+func (b *Bot) getRandomSandboxFailAck(duration, exitCode int) string {
+	tmpl := dynamicSandboxFailAcks[rand.Intn(len(dynamicSandboxFailAcks))]
+	if strings.Contains(tmpl, "code %d in %ds") {
+		return fmt.Sprintf(tmpl, exitCode, duration)
+	}
+	return fmt.Sprintf(tmpl, duration, exitCode)
+}
+
 func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
 	if payload.ChatID == 0 {
 		return
@@ -3767,29 +3805,64 @@ func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
 		cleanOutput = cleanOutput[:3000] + "\n... (output truncated)"
 	}
 
-	var text string
-	if payload.ExitCode == 0 {
-		if cleanOutput == "" {
-			text = fmt.Sprintf("runner completed cleanly in %ds (exit code 0).", payload.DurationSeconds)
-		} else {
-			text = fmt.Sprintf("runner completed in %ds (exit code 0):\n```\n%s\n```", payload.DurationSeconds, cleanOutput)
-		}
-	} else {
-		if cleanOutput == "" {
-			text = fmt.Sprintf("runner failed (exit code %d) in %ds.", payload.ExitCode, payload.DurationSeconds)
-		} else {
-			text = fmt.Sprintf("runner failed (exit code %d) in %ds:\n```\n%s\n```", payload.ExitCode, payload.DurationSeconds, cleanOutput)
-		}
-	}
-
 	threadID := 0
 	replyToMsgID := 0
+	taskPrompt := ""
+	taskCmd := ""
 	if b.sandbox != nil {
 		if task := b.sandbox.GetTask(payload.TaskID); task != nil {
 			threadID = task.ThreadID
 			replyToMsgID = task.ReplyToMsgID
+			taskPrompt = task.Prompt
+			taskCmd = task.Command
 		}
 	}
+
+	// 1. Build Option 1 natural dev phrasing (instant and reliable fallback)
+	var introLine string
+	var fallbackText string
+	if payload.ExitCode == 0 {
+		introLine = b.getRandomSandboxSuccessAck(payload.DurationSeconds)
+		if cleanOutput == "" {
+			fallbackText = fmt.Sprintf("clean run in %ds (exit code 0).", payload.DurationSeconds)
+		} else {
+			fallbackText = fmt.Sprintf("%s\n```\n%s\n```", introLine, cleanOutput)
+		}
+	} else {
+		introLine = b.getRandomSandboxFailAck(payload.DurationSeconds, payload.ExitCode)
+		if cleanOutput == "" {
+			fallbackText = fmt.Sprintf("runner failed (exit code %d) in %ds.", payload.ExitCode, payload.DurationSeconds)
+		} else {
+			fallbackText = fmt.Sprintf("%s\n```\n%s\n```", introLine, cleanOutput)
+		}
+	}
+
+	text := fallbackText
+
+	// 2. Attempt Option 2: Full conversational AI synthesis when prompt was a natural user request
+	isSlashCmd := strings.HasPrefix(strings.TrimSpace(taskPrompt), "/")
+	if b.ai != nil && taskPrompt != "" && !isSlashCmd && len(cleanOutput) > 0 {
+		ctxAI, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		toolSummary := fmt.Sprintf("Command: %s\nExit Code: %d\nDuration: %ds\nOutput:\n%s", taskCmd, payload.ExitCode, payload.DurationSeconds, cleanOutput)
+		aiReply, err := b.ai.GenerateToolFollowup(
+			ctxAI,
+			"owner",
+			true,
+			taskPrompt,
+			"run_sandbox_task",
+			payload.TaskID,
+			fmt.Sprintf(`{"command":%q}`, taskCmd),
+			toolSummary,
+			nil,
+		)
+		cancel()
+
+		aiReply = strings.TrimSpace(cleanNoEmojis(aiReply))
+		if err == nil && aiReply != "" && aiReply != strings.TrimSpace(toolSummary) {
+			text = fmt.Sprintf("%s\n\n%s\n```\n%s\n```", aiReply, introLine, cleanOutput)
+		}
+	}
+
 	ctx := context.Background()
 	if threadID != 0 {
 		ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
@@ -3809,7 +3882,7 @@ func (b *Bot) handleSandboxTimeout(task *sandbox.Task) {
 	if task.ThreadID != 0 {
 		ctx = context.WithValue(ctx, ctxKeyThreadID{}, task.ThreadID)
 	}
-	text := fmt.Sprintf("sandbox task %s timed out after 6 minutes with no callback.", task.ID)
+	text := "sandbox task hit the 6-minute timeout without finishing."
 	if task.ReplyToMsgID > 0 {
 		b.sendReplyCtx(ctx, task.ChatID, task.ReplyToMsgID, text)
 	} else {
