@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -420,3 +421,121 @@ func TestParseDMIntent(t *testing.T) {
 		}
 	}
 }
+
+func TestConversationalFollowup(t *testing.T) {
+	b := &Bot{
+		api: &tgbotapi.BotAPI{
+			Self: tgbotapi.User{
+				ID:       100,
+				UserName: "Shipp0Bot",
+			},
+		},
+		activeDialogs: make(map[int64]*ActiveDialog),
+	}
+
+	groupID := int64(-100123456789)
+	issacID := int64(555)
+
+	// Record an active dialog with Issac in group
+	b.recordActiveDialog(groupID, 10, "prepaid crypto cards that support API integration are already out there - Crypto.com Visa, Binance Card and BitPay's card", issacID, "issac_brownson")
+
+	// 1. Exact screenshot case: Issac asks "Are they non KYC" without tag
+	msg1 := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: groupID, Type: "supergroup"},
+		From: &tgbotapi.User{ID: issacID, UserName: "issac_brownson"},
+		Text: "Are they non KYC",
+	}
+	isFollowup, snippet := b.isConversationalFollowup(msg1, msg1.Text)
+	if !isFollowup {
+		t.Fatalf("expected 'Are they non KYC' to be detected as conversational follow-up")
+	}
+	if !strings.Contains(snippet, "Crypto.com Visa") {
+		t.Errorf("expected snippet to contain previous bot reply, got %q", snippet)
+	}
+
+	// 2. Disqualification: Mentioning another user (@skipp_dev)
+	msg2 := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: groupID, Type: "supergroup"},
+		From: &tgbotapi.User{ID: 888, UserName: "jack"},
+		Text: "@skipp_dev I pushed those proposed changes",
+	}
+	isFollowup2, _ := b.isConversationalFollowup(msg2, msg2.Text)
+	if isFollowup2 {
+		t.Errorf("expected message mentioning another user to be disqualified")
+	}
+
+	// 3. Disqualification: Replying to someone else
+	msg3 := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: groupID, Type: "supergroup"},
+		From: &tgbotapi.User{ID: issacID, UserName: "issac_brownson"},
+		Text: "Are they non KYC",
+		ReplyToMessage: &tgbotapi.Message{
+			From: &tgbotapi.User{ID: 999, UserName: "jack"},
+		},
+	}
+	isFollowup3, _ := b.isConversationalFollowup(msg3, msg3.Text)
+	if isFollowup3 {
+		t.Errorf("expected message replying to someone else to be disqualified")
+	}
+
+	// 4. Disqualification: Slash command
+	msg4 := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: groupID, Type: "supergroup"},
+		From: &tgbotapi.User{ID: issacID, UserName: "issac_brownson"},
+		Text: "/help",
+	}
+	isFollowup4, _ := b.isConversationalFollowup(msg4, msg4.Text)
+	if isFollowup4 {
+		t.Errorf("expected slash command to be disqualified from followup heuristic")
+	}
+
+	// 5. Expiry after 120 seconds
+	b.dialogMu.Lock()
+	b.activeDialogs[groupID].LastBotReplyTime = time.Now().Add(-125 * time.Second)
+	b.dialogMu.Unlock()
+
+	msg5 := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: groupID, Type: "supergroup"},
+		From: &tgbotapi.User{ID: issacID, UserName: "issac_brownson"},
+		Text: "Are they non KYC",
+	}
+	isFollowup5, _ := b.isConversationalFollowup(msg5, msg5.Text)
+	if isFollowup5 {
+		t.Errorf("expected expired dialog (> 120s) to be rejected")
+	}
+
+	// 6. Reset timer and test various conversational follow-ups
+	b.dialogMu.Lock()
+	b.activeDialogs[groupID].LastBotReplyTime = time.Now()
+	b.dialogMu.Unlock()
+
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{"which one is cheapest?", true},
+		{"can we integrate bitpay", true},
+		{"tell me more", true},
+		{"proceed", true},
+		{"fees?", true},
+		{"what of moon card", true},
+		{"does it work in US", true},
+		{"do they have webhooks", true},
+		{"brb lunch", false},
+		{"lol", false},
+		{"ok thanks", false},
+	}
+
+	for _, tt := range tests {
+		m := &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: groupID, Type: "supergroup"},
+			From: &tgbotapi.User{ID: issacID, UserName: "issac_brownson"},
+			Text: tt.text,
+		}
+		got, _ := b.isConversationalFollowup(m, m.Text)
+		if got != tt.want {
+			t.Errorf("isConversationalFollowup(%q) = %v; want %v", tt.text, got, tt.want)
+		}
+	}
+}
+

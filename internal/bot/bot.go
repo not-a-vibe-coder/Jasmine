@@ -64,6 +64,18 @@ type Bot struct {
 	// Group registry: chatID -> *GroupInfo
 	groupMu       sync.RWMutex
 	groupRegistry map[int64]*GroupInfo
+
+	// Conversational momentum dialog tracking per group chat
+	dialogMu      sync.RWMutex
+	activeDialogs map[int64]*ActiveDialog
+}
+
+type ActiveDialog struct {
+	LastBotReplyTime time.Time
+	LastBotMessageID int
+	LastBotSnippet   string
+	LastUserID       int64
+	LastUsername     string
 }
 
 type GroupInfo struct {
@@ -113,6 +125,7 @@ func NewBot(
 		lastProactiveTime: make(map[int64]time.Time),
 		topicRegistry:     make(map[int64]map[int]string),
 		groupRegistry:     make(map[int64]*GroupInfo),
+		activeDialogs:     make(map[int64]*ActiveDialog),
 	}
 
 	if sandboxSvc != nil {
@@ -339,7 +352,13 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	// 2. Check if bot should respond in group
-	shouldRespond := isPrivate || b.isAddressedToBot(msg)
+	addressed := isPrivate || b.isAddressedToBot(msg)
+	isFollowup, dialogSnippet := false, ""
+	if !addressed && (msg.Chat.IsGroup() || msg.Chat.IsSuperGroup()) {
+		isFollowup, dialogSnippet = b.isConversationalFollowup(msg, text)
+	}
+
+	shouldRespond := addressed || isFollowup
 	if !shouldRespond {
 		return
 	}
@@ -372,6 +391,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			if replyText != "" {
 				b.sendReply(chatID, msg.MessageID, replyText)
 				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", replyText)
+				b.recordActiveDialog(chatID, msg.MessageID, replyText, msg.From.ID, username)
 				return
 			}
 		}
@@ -403,6 +423,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 				promptWithContext = fmt.Sprintf("[Replying to: %q]\n%s", quotedText, cleanPrompt)
 			}
 		}
+	} else if isFollowup && dialogSnippet != "" {
+		promptWithContext = fmt.Sprintf("[Replying to your previous message: %q]\n%s", dialogSnippet, cleanPrompt)
 	}
 
 	// 3. Process via AI & NLP Tool Engine
@@ -438,6 +460,112 @@ func (b *Bot) isAddressedToBot(msg *tgbotapi.Message) bool {
 	}
 
 	return false
+}
+
+var otherMentionRegex = regexp.MustCompile(`(?i)@([a-zA-Z0-9_]{3,32})`)
+
+var followupPrefixRegex = regexp.MustCompile(`(?i)^(?:are\s+(?:they|these|those|there|you|we|it)|is\s+(?:it|that|this|there|anyone)|can\s+(?:we|you|i|that|it)|could\s+(?:we|you|it|that)|will\s+(?:it|that|this|you|they)|would\s+(?:it|that|this|you|they)|should\s+(?:we|i|it|they)|does\s+|do\s+(?:they|we|you|any)|what(?:\s+about|\s+of|'s|\s+is|\s+are|\s+if|\s+do|\s+does|\s+else)?|how(?:\s+about|\s+do|\s+does|\s+can|\s+is|\s+much|\s+to|\s+come)?|which(?:\s+one|\s+of|\s+is|\s+are)?|why(?:\s+not|\s+is|\s+do|\s+does|\s+would)?|where(?:\s+can|\s+is|\s+are|\s+do)?|any\s+(?:of|other|recommendation|chance|idea))\b`)
+
+var followupDirectivesRegex = regexp.MustCompile(`(?i)^(?:tell\s+me|explain|elaborate|break\s+it\s+down|go\s+ahead|do\s+(?:it|that)|show\s+me|expand|give\s+me|let'?s\s+do\s+it|proceed|continue)\b`)
+
+func (b *Bot) isConversationalFollowup(msg *tgbotapi.Message, text string) (bool, string) {
+	if msg == nil || text == "" {
+		return false, ""
+	}
+
+	// Disqualification Gate 1: If user explicitly replied to another message (not bot)
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		if b.api != nil && msg.ReplyToMessage.From.ID != b.api.Self.ID {
+			return false, ""
+		}
+	}
+
+	// Disqualification Gate 2: If message tags another user (@someone), it is directed at them
+	matches := otherMentionRegex.FindAllStringSubmatch(text, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			mentioned := m[1]
+			if b.api != nil && b.api.Self.UserName != "" && strings.EqualFold(mentioned, b.api.Self.UserName) {
+				continue
+			}
+			return false, "" // directed at someone else
+		}
+	}
+
+	// Disqualification Gate 3: Slash commands not intended for bot
+	if strings.HasPrefix(text, "/") {
+		return false, ""
+	}
+
+	// Check Active Dialog state
+	b.dialogMu.RLock()
+	dialog, exists := b.activeDialogs[msg.Chat.ID]
+	b.dialogMu.RUnlock()
+
+	if !exists || dialog == nil {
+		return false, ""
+	}
+
+	// 120 seconds momentum window
+	if time.Since(dialog.LastBotReplyTime) > 120*time.Second {
+		return false, ""
+	}
+
+	// Must be from the same user Shipp was speaking with
+	if msg.From == nil || msg.From.ID != dialog.LastUserID {
+		return false, ""
+	}
+
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+
+	// Heuristic 1: Ends with a question mark
+	if strings.HasSuffix(lower, "?") {
+		return true, dialog.LastBotSnippet
+	}
+
+	// Heuristic 2: Starts with interrogative follow-up pattern (e.g. "Are they non KYC")
+	if followupPrefixRegex.MatchString(lower) {
+		return true, dialog.LastBotSnippet
+	}
+
+	// Heuristic 3: Conversational continuation directives ("tell me more", "explain", "do it")
+	if followupDirectivesRegex.MatchString(lower) {
+		return true, dialog.LastBotSnippet
+	}
+
+	// Heuristic 4: Short response containing reference pronouns ("they", "them", "those", "these", "it", "that")
+	fields := strings.Fields(lower)
+	if len(fields) <= 8 {
+		for _, w := range fields {
+			cleanWord := strings.Trim(w, ",.?!:;\"'")
+			switch cleanWord {
+			case "they", "them", "those", "these", "it", "that":
+				return true, dialog.LastBotSnippet
+			}
+		}
+	}
+
+	return false, ""
+}
+
+func (b *Bot) recordActiveDialog(chatID int64, botMessageID int, botReplyText string, recipientID int64, recipientUsername string) {
+	if chatID > 0 {
+		return // Only track momentum in group/supergroup chats (chatID < 0)
+	}
+	snippet := strings.TrimSpace(stripHTMLTags(cleanNoEmojis(botReplyText)))
+	if len(snippet) > 300 {
+		snippet = snippet[:300] + "..."
+	}
+	b.dialogMu.Lock()
+	defer b.dialogMu.Unlock()
+	b.activeDialogs[chatID] = &ActiveDialog{
+		LastBotReplyTime: time.Now(),
+		LastBotMessageID: botMessageID,
+		LastBotSnippet:   snippet,
+		LastUserID:       recipientID,
+		LastUsername:     recipientUsername,
+	}
 }
 
 func (b *Bot) cleanPrompt(text string) string {
@@ -668,6 +796,7 @@ func (b *Bot) handleNLPAndChat(
 			}
 			b.sendSimpleMessage(chatID, finalText)
 			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
+			b.recordActiveDialog(chatID, msg.MessageID, finalText, msg.From.ID, username)
 			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 		}()
 		return
@@ -688,6 +817,7 @@ func (b *Bot) handleNLPAndChat(
 
 	b.sendReply(chatID, msg.MessageID, finalText)
 	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
+	b.recordActiveDialog(chatID, msg.MessageID, finalText, msg.From.ID, username)
 	go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 }
 
@@ -739,6 +869,7 @@ func (b *Bot) trySmartDispatch(
 		toolResult := b.executeToolCall(ctx, msg.Chat.ID, "github_edit_file", string(argsJSON), username, isOwner)
 		b.sendSimpleMessage(msg.Chat.ID, toolResult)
 		_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+		b.recordActiveDialog(msg.Chat.ID, msg.MessageID, toolResult, msg.From.ID, username)
 	}()
 	return true
 }
@@ -812,6 +943,7 @@ func (b *Bot) tryInterceptAction(
 				toolResult := b.executeToolCall(ctx, chatID, "github_merge_pr", string(argsJSON), username, isOwner)
 				b.sendReply(chatID, msg.MessageID, toolResult)
 				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+				b.recordActiveDialog(chatID, msg.MessageID, toolResult, msg.From.ID, username)
 				return true
 			}
 		}
@@ -1617,6 +1749,7 @@ func (b *Bot) handleTokenCommand(ctx context.Context, msg *tgbotapi.Message, arg
 
 	b.sendReply(msg.Chat.ID, msg.MessageID, replyText)
 	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", replyText)
+	b.recordActiveDialog(msg.Chat.ID, msg.MessageID, replyText, msg.From.ID, msg.From.UserName)
 }
 
 func (b *Bot) runProactiveEngine(ctx context.Context) {
