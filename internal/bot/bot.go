@@ -818,6 +818,9 @@ func (b *Bot) handleNLPAndChat(
 		return
 	}
 
+	// 4b. Intercept owner alerts / ping requests (safety net)
+	b.tryInterceptOwnerAlert(ctx, chatID, prompt, finalText, username, agResult.ToolsUsed)
+
 	if finalText == "" {
 		finalText = b.getRandomEmptyAck()
 	}
@@ -957,6 +960,71 @@ func (b *Bot) tryInterceptAction(
 	}
 
 	return false
+}
+
+var ownerAlertClaimRegex = regexp.MustCompile(`(?i)(?:i(?:'ll|\s+will|\s+have)?\s+(?:ping|alert|notify|tell|message|reach\s+out\s+to|dm)\s+(?:the\s+|my\s+|our\s+)?(?:owner|oga|creator|dev|boss|skipp)|pinged\s+(?:the\s+|my\s+|our\s+)?(?:owner|oga|creator|dev|boss|skipp)|let\s+(?:the\s+)?(?:owner|oga|creator|dev|skipp)\s+know)`)
+var ownerAlertPromptRegex = regexp.MustCompile(`(?i)(?:tell\s+(?:your\s+)?(?:oga|owner|creator|dev|boss|skipp)|ping\s+(?:your\s+)?(?:oga|owner|creator|dev|boss|skipp)|alert\s+(?:your\s+)?(?:oga|owner|creator|dev|boss|skipp)|let\s+(?:your\s+)?(?:oga|owner|creator|dev|skipp)\s+know)`)
+
+func (b *Bot) tryInterceptOwnerAlert(ctx context.Context, chatID int64, prompt, replyText, username string, toolsUsed []string) bool {
+	for _, t := range toolsUsed {
+		if t == "notify_owner" || t == "ping_owner" || t == "alert_owner" {
+			return false // Already sent via tool
+		}
+	}
+
+	isClaim := ownerAlertClaimRegex.MatchString(replyText)
+	isRequest := ownerAlertPromptRegex.MatchString(prompt)
+	if !isClaim && !isRequest {
+		return false
+	}
+
+	groupName := "private chat"
+	if chatID < 0 {
+		b.groupMu.RLock()
+		gInfo := b.groupRegistry[chatID]
+		b.groupMu.RUnlock()
+		if gInfo != nil && gInfo.Title != "" {
+			groupName = fmt.Sprintf("group %q", gInfo.Title)
+		} else {
+			groupName = "group chat"
+		}
+	}
+
+	alertMsg := fmt.Sprintf("Alert from @%s in %s:\n\n%s", username, groupName, prompt)
+	notified := b.alertOwners(ctx, alertMsg)
+	log.Printf("[Bot] Intercepted owner alert: notified %v for message from @%s", notified, username)
+	return len(notified) > 0
+}
+
+func (b *Bot) alertOwners(ctx context.Context, alertText string) []string {
+	var notified []string
+	for _, owner := range b.cfg.Owners {
+		oClean := strings.ToLower(strings.TrimPrefix(owner, "@"))
+		b.dmMu.RLock()
+		dmChatID, exists := b.userDMChats[oClean]
+		b.dmMu.RUnlock()
+
+		if (!exists || dmChatID == 0) && b.memory != nil {
+			if uid, err := b.memory.GetUserIDByUsername(ctx, oClean); err == nil && uid != 0 {
+				dmChatID = uid
+				exists = true
+				b.dmMu.Lock()
+				b.userDMChats[oClean] = uid
+				b.dmMu.Unlock()
+			}
+		}
+
+		if exists && dmChatID != 0 && b.api != nil {
+			dmMsg := tgbotapi.NewMessage(dmChatID, alertText)
+			if _, err := b.api.Send(dmMsg); err == nil {
+				notified = append(notified, oClean)
+				log.Printf("[Bot] Dispatched owner alert DM to @%s (%d)", oClean, dmChatID)
+			} else {
+				log.Printf("[Bot] Failed to send owner alert DM to @%s (%d): %v", oClean, dmChatID, err)
+			}
+		}
+	}
+	return notified
 }
 
 
@@ -1597,6 +1665,36 @@ func (b *Bot) executeToolCall(
 			return fmt.Sprintf("Domain search error: %v", err)
 		}
 		return b.domain.FormatResponse(res)
+
+	case "notify_owner", "ping_owner", "alert_owner":
+		var args struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		content := strings.TrimSpace(args.Message)
+		if content == "" {
+			content = arguments
+		}
+
+		groupName := "private chat"
+		if chatID < 0 {
+			b.groupMu.RLock()
+			gInfo := b.groupRegistry[chatID]
+			b.groupMu.RUnlock()
+			if gInfo != nil && gInfo.Title != "" {
+				groupName = fmt.Sprintf("group %q", gInfo.Title)
+			} else {
+				groupName = "group chat"
+			}
+		}
+
+		dmText := fmt.Sprintf("Alert from @%s in %s:\n\n%s", username, groupName, content)
+		notified := b.alertOwners(ctx, dmText)
+
+		if len(notified) > 0 {
+			return fmt.Sprintf("Delivered alert to owner (@%s): %s", strings.Join(notified, ", @"), content)
+		}
+		return fmt.Sprintf("Recorded alert for owner (@%s): %s", strings.Join(b.cfg.Owners, ", @"), content)
 
 	default:
 		return "Unknown action."

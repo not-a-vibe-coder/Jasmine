@@ -69,6 +69,7 @@ func TestToolsDefinition(t *testing.T) {
 		"send_email":              false,
 		"get_active_groups":      false,
 		"vercel_search_domains":  false,
+		"notify_owner":           false,
 	}
 
 	for _, tool := range tools {

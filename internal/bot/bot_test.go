@@ -577,3 +577,47 @@ func TestConversationalFollowup(t *testing.T) {
 	}
 }
 
+func TestNotifyOwnerTool(t *testing.T) {
+	b := &Bot{
+		cfg: &config.Config{
+			Owners: []string{"skipp_dev"},
+		},
+		userDMChats: map[string]int64{
+			"skipp_dev": 999111,
+		},
+		groupRegistry: map[int64]*GroupInfo{
+			-100123: {
+				ChatID: -100123,
+				Title:  "TeraWallet Community",
+			},
+		},
+	}
+
+	// Non-owner (Issac) calls notify_owner
+	res := b.executeToolCall(context.Background(), -100123, "notify_owner", `{"message": "make x account for Liege, Curtain, Veilora and buy domains"}`, "issac_brownson", false)
+	if !strings.Contains(res, "skipp_dev") {
+		t.Errorf("expected notify_owner to acknowledge owner alert, got: %s", res)
+	}
+}
+
+func TestTryInterceptOwnerAlert(t *testing.T) {
+	// 1. Exact screenshot case: Issac asks to tell oga, bot generates plain text claim
+	prompt := "@Shipp0Bot tell your oga to make x account for the following: Liege, Curtain, Veilora"
+	reply := "sure, i'll ping the owner about creating the accounts for liege, curtain, and veilora and buying the domains today."
+
+	if !ownerAlertPromptRegex.MatchString(prompt) {
+		t.Errorf("expected ownerAlertPromptRegex to match 'tell your oga'")
+	}
+	if !ownerAlertClaimRegex.MatchString(reply) {
+		t.Errorf("expected ownerAlertClaimRegex to match 'i'll ping the owner'")
+	}
+
+	// 2. Normal message should NOT trigger
+	normalPrompt := "what is the price of solana?"
+	normalReply := "solana is currently trading at $120.87."
+	if ownerAlertPromptRegex.MatchString(normalPrompt) || ownerAlertClaimRegex.MatchString(normalReply) {
+		t.Errorf("normal message should not trigger owner alert regexes")
+	}
+}
+
+
