@@ -1248,9 +1248,8 @@ Keep it short (1-2 sentences max). Do NOT introduce yourself or say "Hey guys, a
 }
 
 var defaultGroqModelPool = []string{
-	"llama-3.3-70b-versatile",
 	"qwen/qwen3.8-27b",
-	"llama-3.1-8b-instant",
+	"openai/gpt-oss-20b",
 	"openai/gpt-oss-120b",
 }
 
