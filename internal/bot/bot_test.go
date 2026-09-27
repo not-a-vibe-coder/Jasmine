@@ -15,6 +15,7 @@ import (
 	"shipp/internal/crypto"
 	"shipp/internal/domain"
 	"shipp/internal/memory"
+	"shipp/internal/xhandle"
 )
 
 func TestCleanPrompt(t *testing.T) {
@@ -417,6 +418,117 @@ func TestVercelSearchDomainsTool(t *testing.T) {
 	resEmpty := b.executeToolCall(context.Background(), 99999, "vercel_search_domains", `{"domains": [".com"]}`, "skipp_dev", true)
 	if !strings.Contains(resEmpty, "Which domain or project name would you like to check for .com?") {
 		t.Errorf("expected clarifying prompt when no base exists, got: %s", resEmpty)
+	}
+}
+
+func TestCheckXUsernameTool(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username := r.URL.Query().Get("username")
+		w.Header().Set("Content-Type", "application/json")
+		if username == "liegeagents" || username == "curtainrh" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"valid":true,"reason":"available","msg":"Available!","desc":"Available!"}`))
+		} else if username == "elonmusk" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"valid":false,"reason":"taken","msg":"Username has already been taken","desc":"That username has been taken. Please choose another."}`))
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockServer.Close()
+
+	xSvc := xhandle.NewService()
+	xSvc.SetEndpointsForTesting(mockServer.URL, mockServer.URL)
+
+	mem, _ := memory.NewHybridStore("", "")
+	b := &Bot{
+		xhandle: xSvc,
+		memory:  mem,
+	}
+
+	// 1. Tool call with array of usernames
+	res := b.executeToolCall(context.Background(), 12345, "check_x_username", `{"usernames": ["liegeagents", "elonmusk"]}`, "skipp_dev", true)
+	if !strings.Contains(res, "@liegeagents") || !strings.Contains(res, "Available") {
+		t.Errorf("expected @liegeagents Available in output, got: %s", res)
+	}
+	if !strings.Contains(res, "@elonmusk") || !strings.Contains(res, "Taken") {
+		t.Errorf("expected @elonmusk Taken in output, got: %s", res)
+	}
+
+	// 2. Tool call with natural query
+	resQuery := b.executeToolCall(context.Background(), 12345, "check_x_username", `{"query": "is curtainrh available on x?"}`, "skipp_dev", true)
+	if !strings.Contains(resQuery, "@curtainrh") || !strings.Contains(resQuery, "Available") {
+		t.Errorf("expected @curtainrh Available in output, got: %s", resQuery)
+	}
+
+	// 3. Tool call with contextual recovery from chat history
+	_ = mem.SaveMessage(context.Background(), 12345, 100, "skipp_dev", "user", "can you check liegeagents.app?")
+	_ = mem.SaveMessage(context.Background(), 12345, 200, "Shipp0Bot", "assistant", "• liegeagents.app - Available: $14.99/yr")
+
+	resContext := b.executeToolCall(context.Background(), 12345, "check_x_username", `{}`, "skipp_dev", true)
+	if !strings.Contains(resContext, "@liegeagents") {
+		t.Errorf("expected contextual recovery of @liegeagents, got: %s", resContext)
+	}
+
+	// 4. Clean error when no brand is found in empty history
+	resEmpty := b.executeToolCall(context.Background(), 99999, "check_x_username", `{}`, "skipp_dev", true)
+	if !strings.Contains(resEmpty, "Please specify an X/Twitter handle") {
+		t.Errorf("expected clarifying prompt when no handle found, got: %s", resEmpty)
+	}
+}
+
+func TestHandleXCommand(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username := r.URL.Query().Get("username")
+		w.Header().Set("Content-Type", "application/json")
+		if username == "liegeagents" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"valid":true,"reason":"available","msg":"Available!","desc":"Available!"}`))
+		} else {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"valid":false,"reason":"taken","msg":"Username has already been taken","desc":"That username has been taken. Please choose another."}`))
+		}
+	}))
+	defer mockServer.Close()
+
+	xSvc := xhandle.NewService()
+	xSvc.SetEndpointsForTesting(mockServer.URL, mockServer.URL)
+
+	mem, _ := memory.NewHybridStore("", "")
+	b := &Bot{
+		xhandle:       xSvc,
+		memory:        mem,
+		activeDialogs: make(map[int64]*ActiveDialog),
+	}
+
+	// 1. Direct command with handle argument
+	msg1 := &tgbotapi.Message{
+		Chat:      &tgbotapi.Chat{ID: -10012345},
+		MessageID: 101,
+		From:      &tgbotapi.User{ID: 100, UserName: "skipp_dev"},
+		Text:      "/x liegeagents",
+	}
+	b.handleXCommand(context.Background(), msg1, []string{"liegeagents"})
+
+	// Check that response was saved to memory
+	recent, _ := mem.GetRecentMessages(context.Background(), -10012345, 1)
+	if len(recent) == 0 || !strings.Contains(recent[0].Content, "@liegeagents") || !strings.Contains(recent[0].Content, "Available") {
+		t.Errorf("expected @liegeagents Available saved to memory, got: %v", recent)
+	}
+
+	// 2. Command with empty arguments but brand in history
+	_ = mem.SaveMessage(context.Background(), -10099999, 100, "skipp_dev", "user", "what about curtainrh.com?")
+	msg2 := &tgbotapi.Message{
+		Chat:      &tgbotapi.Chat{ID: -10099999},
+		MessageID: 102,
+		From:      &tgbotapi.User{ID: 100, UserName: "skipp_dev"},
+		Text:      "/x",
+	}
+	b.handleXCommand(context.Background(), msg2, []string{})
+
+	recent2, _ := mem.GetRecentMessages(context.Background(), -10099999, 1)
+	if len(recent2) == 0 || !strings.Contains(recent2[0].Content, "@curtainrh") {
+		t.Errorf("expected contextual recovery of @curtainrh in /x, got: %v", recent2)
 	}
 }
 

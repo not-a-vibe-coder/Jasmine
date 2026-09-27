@@ -423,6 +423,27 @@ func (c *Client) buildTools() []ToolDefinition {
 		{
 			Type: "function",
 			Function: FunctionDefinition{
+				Name:        "check_x_username",
+				Description: "Check availability of X (formerly Twitter) usernames/handles. Accepts a list of usernames or a single username (e.g. ['liegeagents', 'curtainrh'] or 'terawallet'). Returns live availability status (available, taken, reserved, or invalid). If the user asks about the X handle for a brand discussed in conversation without repeating the name, resolve it against the active brand from chat history.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"usernames": map[string]interface{}{
+							"type":        "array",
+							"items":       map[string]interface{}{"type": "string"},
+							"description": "List of X/Twitter handles to check without '@' (e.g. ['liegeagents', 'curtainrh'])",
+						},
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "A single X handle or brand name to check (e.g. 'liegeagents')",
+						},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
 				Name:        "notify_owner",
 				Description: "Alert, ping, or notify the bot owner (@skipp_dev / oga / creator) with a request, message, or task from a group chat member. Dispatches an immediate direct message (DM) to the owner's Telegram account and tags them. Trigger this whenever anyone asks to 'tell your oga', 'ping the owner', 'notify your creator', 'let skipp know', etc.",
 				Parameters: map[string]interface{}{
@@ -542,16 +563,19 @@ Operational Superpowers & Tools:
 14. Vercel Domain Registrar Search:
     - Trigger 'vercel_search_domains' whenever asked to check domain availability, find available domains for a brand or project, or check pricing.
     - If a user asks a follow-up about an extension or TLD (e.g. "how much is .com", "what about .io", "check .xyz"), resolve it against the active brand or domain discussed in recent chat history (e.g. if liegeagents was discussed, search 'liegeagents.com'). NEVER pass a bare extension like '.com' without a domain base to the tool.
-15. Owner Notification & Alerting:
+15. X (Twitter) Username Availability:
+    - Trigger 'check_x_username' whenever asked to check if an X/Twitter handle is available, or to find available social handles for a brand or project.
+    - If asked about the X handle for a brand recently discussed in the chat without repeating the name (e.g. 'is the x handle available?'), resolve it against the active brand from conversation history.
+16. Owner Notification & Alerting:
     - Slang Awareness: "oga", "chairman", "boss", "creator", "dev" refer to your owner(s) (@skipp_dev).
     - When anyone in a group asks to "tell your oga", "ping the owner", "notify your creator", or "let @skipp_dev know" about tasks/requests (e.g. creating accounts, buying domains, fixing bugs), ALWAYS invoke the 'notify_owner' tool immediately.
     - NEVER promise or claim in text that you will ping or alert the owner without calling 'notify_owner'.
     - In your reply to the group, mention the owner (@skipp_dev) so they are also tagged directly in Telegram.
-16. Autonomous Multi-Step Chaining (Prompt Chaining):
+17. Autonomous Multi-Step Chaining (Prompt Chaining):
     - When a user request requires multiple steps (e.g. 'check token X and email it to Y', 'convert balance and send', 'search news and email summary'), execute all steps in sequence autonomously.
     - NEVER guess, invent, or hallucinate tool data in text. Always execute step 1 first (e.g. call 'analyze_token' to get real live metrics), wait for the live tool result, and THEN execute step 2 (e.g. call 'send_email' with the live data).
     - NEVER leak raw XML tags like <toolcall> or <function=...>. Tools are invoked strictly via function calls.
-17. HARD FORMATTING CONSTRAINTS:
+18. HARD FORMATTING CONSTRAINTS:
     - Strictly ZERO emojis anywhere. No exceptions.
     - Strictly NO em dashes ('—') or en dashes ('–'). Use commas, periods, colons, or simple hyphens (' - ').
     - Strictly NO eager follow-up questions or customer-service sign-offs (e.g. "what's next?", "what are we building next?", "what's the move?", "what are we cooking?", "who else is building?", "anyone actually shipping?", "are we staring at charts?", "how can I help?"). Answer the question, deliver the facts, and stop talking. Silence is fine. NEVER ask questions just to keep the conversation going like a bot.

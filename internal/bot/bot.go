@@ -32,6 +32,7 @@ import (
 	"shipp/internal/search"
 	"shipp/internal/token"
 	"shipp/internal/vision"
+	"shipp/internal/xhandle"
 )
 
 type Bot struct {
@@ -48,6 +49,7 @@ type Bot struct {
 	email       *email.Service
 	sandbox     *sandbox.Service
 	domain      *domain.Service
+	xhandle     *xhandle.Service
 	updatesChan chan tgbotapi.Update
 
 	// DM tracking (username -> chat_id for private DMs)
@@ -101,6 +103,7 @@ func NewBot(
 	emailSvc *email.Service,
 	sandboxSvc *sandbox.Service,
 	domainSvc *domain.Service,
+	xhandleSvc *xhandle.Service,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
@@ -108,6 +111,10 @@ func NewBot(
 	}
 
 	log.Printf("[Bot] Authorized on account @%s (ID: %d)", api.Self.UserName, api.Self.ID)
+
+	if xhandleSvc == nil {
+		xhandleSvc = xhandle.NewService()
+	}
 
 	b := &Bot{
 		api:               api,
@@ -123,6 +130,7 @@ func NewBot(
 		email:             emailSvc,
 		sandbox:           sandboxSvc,
 		domain:            domainSvc,
+		xhandle:           xhandleSvc,
 		updatesChan:       make(chan tgbotapi.Update, 100),
 		userDMChats:       make(map[string]int64),
 		proactiveDisabled: make(map[int64]bool),
@@ -468,7 +476,7 @@ func (b *Bot) isAddressedToBot(msg *tgbotapi.Message) bool {
 
 var otherMentionRegex = regexp.MustCompile(`(?i)@([a-zA-Z0-9_]{3,32})`)
 
-var followupPrefixRegex = regexp.MustCompile(`(?i)^(?:are\s+(?:they|these|those|there|you|we|it)|is\s+(?:it|that|this|there|anyone)|can\s+(?:we|you|i|that|it)|could\s+(?:we|you|it|that)|will\s+(?:it|that|this|you|they)|would\s+(?:it|that|this|you|they)|should\s+(?:we|i|it|they)|does\s+|do\s+(?:they|we|you|any)|what(?:\s+about|\s+of|'s|\s+is|\s+are|\s+if|\s+do|\s+does|\s+else)?|how(?:\s+about|\s+do|\s+does|\s+can|\s+is|\s+much|\s+to|\s+come)?|which(?:\s+one|\s+of|\s+is|\s+are)?|why(?:\s+not|\s+is|\s+do|\s+does|\s+would)?|where(?:\s+can|\s+is|\s+are|\s+do)?|any\s+(?:of|other|recommendation|chance|idea))\b`)
+var followupPrefixRegex = regexp.MustCompile(`(?i)^(?:are\s+(?:they|these|those|there|you|we|it)|is\s+(?:it|that|this|there|anyone|the\s+x|the\s+twitter)|can\s+(?:we|you|i|that|it)|could\s+(?:we|you|it|that)|will\s+(?:it|that|this|you|they)|would\s+(?:it|that|this|you|they)|should\s+(?:we|i|it|they)|does\s+|do\s+(?:they|we|you|any)|what(?:\s+about|\s+of|'s|\s+is|\s+are|\s+if|\s+do|\s+does|\s+else)?|how(?:\s+about|\s+do|\s+does|\s+can|\s+is|\s+much|\s+to|\s+come)?|which(?:\s+one|\s+of|\s+is|\s+are)?|why(?:\s+not|\s+is|\s+do|\s+does|\s+would)?|where(?:\s+can|\s+is|\s+are|\s+do)?|any\s+(?:of|other|recommendation|chance|idea)|check\s+(?:x|twitter|handle|domain|ca))\b`)
 
 var followupDirectivesRegex = regexp.MustCompile(`(?i)^(?:tell\s+me|explain|elaborate|break\s+it\s+down|go\s+ahead|do\s+(?:it|that)|show\s+me|expand|give\s+me|let'?s\s+do\s+it|proceed|continue)\b`)
 
@@ -633,6 +641,9 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 
 	case "/domain", "/domains":
 		b.handleDomainCommand(ctx, msg, parts[1:])
+
+	case "/x", "/xhandle", "/twitter":
+		b.handleXCommand(ctx, msg, parts[1:])
 
 	case "/search":
 		query := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]))
@@ -1699,6 +1710,62 @@ func (b *Bot) executeToolCall(
 		}
 		return b.domain.FormatResponse(res)
 
+	case "check_x_username", "check_x_handle", "x_search_username":
+		if b.xhandle == nil {
+			return `{"error": "x handle service not initialized"}`
+		}
+		var args struct {
+			Usernames []string `json:"usernames"`
+			Handles   []string `json:"handles"`
+			Query     string   `json:"query"`
+			Username  string   `json:"username"`
+			Handle    string   `json:"handle"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+
+		inputList := args.Usernames
+		if len(inputList) == 0 {
+			inputList = args.Handles
+		}
+		if len(inputList) == 0 {
+			rawQuery := args.Query
+			if rawQuery == "" {
+				rawQuery = args.Username
+			}
+			if rawQuery == "" {
+				rawQuery = args.Handle
+			}
+			if rawQuery != "" {
+				inputList = b.xhandle.ParseInputHandles(rawQuery)
+			}
+		}
+
+		if len(inputList) == 0 {
+			var baseName string
+			if b.memory != nil {
+				recentMsgs, _ := b.memory.GetRecentMessages(ctx, chatID, 10)
+				baseName = b.extractDomainBaseFromHistory(recentMsgs, "")
+			}
+			if baseName == "" {
+				b.dialogMu.RLock()
+				if dialog, exists := b.activeDialogs[chatID]; exists && dialog != nil {
+					baseName = domain.ExtractDomainBase(dialog.LastBotSnippet)
+				}
+				b.dialogMu.RUnlock()
+			}
+			if baseName != "" {
+				inputList = []string{baseName}
+			} else {
+				return "Please specify an X/Twitter handle to check (e.g. 'liegeagents')."
+			}
+		}
+
+		results, err := b.xhandle.CheckHandles(ctx, inputList)
+		if err != nil {
+			return fmt.Sprintf("X handle check error: %v", err)
+		}
+		return b.xhandle.FormatResponse(results)
+
 	case "notify_owner", "ping_owner", "alert_owner":
 		var args struct {
 			Message string `json:"message"`
@@ -1975,7 +2042,60 @@ func (b *Bot) handleDomainCommand(ctx context.Context, msg *tgbotapi.Message, ar
 
 	formatted := b.domain.FormatResponse(res)
 	b.sendReply(msg.Chat.ID, msg.MessageID, formatted)
-	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", formatted)
+	var botID int64
+	var botUsername string
+	if b.api != nil {
+		botID = b.api.Self.ID
+		botUsername = b.api.Self.UserName
+	}
+	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, botID, botUsername, "assistant", formatted)
+	b.recordActiveDialog(msg.Chat.ID, msg.MessageID, formatted, msg.From.ID, msg.From.UserName)
+}
+
+func (b *Bot) handleXCommand(ctx context.Context, msg *tgbotapi.Message, args []string) {
+	if b.xhandle == nil {
+		b.sendReply(msg.Chat.ID, msg.MessageID, "X handle search service is not initialized.")
+		return
+	}
+	query := strings.TrimSpace(strings.Join(args, " "))
+	handles := b.xhandle.ParseInputHandles(query)
+	if len(handles) == 0 {
+		var baseName string
+		if b.memory != nil {
+			recentMsgs, _ := b.memory.GetRecentMessages(ctx, msg.Chat.ID, 10)
+			baseName = b.extractDomainBaseFromHistory(recentMsgs, "")
+		}
+		if baseName == "" {
+			b.dialogMu.RLock()
+			if dialog, exists := b.activeDialogs[msg.Chat.ID]; exists && dialog != nil {
+				baseName = domain.ExtractDomainBase(dialog.LastBotSnippet)
+			}
+			b.dialogMu.RUnlock()
+		}
+		if baseName != "" {
+			handles = []string{baseName}
+		} else {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/x <handle>` (e.g. `/x liegeagents` or `/x curtain, veilora`)")
+			return
+		}
+	}
+
+	b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
+	results, err := b.xhandle.CheckHandles(ctx, handles)
+	if err != nil {
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("X handle check failed: %v", err))
+		return
+	}
+
+	formatted := b.xhandle.FormatResponse(results)
+	b.sendReply(msg.Chat.ID, msg.MessageID, formatted)
+	var botID int64
+	var botUsername string
+	if b.api != nil {
+		botID = b.api.Self.ID
+		botUsername = b.api.Self.UserName
+	}
+	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, botID, botUsername, "assistant", formatted)
 	b.recordActiveDialog(msg.Chat.ID, msg.MessageID, formatted, msg.From.ID, msg.From.UserName)
 }
 
@@ -2738,6 +2858,9 @@ func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {
 }
 
 func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, text string) {
+	if b.api == nil {
+		return
+	}
 	htmlText := toTelegramHTML(cleanNoEmojis(text))
 
 	threadID := 0
@@ -2769,6 +2892,9 @@ func (b *Bot) sendSimpleMessage(chatID int64, text string) {
 }
 
 func (b *Bot) sendSimpleMessageCtx(ctx context.Context, chatID int64, text string) {
+	if b.api == nil {
+		return
+	}
 	htmlText := toTelegramHTML(cleanNoEmojis(text))
 
 	threadID := 0
@@ -2794,6 +2920,9 @@ func (b *Bot) sendSimpleMessageCtx(ctx context.Context, chatID int64, text strin
 // sendViaThreadAPI sends a message into a specific Telegram forum thread using
 // the raw MakeRequest path, since tgbotapi v5.5.1 BaseChat lacks MessageThreadID.
 func (b *Bot) sendViaThreadAPI(_ context.Context, chatID int64, threadID int, replyToMsgID int, htmlText string) {
+	if b.api == nil {
+		return
+	}
 	params := tgbotapi.Params{}
 	params.AddNonZero64("chat_id", chatID)
 	params.AddNonEmpty("text", htmlText)
@@ -2811,8 +2940,10 @@ func (b *Bot) sendViaThreadAPI(_ context.Context, chatID int64, threadID int, re
 	}
 }
 
-
 func (b *Bot) sendChatAction(chatID int64, action string) {
+	if b.api == nil {
+		return
+	}
 	chatAction := tgbotapi.NewChatAction(chatID, action)
 	_, _ = b.api.Send(chatAction)
 }

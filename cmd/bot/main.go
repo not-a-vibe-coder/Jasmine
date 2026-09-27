@@ -22,6 +22,7 @@ import (
 	"shipp/internal/server"
 	"shipp/internal/token"
 	"shipp/internal/vision"
+	"shipp/internal/xhandle"
 )
 
 func main() {
@@ -97,8 +98,12 @@ func main() {
 	domainSvc := domain.NewService(cfg.VercelToken)
 	log.Printf("[Main] Vercel Domain Registrar Service initialized")
 
-	// 7. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc, emailSvc, sandboxSvc, domainSvc)
+	// 7. Initialize X Handle Availability Service
+	xhandleSvc := xhandle.NewService()
+	log.Printf("[Main] X Handle Availability Service initialized")
+
+	// 8. Initialize Telegram Bot
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc, emailSvc, sandboxSvc, domainSvc, xhandleSvc)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}
