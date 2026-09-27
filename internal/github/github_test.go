@@ -302,3 +302,66 @@ func TestIsRepoEmpty(t *testing.T) {
 		t.Fatalf("expected conflict=true (empty), got empty=%v, err=%v", conflict, err)
 	}
 }
+
+func TestCreateRepository(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/user/repos" {
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			name := payload["name"].(string)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"full_name": "ShippZero/" + name,
+				"html_url":  "https://github.com/ShippZero/" + name,
+			})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/orgs/myorg/repos" {
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			name := payload["name"].(string)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"full_name": "myorg/" + name,
+				"html_url":  "https://github.com/myorg/" + name,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	svc := NewService("token", "ShippZero", "shipp@bot.davidnzube.xyz")
+	svc.baseURL = server.URL
+	ctx := context.Background()
+
+	// Test user repo creation
+	url, err := svc.CreateRepository(ctx, CreateRepoOptions{
+		Name:        "test-repo",
+		Description: "A test repository",
+		Private:     false,
+		AutoInit:    true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating user repo: %v", err)
+	}
+	if url != "https://github.com/ShippZero/test-repo" {
+		t.Errorf("unexpected repo URL: %s", url)
+	}
+
+	// Test org repo creation
+	url, err = svc.CreateRepository(ctx, CreateRepoOptions{
+		Name:     "org-repo",
+		Org:      "myorg",
+		Private:  true,
+		AutoInit: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating org repo: %v", err)
+	}
+	if url != "https://github.com/myorg/org-repo" {
+		t.Errorf("unexpected repo URL: %s", url)
+	}
+}
+

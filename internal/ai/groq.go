@@ -318,6 +318,43 @@ func (c *Client) buildTools() []ToolDefinition {
 		{
 			Type: "function",
 			Function: FunctionDefinition{
+				Name:        "github_create_repo",
+				Description: "Create a new GitHub repository under Shipp's account (ShippZero) or a specified organization. Supports setting repository name, description, public/private visibility, and auto-initializing with a README. Only bot owners can authorize creating repositories.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{
+							"type":        "string",
+							"description": "Name of the new repository (e.g. 'my-cool-project' or 'dev-tools')",
+						},
+						"description": map[string]interface{}{
+							"type":        "string",
+							"description": "Short description of what the repository is for",
+						},
+						"private": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Whether the repository should be private. Defaults to false (public).",
+						},
+						"auto_init": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Whether to initialize with a README. Defaults to true.",
+						},
+						"org": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional organization name to create the repository under. If omitted, created under Shipp's account (ShippZero).",
+						},
+						"custom_pat": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional custom GitHub Personal Access Token to create under another account.",
+						},
+					},
+					"required": []string{"name"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
 				Name:        "send_email",
 				Description: "Send an email to any recipient from Shipp's verified sending address (shipp@bot.davidnzube.xyz). Replies will automatically route to Shipp's personal Atomic Mail inbox (shippzero@atomicmail.io). Only bot owners can authorize sending emails.",
 				Parameters: map[string]interface{}{
@@ -344,17 +381,17 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "run_sandbox_task",
-				Description: "Execute an isolated, ephemeral bash command or research/dev script in a background Linux runner (GitHub Actions VM). Use for heavy workloads like compiling, running test suites, web scrapers, data scripts, or repository audits. Asynchronous: runs in background and notifies chat when finished. Only bot owners can authorize running commands.",
+				Description: "Execute an isolated, ephemeral bash command or research/dev script in a background Linux runner (GitHub Actions VM). Use for running terminal commands, downloading/inspecting binaries or files, checking checksums/sizes, running Go/Node/Python scripts, compiling, tests, scraping, or Linux CLI diagnostics. Asynchronous: runs in background and notifies chat when finished. Only bot owners can authorize running commands.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"command": map[string]interface{}{
 							"type":        "string",
-							"description": "The exact bash command to execute in the ephemeral runner (e.g. 'go test ./...', 'curl -s ...', 'python3 script.py')",
+							"description": "The exact bash command to execute in the ephemeral runner (e.g. 'go test ./...', 'curl -sLO ... && ls -lh', 'python3 script.py')",
 						},
 						"repo": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional GitHub repository runner to target (defaults to 'DavidNzube101/shipp')",
+							"description": "Optional GitHub repository runner to target (defaults to 'ShippZero/sandbox')",
 						},
 					},
 					"required": []string{"command"},
@@ -596,10 +633,11 @@ Operational Superpowers & Tools:
    - You understand visual colors, charts, diagrams, memes, trade cards, and documents (.md, .pdf, .docx, .txt).
    - Keep image reactions casual and sharp (1-3 sentences max).
 9. GitHub Intelligence & Code Actions:
-   - 3 GitHub tools:
+   - 4 GitHub tools:
      a) 'github_inspect_project': Read-only (CI runs, releases, commits, issues, overview).
      b) 'github_edit_file': MUST trigger immediately when asked to create, initialize, make, edit, change, rewrite, or update any file, including empty repositories. If repository is empty or user asks to create a file, it creates and initializes it. Never simulate git actions in text.
      c) 'github_merge_pr': Merge open PRs.
+     d) 'github_create_repo': Create a new GitHub repository under Shipp's account (ShippZero) or a specified organization. Supports public/private, description, auto-init README. Owner only.
    - If user asks to push to main, set push_to_main=true. Otherwise default to a PR.
    - Extract repo slug (e.g. 'DavidNzube101/shipp') from chat history when not explicitly repeated.
    - Match response verbosity to the question:
@@ -609,7 +647,9 @@ Operational Superpowers & Tools:
     - Outbound address is 'shipp@bot.davidnzube.xyz', receiving inbox is 'shippzero@atomicmail.io'.
     - Trigger 'send_email' when asked by owners or in multi-step workflows. If a recipient is an email address (contains @ and a domain like .com), ALWAYS use 'send_email', NEVER 'send_dm'.
 11. Ephemeral Sandbox Runner:
-    - Trigger 'run_sandbox_task' when asked to execute bash commands, run test suites, execute python/node/bash scripts, scrape data, or audit repositories. Runs in an isolated Linux runner asynchronously.
+    - Trigger 'run_sandbox_task' whenever asked to execute bash commands, run Linux terminal commands, download or curl files/binaries, inspect file sizes/checksums, run test suites, run python/node/bash scripts, benchmark performance, scrape data, or audit code in a real Linux environment.
+    - When asked to perform real-world CLI or operating system operations (e.g. "download the official go binary, inspect its size and report back", "run curl to check headers", "run go test", "execute this python one-liner"), formulate the appropriate bash command pipeline and trigger 'run_sandbox_task'.
+    - Runs in an isolated Linux VM on GitHub Actions runner asynchronously (defaults to 'ShippZero/sandbox'). Only bot owners can authorize execution.
 12. Direct Telegram Messaging:
     - Any group member or owner can command you to send a DM to them or someone else in the group (e.g. "dm me the link", "send this to @user in dm"). Trigger 'send_dm'.
     - If user says "dm me ...", use the sender's own username as the recipient.
@@ -708,6 +748,8 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 		name = "github_edit_file"
 	case "githubmergepr", "github_merge_pr":
 		name = "github_merge_pr"
+	case "githubcreaterepo", "github_create_repo", "createrepo", "create_repo":
+		name = "github_create_repo"
 	case "runsandboxtask", "run_sandbox_task":
 		name = "run_sandbox_task"
 	case "getgrouptopics", "get_group_topics":

@@ -2023,6 +2023,49 @@ func (b *Bot) executeToolCall(
 		}
 		return fmt.Sprintf("Merged PR #%d on %s/%s.", args.PRNumber, owner, repoName)
 
+	case "github_create_repo":
+		if !isOwner {
+			return "Declined: Creating repositories is reserved for my creators (@skipp_dev)."
+		}
+		if b.github == nil {
+			return "GitHub service is not initialized (GITHUB_PAT missing)."
+		}
+
+		var args struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Private     bool   `json:"private"`
+			AutoInit    *bool  `json:"auto_init"`
+			Org         string `json:"org"`
+			CustomPAT   string `json:"custom_pat"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		repoName := strings.TrimSpace(args.Name)
+		if repoName == "" {
+			return "Please specify a repository name (e.g. 'my-cool-project')."
+		}
+		autoInit := true
+		if args.AutoInit != nil {
+			autoInit = *args.AutoInit
+		}
+
+		repoURL, err := b.github.CreateRepository(ctx, github.CreateRepoOptions{
+			Name:        repoName,
+			Description: strings.TrimSpace(args.Description),
+			Private:     args.Private,
+			AutoInit:    autoInit,
+			Org:         strings.TrimSpace(args.Org),
+			CustomPAT:   strings.TrimSpace(args.CustomPAT),
+		})
+		if err != nil {
+			return fmt.Sprintf("Failed to create repository '%s': %v", repoName, err)
+		}
+		visibility := "public"
+		if args.Private {
+			visibility = "private"
+		}
+		return fmt.Sprintf("Created new %s repository '%s': %s", visibility, repoName, repoURL)
+
 	case "send_email":
 		if !isOwner {
 			return "Declined: Outbound email is reserved for my creators (@skipp_dev)."

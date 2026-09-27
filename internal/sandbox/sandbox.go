@@ -52,7 +52,7 @@ func NewService(githubPAT, defaultRepo, callbackURL string) *Service {
 	secret := hex.EncodeToString(secretBytes)
 
 	if defaultRepo == "" {
-		defaultRepo = "DavidNzube101/shipp"
+		defaultRepo = "ShippZero/sandbox"
 	}
 	if callbackURL == "" {
 		callbackURL = "https://bot.davidnzube.xyz/api/sandbox/callback"

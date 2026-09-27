@@ -91,8 +91,8 @@ func main() {
 	}
 
 	// 5. Initialize Ephemeral Sandbox Service (Blink Compute pattern)
-	sandboxSvc := sandbox.NewService(cfg.GithubPAT, "DavidNzube101/shipp", "https://bot.davidnzube.xyz/api/sandbox/callback")
-	log.Printf("[Main] Sandbox Service initialized (GitHub Actions ephemeral VM runner active)")
+	sandboxSvc := sandbox.NewService(cfg.GithubPAT, "ShippZero/sandbox", "https://bot.davidnzube.xyz/api/sandbox/callback")
+	log.Printf("[Main] Sandbox Service initialized (ShippZero/sandbox ephemeral VM runner active)")
 
 	// 6. Initialize Vercel Domain Registrar Service
 	domainSvc := domain.NewService(cfg.VercelToken)

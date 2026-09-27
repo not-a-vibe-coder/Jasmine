@@ -745,3 +745,51 @@ func FormatRepoOverview(overview *RepoOverview) string {
 	return fmt.Sprintf("%s (%s, branch: %s): %s | %d stars, %d forks. %s",
 		overview.FullName, overview.Language, overview.DefaultBranch, desc, overview.Stargazers, overview.Forks, overview.HTMLURL)
 }
+
+type CreateRepoOptions struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Private     bool   `json:"private"`
+	AutoInit    bool   `json:"auto_init"`
+	Org         string `json:"-"`
+	CustomPAT   string `json:"-"`
+}
+
+// CreateRepository creates a new repository on GitHub under the authenticated user (or specified organization).
+func (s *Service) CreateRepository(ctx context.Context, opts CreateRepoOptions) (string, error) {
+	url := fmt.Sprintf("%s/user/repos", s.baseURL)
+	if opts.Org != "" {
+		url = fmt.Sprintf("%s/orgs/%s/repos", s.baseURL, opts.Org)
+	}
+
+	payload := map[string]interface{}{
+		"name":      opts.Name,
+		"private":   opts.Private,
+		"auto_init": opts.AutoInit,
+	}
+	if opts.Description != "" {
+		payload["description"] = opts.Description
+	}
+
+	resp, err := s.makeRequestWithToken(ctx, http.MethodPost, url, payload, opts.CustomPAT)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("github api returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var res struct {
+		FullName string `json:"full_name"`
+		HTMLURL  string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return res.HTMLURL, nil
+}
+
