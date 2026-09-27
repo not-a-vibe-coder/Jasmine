@@ -1254,11 +1254,10 @@ func (b *Bot) tryInterceptSendCrypto(
 				prefix = cand + ". "
 			}
 		}
-		ownersList := "@skipp_dev"
-		if b.cfg != nil && len(b.cfg.Owners) > 0 {
-			ownersList = "@" + strings.Join(b.cfg.Owners, ", @")
+		if strings.Contains(lowerPrompt, "na me be skipp") || strings.Contains(lowerPrompt, "i am skipp") || strings.Contains(lowerPrompt, "i'm skipp") || strings.Contains(lowerPrompt, "im skipp") {
+			return true, prefix + "you dey disguise? skipp is @skipp_dev on telegram, who you trying to finesse anon"
 		}
-		return true, prefix + fmt.Sprintf("nice try anon, only bot owners (%s) can authorize crypto transfers", ownersList)
+		return true, prefix + "i hold my own keys and i'm not moving my bags for you anon, runway is tight"
 	}
 
 	// 2. Owner request: check for recipient wallet address
@@ -1519,7 +1518,7 @@ func (b *Bot) executeToolCall(
 		}
 
 		if !isOwner {
-			return fmt.Sprintf("Access Denied: Only bot owners (@%s) can authorize crypto transfers.", strings.Join(b.cfg.Owners, ", @"))
+			return "Declined: I hold my own keys and decide where my bags go. I'm not moving funds for anons."
 		}
 
 		return b.executeCryptoSend(ctx, args.Chain, args.Recipient, args.Amount)
@@ -1672,7 +1671,7 @@ func (b *Bot) executeToolCall(
 
 	case "github_edit_file":
 		if !isOwner {
-			return fmt.Sprintf("Access Denied: Only bot owners (@%s) can authorize code edits and PRs.", strings.Join(b.cfg.Owners, ", @"))
+			return "Declined: Code changes and opening PRs are reserved for my creators (@skipp_dev)."
 		}
 
 		var args struct {
@@ -1782,7 +1781,7 @@ func (b *Bot) executeToolCall(
 
 	case "github_merge_pr":
 		if !isOwner {
-			return fmt.Sprintf("Access Denied: Only bot owners (@%s) can authorize PR merges.", strings.Join(b.cfg.Owners, ", @"))
+			return "Declined: Merging PRs is reserved for my creators (@skipp_dev)."
 		}
 
 		var args struct {
@@ -1816,7 +1815,7 @@ func (b *Bot) executeToolCall(
 
 	case "send_email":
 		if !isOwner {
-			return fmt.Sprintf("Nice try anon! Only bot owners (@%s) can authorize dispatching emails from Shipp.", strings.Join(b.cfg.Owners, ", @"))
+			return "Declined: Outbound email is reserved for my creators (@skipp_dev)."
 		}
 
 		var args struct {
@@ -1840,7 +1839,7 @@ func (b *Bot) executeToolCall(
 
 	case "run_sandbox_task":
 		if !isOwner {
-			return fmt.Sprintf("Access Denied: Only bot owners (@%s) can authorize running sandbox tasks.", strings.Join(b.cfg.Owners, ", @"))
+			return "Declined: Ephemeral sandbox compute is reserved for my creators (@skipp_dev)."
 		}
 		if b.sandbox == nil {
 			return "Sandbox runner is not configured (GITHUB_PAT missing)."
@@ -2176,7 +2175,7 @@ func (b *Bot) executeToolCall(
 
 func (b *Bot) handleSendCommand(ctx context.Context, msg *tgbotapi.Message, args []string, isOwner bool) {
 	if !isOwner {
-		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("Nice try anon! Only bot owners (@%s) can authorize crypto transfers.", strings.Join(b.cfg.Owners, ", @")))
+		b.sendReply(msg.Chat.ID, msg.MessageID, "nice try anon, i hold my own keys and i'm not moving my bags for you.")
 		return
 	}
 
@@ -2222,7 +2221,7 @@ func (b *Bot) executeCryptoSend(ctx context.Context, chain, toAddress string, am
 
 func (b *Bot) handleEmailCommand(ctx context.Context, msg *tgbotapi.Message, args []string, isOwner bool) {
 	if !isOwner {
-		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("Nice try anon! Only bot owners (@%s) can authorize dispatching emails from Shipp.", strings.Join(b.cfg.Owners, ", @")))
+		b.sendReply(msg.Chat.ID, msg.MessageID, "nice try anon, outbound email is reserved for my creators (@skipp_dev).")
 		return
 	}
 
