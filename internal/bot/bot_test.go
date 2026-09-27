@@ -925,6 +925,47 @@ func TestCleanOutgoingText(t *testing.T) {
 	}
 }
 
+func TestStripLeadingMention(t *testing.T) {
+	tests := []struct {
+		text     string
+		username string
+		expected string
+	}{
+		{
+			text:     "@skipp_dev qpay is a crypto-payment gateway that lets merchants accept payments.",
+			username: "skipp_dev",
+			expected: "qpay is a crypto-payment gateway that lets merchants accept payments.",
+		},
+		{
+			text:     "@skipp_dev, all green on main",
+			username: "skipp_dev",
+			expected: "all green on main",
+		},
+		{
+			text:     "@skipp_dev: check this PR",
+			username: "skipp_dev",
+			expected: "check this PR",
+		},
+		{
+			text:     "@skipp_dev check this out",
+			username: "issac_brownson",
+			expected: "@skipp_dev check this out",
+		},
+		{
+			text:     "Regular answer with no leading mention",
+			username: "skipp_dev",
+			expected: "Regular answer with no leading mention",
+		},
+	}
+
+	for _, tt := range tests {
+		got := stripLeadingMention(tt.text, tt.username)
+		if got != tt.expected {
+			t.Errorf("stripLeadingMention(%q, %q) = %q; want %q", tt.text, tt.username, got, tt.expected)
+		}
+	}
+}
+
 
 
 

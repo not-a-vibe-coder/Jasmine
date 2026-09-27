@@ -864,6 +864,7 @@ func (b *Bot) handleNLPAndChat(
 			if strings.TrimSpace(finalText) == "" {
 				finalText = b.getRandomEmptyAck()
 			}
+			finalText = stripLeadingMention(finalText, username)
 			b.sendSimpleMessage(chatID, finalText)
 			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
 			b.recordActiveDialog(chatID, msg.MessageID, finalText, msg.From.ID, username)
@@ -888,6 +889,7 @@ func (b *Bot) handleNLPAndChat(
 		finalText = b.getRandomEmptyAck()
 	}
 
+	finalText = stripLeadingMention(finalText, username)
 	b.sendReply(chatID, msg.MessageID, finalText)
 	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
 	b.recordActiveDialog(chatID, msg.MessageID, finalText, msg.From.ID, username)
@@ -2875,6 +2877,23 @@ func (b *Bot) sanitizeThirdPartyMentions(text string) string {
 func (b *Bot) cleanOutgoingText(text string) string {
 	cleaned := cleanNoEmojis(text)
 	return b.sanitizeThirdPartyMentions(cleaned)
+}
+
+func stripLeadingMention(text string, recipientUsername string) string {
+	if recipientUsername == "" || text == "" {
+		return text
+	}
+	cleanUsername := strings.TrimPrefix(strings.ToLower(recipientUsername), "@")
+	prefix := "@" + cleanUsername
+	lower := strings.ToLower(text)
+	if strings.HasPrefix(lower, prefix) {
+		trimmed := strings.TrimSpace(text[len(prefix):])
+		trimmed = strings.TrimLeft(trimmed, ",: -")
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return text
 }
 
 func extractRepoFromHistory(history []memory.Message, currentPrompt string) string {

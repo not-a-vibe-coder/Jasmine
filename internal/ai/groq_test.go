@@ -33,6 +33,12 @@ func TestSystemPrompt(t *testing.T) {
 	if !strings.Contains(ownerPrompt, "Conversational Explanations & Quoted Replies") {
 		t.Errorf("expected system prompt to include Conversational Explanations & Quoted Replies")
 	}
+	if !strings.Contains(ownerPrompt, "Brutally Honest & Zero Bluffing") {
+		t.Errorf("expected system prompt to enforce Brutally Honest & Zero Bluffing")
+	}
+	if !strings.Contains(ownerPrompt, "Strictly NO hallucinated or fabricated project architectures") {
+		t.Errorf("expected system prompt to forbid fabricated architectures")
+	}
 
 	// Test Non-Owner prompt
 	guestPrompt := client.systemPrompt("anon123", false, nil)
