@@ -2,6 +2,8 @@ package bot
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 
 	"shipp/internal/config"
 	"shipp/internal/crypto"
+	"shipp/internal/domain"
 	"shipp/internal/memory"
 )
 
@@ -332,6 +335,41 @@ func TestGetActiveGroupsTool(t *testing.T) {
 	}
 	if !strings.Contains(res, `"total": 2`) && !strings.Contains(res, `"total":2`) {
 		t.Errorf("expected total 2, got: %s", res)
+	}
+}
+
+func TestVercelSearchDomainsTool(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"results": [
+				{"domain": "liegeagents.app", "available": true, "years": 1, "price": 14.99, "renewalPrice": 15, "premium": false},
+				{"domain": "curtainrh.com", "available": true, "years": 1, "price": 11.25, "renewalPrice": 11.25, "premium": false}
+			]
+		}`))
+	}))
+	defer mockServer.Close()
+
+	domainSvc := domain.NewService("")
+	domainSvc.SetEndpointForTesting(mockServer.URL)
+
+	b := &Bot{
+		domain: domainSvc,
+	}
+
+	// 1. Tool call with array of domains
+	res := b.executeToolCall(context.Background(), 12345, "vercel_search_domains", `{"domains": ["liegeagents.app", "curtainrh.com"]}`, "skipp_dev", true)
+	if !strings.Contains(res, "liegeagents.app") || !strings.Contains(res, "curtainrh.com") {
+		t.Errorf("expected domain search results in output, got: %s", res)
+	}
+	if !strings.Contains(res, "$14.99/yr") || !strings.Contains(res, "$11.25/yr") {
+		t.Errorf("expected pricing in output, got: %s", res)
+	}
+
+	// 2. Tool call with query string
+	resQuery := b.executeToolCall(context.Background(), 12345, "vercel_search_domains", `{"query": "curtainrh.com"}`, "skipp_dev", true)
+	if !strings.Contains(resQuery, "curtainrh.com") {
+		t.Errorf("expected query domain in output, got: %s", resQuery)
 	}
 }
 

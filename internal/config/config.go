@@ -50,10 +50,11 @@ type Config struct {
 	ResendAPIKey    string
 	ResendFromEmail string
 
-	// Search & Analytics & Vision
+	// Search & Analytics & Vision & Registrar
 	TavilyAPIKey   string
 	CodexIOAPIKey  string
 	GeminiAPIKey   string
+	VercelToken    string
 
 	// Server & Webhook
 	Port       string
@@ -92,6 +93,7 @@ func LoadConfig() (*Config, error) {
 		TavilyAPIKey:        os.Getenv("TAVILY_API_KEY"),
 		CodexIOAPIKey:       os.Getenv("CODEX_IO_API_KEY"),
 		GeminiAPIKey:        os.Getenv("GEMINI_API_KEY"),
+		VercelToken:         os.Getenv("VERCEL_TOKEN"),
 		Port:                os.Getenv("PORT"),
 		WebhookURL:          os.Getenv("WEBHOOK_URL"),
 	}

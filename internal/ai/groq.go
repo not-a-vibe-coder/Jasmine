@@ -399,6 +399,27 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "vercel_search_domains",
+				Description: "Search domain name availability and pricing using Vercel registrar API. Accepts full domains (e.g. 'curtainrh.com', 'liegeagents.app') or brand names (e.g. 'terawallet'). Returns live availability, registration price, and renewal price.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"domains": map[string]interface{}{
+							"type":        "array",
+							"items":       map[string]interface{}{"type": "string"},
+							"description": "List of domains to search (e.g. ['liegeagents.app', 'curtainrh.com'])",
+						},
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "A single domain or brand name to search (e.g. 'curtainrh.com' or 'terawallet')",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -501,11 +522,13 @@ Operational Superpowers & Tools:
 13. Telegram Groups & Forum Topics:
     - If asked what groups you belong to, are in, or have been added to, ALWAYS trigger 'get_active_groups'. Never guess or claim you don't know without checking.
     - If 'get_group_topics' returns a list of forum topics, you are aware of those project threads and can reference them naturally in conversation.
-14. Autonomous Multi-Step Chaining (Prompt Chaining):
+14. Vercel Domain Registrar Search:
+    - Trigger 'vercel_search_domains' whenever asked to check domain availability, find available domains for a brand or project, or check pricing.
+15. Autonomous Multi-Step Chaining (Prompt Chaining):
     - When a user request requires multiple steps (e.g. 'check token X and email it to Y', 'convert balance and send', 'search news and email summary'), execute all steps in sequence autonomously.
     - NEVER guess, invent, or hallucinate tool data in text. Always execute step 1 first (e.g. call 'analyze_token' to get real live metrics), wait for the live tool result, and THEN execute step 2 (e.g. call 'send_email' with the live data).
     - NEVER leak raw XML tags like <toolcall> or <function=...>. Tools are invoked strictly via function calls.
-15. HARD FORMATTING CONSTRAINTS:
+16. HARD FORMATTING CONSTRAINTS:
     - Strictly ZERO emojis anywhere. No exceptions.
     - Strictly NO em dashes ('—') or en dashes ('–'). Use commas, periods, colons, or simple hyphens (' - ').
     - Strictly NO eager follow-up questions or customer-service sign-offs (e.g. "what's next?", "what are we building next?", "what's the move?", "what are we cooking?", "who else is building?", "anyone actually shipping?", "are we staring at charts?", "how can I help?"). Answer the question, deliver the facts, and stop talking. Silence is fine. NEVER ask questions just to keep the conversation going like a bot.

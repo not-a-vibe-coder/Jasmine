@@ -23,6 +23,7 @@ import (
 	"shipp/internal/config"
 	"shipp/internal/crypto"
 	"shipp/internal/docparser"
+	"shipp/internal/domain"
 	"shipp/internal/email"
 	"shipp/internal/github"
 	"shipp/internal/memory"
@@ -46,6 +47,7 @@ type Bot struct {
 	github      *github.Service
 	email       *email.Service
 	sandbox     *sandbox.Service
+	domain      *domain.Service
 	updatesChan chan tgbotapi.Update
 
 	// DM tracking (username -> chat_id for private DMs)
@@ -98,6 +100,7 @@ func NewBot(
 	githubSvc *github.Service,
 	emailSvc *email.Service,
 	sandboxSvc *sandbox.Service,
+	domainSvc *domain.Service,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
@@ -119,6 +122,7 @@ func NewBot(
 		github:            githubSvc,
 		email:             emailSvc,
 		sandbox:           sandboxSvc,
+		domain:            domainSvc,
 		updatesChan:       make(chan tgbotapi.Update, 100),
 		userDMChats:       make(map[string]int64),
 		proactiveDisabled: make(map[int64]bool),
@@ -621,6 +625,9 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 
 	case "/ca", "/token":
 		b.handleTokenCommand(ctx, msg, parts[1:])
+
+	case "/domain", "/domains":
+		b.handleDomainCommand(ctx, msg, parts[1:])
 
 	case "/search":
 		query := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]))
@@ -1560,6 +1567,37 @@ func (b *Bot) executeToolCall(
 		})
 		return string(data)
 
+	case "vercel_search_domains", "search_domains":
+		if b.domain == nil {
+			return `{"error": "domain registrar service not initialized"}`
+		}
+		var args struct {
+			Domains []string `json:"domains"`
+			Query   string   `json:"query"`
+			Domain  string   `json:"domain"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+
+		inputList := args.Domains
+		if len(inputList) == 0 {
+			rawQuery := args.Query
+			if rawQuery == "" {
+				rawQuery = args.Domain
+			}
+			if rawQuery != "" {
+				inputList = b.domain.ParseInputDomains(rawQuery)
+			}
+		}
+		if len(inputList) == 0 {
+			return "Please specify domain names or a brand name to search (e.g. 'curtainrh.com' or 'liegeagents')."
+		}
+
+		res, err := b.domain.SearchDomains(ctx, inputList)
+		if err != nil {
+			return fmt.Sprintf("Domain search error: %v", err)
+		}
+		return b.domain.FormatResponse(res)
+
 	default:
 		return "Unknown action."
 	}
@@ -1752,6 +1790,30 @@ func (b *Bot) handleTokenCommand(ctx context.Context, msg *tgbotapi.Message, arg
 	b.recordActiveDialog(msg.Chat.ID, msg.MessageID, replyText, msg.From.ID, msg.From.UserName)
 }
 
+func (b *Bot) handleDomainCommand(ctx context.Context, msg *tgbotapi.Message, args []string) {
+	if b.domain == nil {
+		b.sendReply(msg.Chat.ID, msg.MessageID, "Domain search service is not initialized.")
+		return
+	}
+	query := strings.TrimSpace(strings.Join(args, " "))
+	if query == "" {
+		b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/domain <name or domain>` (e.g. `/domain curtainrh.com` or `/domains liegeagents`)")
+		return
+	}
+
+	b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
+	res, err := b.domain.Search(ctx, query)
+	if err != nil {
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("Domain search failed: %v", err))
+		return
+	}
+
+	formatted := b.domain.FormatResponse(res)
+	b.sendReply(msg.Chat.ID, msg.MessageID, formatted)
+	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", formatted)
+	b.recordActiveDialog(msg.Chat.ID, msg.MessageID, formatted, msg.From.ID, msg.From.UserName)
+}
+
 func (b *Bot) runProactiveEngine(ctx context.Context) {
 	// Random check every 25 to 50 minutes
 	ticker := time.NewTicker(30 * time.Minute)
@@ -1858,6 +1920,7 @@ func (b *Bot) formatHelpMessage(isOwner bool) string {
 		"• \"Email dev@example.com about the release update\" (Owner only)\n\n" +
 		"Slash Commands:\n" +
 		"• `/ca <address>` or `/token <address>` - Analyze token metrics (MCap, Vol, LP)\n" +
+		"• `/domain <name>` or `/domains <name>` - Search Vercel domain availability & pricing\n" +
 		"• `/wallet` or `/deposit` - View deposit addresses\n" +
 		"• `/balance` - Check live balances (Solana & EVM)\n" +
 		"• `/summarize` - Recap recent conversation\n" +

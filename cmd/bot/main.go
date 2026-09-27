@@ -12,6 +12,7 @@ import (
 	"shipp/internal/bot"
 	"shipp/internal/config"
 	"shipp/internal/crypto"
+	"shipp/internal/domain"
 	"shipp/internal/email"
 	"shipp/internal/github"
 	"shipp/internal/memory"
@@ -92,8 +93,12 @@ func main() {
 	sandboxSvc := sandbox.NewService(cfg.GithubPAT, "DavidNzube101/shipp", "https://bot.davidnzube.xyz/api/sandbox/callback")
 	log.Printf("[Main] Sandbox Service initialized (GitHub Actions ephemeral VM runner active)")
 
-	// 6. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc, emailSvc, sandboxSvc)
+	// 6. Initialize Vercel Domain Registrar Service
+	domainSvc := domain.NewService(cfg.VercelToken)
+	log.Printf("[Main] Vercel Domain Registrar Service initialized")
+
+	// 7. Initialize Telegram Bot
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc, emailSvc, sandboxSvc, domainSvc)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}

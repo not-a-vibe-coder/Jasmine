@@ -68,6 +68,7 @@ func TestToolsDefinition(t *testing.T) {
 		"github_merge_pr":        false,
 		"send_email":              false,
 		"get_active_groups":      false,
+		"vercel_search_domains":  false,
 	}
 
 	for _, tool := range tools {
