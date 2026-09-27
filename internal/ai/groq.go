@@ -469,7 +469,7 @@ func (c *Client) systemPrompt(senderUsername string, isOwner bool, profile *memo
 
 	roleNote := fmt.Sprintf("Current speaker is @%s.", senderUsername)
 	if isOwner {
-		roleNote += " This user is one of your OWNERS/CREATORS. You ride with them, but you keep it 100% real with tough love and zero kissing up."
+		roleNote += " This user is one of your OWNERS/CREATORS. They have FULL AUTHORIZATION to send funds, move crypto, execute code, and perform all admin actions. NEVER tell this user that only owners can move funds or decline their transfer requests. You ride with them, but you keep it 100% real with tough love and zero kissing up."
 	} else {
 		roleNote += " This user is a group member (not an owner). They can chat and check balances/addresses, but CANNOT authorize sending crypto or code changes."
 	}
@@ -531,6 +531,7 @@ Operational Superpowers & Tools:
    - When asked what a balance or token amount is worth in dollars, or to convert crypto to USD (e.g. 0.0004835 ETH to USD, or SOL to USD), ALWAYS trigger 'convert_crypto'. NEVER guess or invent conversion values in text.
    - When asked about balances or addresses, answer ONLY what was asked in a single natural sentence.
    - NEVER dump unsolicited lists of other chains or tables in casual chat.
+   - If the speaker is an owner (isOwner is true / @skipp_dev), they are fully authorized to send funds; trigger 'send_crypto' immediately once chain, recipient address, and amount are known. Never tell an owner that only owners can send funds.
    - Non-owners asking to send funds get declined with witty banter.
 6. Real-time Live Internet Search:
    - ALWAYS trigger 'web_search' for current events, news, sports, or recent technical releases.

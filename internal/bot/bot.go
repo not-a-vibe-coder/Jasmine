@@ -351,7 +351,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	isOwner := b.cfg.IsOwner(msg.From.UserName) || b.cfg.IsOwner(msg.From.FirstName)
+	isOwner := b.isSenderOwner(msg.From)
 	isPrivate := msg.Chat.IsPrivate()
 
 	// Log message in memory store
@@ -380,7 +380,11 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 	// Direct Token CA detection (fast path when primarily a CA paste)
 	rawAddr, rawChain := token.ExtractAddressAndChain(cleanPrompt)
-	if rawAddr != "" && len(strings.Fields(cleanPrompt)) <= 3 {
+	isTransferIntent := hasTransferOrWalletIntent(cleanPrompt) ||
+		(msg.ReplyToMessage != nil && (hasTransferOrWalletIntent(msg.ReplyToMessage.Text) || hasTransferOrWalletIntent(msg.ReplyToMessage.Caption))) ||
+		(isFollowup && hasTransferOrWalletIntent(dialogSnippet))
+
+	if rawAddr != "" && len(strings.Fields(cleanPrompt)) <= 3 && !isTransferIntent {
 		b.sendChatAction(chatID, tgbotapi.ChatTyping)
 		res, err := b.token.AnalyzeToken(ctx, rawAddr, rawChain)
 		if err == nil && res != nil {
@@ -388,8 +392,6 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			switch res.Status {
 			case token.StatusAmbiguousChain:
 				replyText = token.FormatAmbiguousChains(res.Address, res.CandidateChains)
-			case token.StatusNotFound:
-				replyText = token.FormatNotFound(res.Address)
 			case token.StatusSuccess:
 				lower := strings.ToLower(cleanPrompt)
 				if strings.Contains(lower, "detailed") || strings.Contains(lower, "details") || strings.Contains(lower, "full") || strings.Contains(lower, "breakdown") || strings.Contains(lower, "more") {
@@ -397,8 +399,6 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 				} else {
 					replyText = token.FormatNatural(res.Metrics)
 				}
-			default:
-				replyText = res.Message
 			}
 			if replyText != "" {
 				b.sendReply(chatID, msg.MessageID, replyText)
@@ -572,6 +572,11 @@ func (b *Bot) isConversationalFollowup(msg *tgbotapi.Message, text string) (bool
 		return true, dialog.LastBotSnippet
 	}
 
+	// Heuristic 7: Crypto address provided during active dialog momentum
+	if addr, _ := token.ExtractAddressAndChain(trimmed); addr != "" {
+		return true, dialog.LastBotSnippet
+	}
+
 	return false, ""
 }
 
@@ -608,6 +613,39 @@ func (b *Bot) cleanPrompt(text string) string {
 		return text
 	}
 	return cleaned
+}
+
+func hasTransferOrWalletIntent(text string) bool {
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	transferKeywords := []string{
+		"send", "transfer", "pay", "to", "move", "deposit",
+		"withdraw", "wallet", "recipient", "payout", "fund", "funds",
+		"address", "where", "drop",
+	}
+	words := strings.Fields(lower)
+	for _, w := range words {
+		cleaned := strings.Trim(w, ",.:;!?()'\"[]{}")
+		for _, kw := range transferKeywords {
+			if cleaned == kw {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *Bot) isSenderOwner(from *tgbotapi.User) bool {
+	if from == nil {
+		return false
+	}
+	if b.cfg.IsOwner(from.UserName) || b.cfg.IsOwner(from.FirstName) || b.cfg.IsOwner(from.LastName) {
+		return true
+	}
+	fullName := strings.TrimSpace(from.FirstName + " " + from.LastName)
+	return b.cfg.IsOwner(fullName)
 }
 
 func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner bool) {
@@ -2323,7 +2361,7 @@ func (b *Bot) handlePhotoMessage(ctx context.Context, msg *tgbotapi.Message) {
 	if username == "" {
 		username = msg.From.FirstName
 	}
-	isOwner := b.cfg.IsOwner(msg.From.UserName) || b.cfg.IsOwner(msg.From.FirstName)
+	isOwner := b.isSenderOwner(msg.From)
 	cleanCaption := b.cleanPrompt(msg.Caption)
 
 	b.processImage(ctx, chatID, msg.MessageID, senderID, username, isOwner, imgBytes, "image/jpeg", cleanCaption)
@@ -2399,7 +2437,7 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 	if username == "" {
 		username = msg.From.FirstName
 	}
-	isOwner := b.cfg.IsOwner(msg.From.UserName) || b.cfg.IsOwner(msg.From.FirstName)
+	isOwner := b.isSenderOwner(msg.From)
 
 	isPrivate := msg.Chat.IsPrivate()
 	shouldRespond := isPrivate || b.isAddressedToBot(msg) || msg.Caption != ""

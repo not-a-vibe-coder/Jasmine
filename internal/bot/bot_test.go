@@ -783,4 +783,90 @@ func TestTryInterceptOwnerAlert(t *testing.T) {
 	}
 }
 
+func TestHasTransferOrWalletIntent(t *testing.T) {
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{"send 0.05 eth to 0xC21edC70c41b7a13161710149B02C5E90eaDDf78", true},
+		{"transfer 10 sol to 7nx...xyz", true},
+		{"pay to 0xC21edC70c41b7a13161710149B02C5E90eaDDf78", true},
+		{"drop your address", true},
+		{"where should i send funds", true},
+		{"move funds to robinhood", true},
+		{"here is the recipient address", true},
+		{"0xC21edC70c41b7a13161710149B02C5E90eaDDf78", false},
+		{"robinhood 0xC21edC70c41b7a13161710149B02C5E90eaDDf78", false},
+		{"0x123 detailed", false},
+	}
+
+	for _, tt := range tests {
+		got := hasTransferOrWalletIntent(tt.text)
+		if got != tt.want {
+			t.Errorf("hasTransferOrWalletIntent(%q) = %v; want %v", tt.text, got, tt.want)
+		}
+	}
+}
+
+func TestIsSenderOwner(t *testing.T) {
+	b := &Bot{
+		cfg: &config.Config{
+			Owners: []string{"skipp_dev", "shigarakixbt"},
+		},
+	}
+
+	tests := []struct {
+		user *tgbotapi.User
+		want bool
+	}{
+		{&tgbotapi.User{UserName: "skipp_dev"}, true},
+		{&tgbotapi.User{UserName: "shigarakiXBT"}, true},
+		{&tgbotapi.User{FirstName: "Skipp"}, true},
+		{&tgbotapi.User{FirstName: "Skipp Air"}, true},
+		{&tgbotapi.User{FirstName: "David", LastName: "Skipp"}, true},
+		{&tgbotapi.User{UserName: "anon_user", FirstName: "Anon"}, false},
+		{nil, false},
+	}
+
+	for _, tt := range tests {
+		got := b.isSenderOwner(tt.user)
+		if got != tt.want {
+			t.Errorf("isSenderOwner(%+v) = %v; want %v", tt.user, got, tt.want)
+		}
+	}
+}
+
+func TestIsConversationalFollowupAddress(t *testing.T) {
+	b := &Bot{
+		activeDialogs: make(map[int64]*ActiveDialog),
+	}
+
+	chatID := int64(-100998877)
+	userID := int64(42)
+
+	b.activeDialogs[chatID] = &ActiveDialog{
+		LastBotReplyTime: time.Now(),
+		LastBotMessageID: 101,
+		LastBotSnippet:   "Drop the address where you want the funds sent.",
+		LastUserID:       userID,
+		LastUsername:     "skipp_dev",
+	}
+
+	// User sends a wallet address with chain name
+	msg := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: chatID, Type: "supergroup"},
+		From: &tgbotapi.User{ID: userID, UserName: "skipp_dev"},
+		Text: "robinhood 0xC21edC70c41b7a13161710149B02C5E90eaDDf78",
+	}
+
+	got, snippet := b.isConversationalFollowup(msg, msg.Text)
+	if !got {
+		t.Errorf("expected isConversationalFollowup to be true for wallet address in active dialog")
+	}
+	if !strings.Contains(snippet, "Drop the address") {
+		t.Errorf("expected snippet to contain last bot message, got: %s", snippet)
+	}
+}
+
+
 

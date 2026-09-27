@@ -24,6 +24,9 @@ func TestSystemPrompt(t *testing.T) {
 	if !strings.Contains(ownerPrompt, "OWNERS/CREATORS") {
 		t.Errorf("expected owner prompt to acknowledge owner role")
 	}
+	if !strings.Contains(ownerPrompt, "FULL AUTHORIZATION") {
+		t.Errorf("expected owner prompt to acknowledge FULL AUTHORIZATION")
+	}
 
 	// Test Non-Owner prompt
 	guestPrompt := client.systemPrompt("anon123", false, nil)

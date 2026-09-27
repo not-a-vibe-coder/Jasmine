@@ -191,8 +191,15 @@ func (s *Service) callGemini(ctx context.Context, model string, imageBytes []byt
 		return "", err
 	}
 
-	if len(gResp.Candidates) > 0 && len(gResp.Candidates[0].Content.Parts) > 0 {
-		return strings.TrimSpace(gResp.Candidates[0].Content.Parts[0].Text), nil
+	if len(gResp.Candidates) > 0 {
+		var sb strings.Builder
+		for _, part := range gResp.Candidates[0].Content.Parts {
+			sb.WriteString(part.Text)
+		}
+		result := strings.TrimSpace(sb.String())
+		if result != "" {
+			return result, nil
+		}
 	}
 
 	return "", fmt.Errorf("no response candidates returned by gemini")
