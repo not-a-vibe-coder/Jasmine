@@ -59,6 +59,18 @@ type Bot struct {
 	// Forum topic registry: chatID -> threadID -> topicName
 	topicMu       sync.RWMutex
 	topicRegistry map[int64]map[int]string
+
+	// Group registry: chatID -> *GroupInfo
+	groupMu       sync.RWMutex
+	groupRegistry map[int64]*GroupInfo
+}
+
+type GroupInfo struct {
+	ChatID   int64     `json:"chat_id"`
+	Title    string    `json:"title"`
+	Type     string    `json:"type"`
+	Username string    `json:"username,omitempty"`
+	LastSeen time.Time `json:"last_seen"`
 }
 
 func NewBot(
@@ -99,6 +111,7 @@ func NewBot(
 		proactiveDisabled: make(map[int64]bool),
 		lastProactiveTime: make(map[int64]time.Time),
 		topicRegistry:     make(map[int64]map[int]string),
+		groupRegistry:     make(map[int64]*GroupInfo),
 	}
 
 	if sandboxSvc != nil {
@@ -244,6 +257,22 @@ func (b *Bot) handleMessageWithThread(ctx context.Context, msg *tgbotapi.Message
 	b.handleMessage(ctx, msg)
 }
 
+func (b *Bot) recordGroup(chatID int64, title, chatType, username string) {
+	b.groupMu.Lock()
+	defer b.groupMu.Unlock()
+
+	if title == "" {
+		title = fmt.Sprintf("Group %d", chatID)
+	}
+	b.groupRegistry[chatID] = &GroupInfo{
+		ChatID:   chatID,
+		Title:    title,
+		Type:     chatType,
+		Username: username,
+		LastSeen: time.Now(),
+	}
+}
+
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
 	senderID := msg.From.ID
@@ -258,6 +287,22 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		b.dmMu.Lock()
 		b.userDMChats[uClean] = msg.Chat.ID
 		b.dmMu.Unlock()
+	}
+
+	// Record group info whenever a message arrives from a group or supergroup
+	if msg.Chat.IsGroup() || msg.Chat.IsSuperGroup() {
+		b.recordGroup(msg.Chat.ID, msg.Chat.Title, msg.Chat.Type, msg.Chat.UserName)
+	}
+	if len(msg.NewChatMembers) > 0 {
+		for _, member := range msg.NewChatMembers {
+			if b.api != nil && member.ID == b.api.Self.ID {
+				b.recordGroup(msg.Chat.ID, msg.Chat.Title, msg.Chat.Type, msg.Chat.UserName)
+				break
+			}
+		}
+	}
+	if msg.GroupChatCreated || msg.SuperGroupChatCreated {
+		b.recordGroup(msg.Chat.ID, msg.Chat.Title, msg.Chat.Type, msg.Chat.UserName)
 	}
 
 	// 0. Handle Photos
@@ -1324,6 +1369,27 @@ func (b *Bot) executeToolCall(
 		})
 		return string(data)
 
+	case "get_active_groups":
+		b.groupMu.RLock()
+		groups := make([]*GroupInfo, 0, len(b.groupRegistry))
+		for _, g := range b.groupRegistry {
+			groups = append(groups, g)
+		}
+		b.groupMu.RUnlock()
+
+		if len(groups) == 0 {
+			if chatID < 0 {
+				return fmt.Sprintf(`{"groups": [{"title": "this group", "chat_id": %d, "type": "group"}], "total": 1, "note": "only recorded current group since last restart"}`, chatID)
+			}
+			return `{"groups": [], "total": 0, "note": "no active groups recorded yet since last bot restart"}`
+		}
+
+		data, _ := json.Marshal(map[string]interface{}{
+			"groups": groups,
+			"total":  len(groups),
+		})
+		return string(data)
+
 	default:
 		return "Unknown action."
 	}
@@ -1925,6 +1991,7 @@ var doubleBoldRegex = regexp.MustCompile(`\*\*(.+?)\*\*`)
 var doubleUnderscoreRegex = regexp.MustCompile(`__(.+?)__`)
 var leakedToolCallRegex = regexp.MustCompile(`(?si)<(?:toolcall|tool_call)[^>]*>.*?</(?:toolcall|tool_call)>`)
 var leakedFunctionRegex = regexp.MustCompile(`(?si)<function(?:=|\s+name=)[^>]*>.*?</function>`)
+var leakedDeclarationRegex = regexp.MustCompile(`(?si)(?:declaration|call):default_api:[a-zA-Z0-9_]+\s*\{.*?\}?`)
 var eagerPromptRegex = regexp.MustCompile(`(?i)(?:,\s*|\.\s*|\s+)(?:what(?:'s|\s+is)\s+next\??|what\s+are\s+we\s+building(?:\s+next)?\??|what(?:'s|\s+is)\s+(?:the\s+)?(?:next\s+)?move\??|what\s+are\s+we\s+cooking(?:\s+next)?\??|what\s+are\s+we\s+doing(?:\s+next)?\??|how\s+can\s+i\s+help(?:\s+you)?\??)\s*$`)
 
 // toTelegramMarkdown converts GitHub-flavored markdown to Telegram Markdown v1.
@@ -2086,6 +2153,7 @@ func formatEmergencyAddressFallback(toolResult string) string {
 func cleanNoEmojis(text string) string {
 	cleaned := leakedToolCallRegex.ReplaceAllString(text, "")
 	cleaned = leakedFunctionRegex.ReplaceAllString(cleaned, "")
+	cleaned = leakedDeclarationRegex.ReplaceAllString(cleaned, "")
 	cleaned = eagerPromptRegex.ReplaceAllString(cleaned, "")
 	cleaned = emojiPattern.ReplaceAllString(cleaned, "")
 	// Replace em dashes (—) and en dashes (–) with standard hyphens

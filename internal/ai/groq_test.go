@@ -60,6 +60,7 @@ func TestToolsDefinition(t *testing.T) {
 		"github_edit_file":       false,
 		"github_merge_pr":        false,
 		"send_email":              false,
+		"get_active_groups":      false,
 	}
 
 	for _, tool := range tools {
@@ -282,10 +283,20 @@ TeraWallet ($TERA) on Robinhood EVM. Market cap is $36.19K.
 		t.Errorf("expected function name 'analyze_token', got %s", calls2[0].Function.Name)
 	}
 
-	// 3. Normal text with no XML
+	// 3. Declaration/call syntax leak (as seen in Gemini/Groq tool leak: declaration:default_api:get_group_topics{})
+	declText := "declaration:default_api:get_group_topics{}"
+	calls3, ok3 := parseXMLToolCalls(declText)
+	if !ok3 || len(calls3) != 1 {
+		t.Fatalf("expected 1 declaration tool call parsed, got %d (ok=%v)", len(calls3), ok3)
+	}
+	if calls3[0].Function.Name != "get_group_topics" {
+		t.Errorf("expected function name 'get_group_topics', got %s", calls3[0].Function.Name)
+	}
+
+	// 4. Normal text with no XML or declaration
 	normalText := "Hey anon, market looks hot today."
-	_, ok3 := parseXMLToolCalls(normalText)
-	if ok3 {
+	_, ok4 := parseXMLToolCalls(normalText)
+	if ok4 {
 		t.Errorf("expected ok=false for plain text")
 	}
 }

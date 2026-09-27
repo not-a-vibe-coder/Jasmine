@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -271,5 +272,43 @@ func TestCleanNoEmojisEagerScrubber(t *testing.T) {
 		if gotTrimmed != wantTrimmed {
 			t.Errorf("cleanNoEmojis(%q)\n  got:      %q\n  expected: %q", c.input, got, c.expected)
 		}
+	}
+}
+
+func TestCleanNoEmojisDeclarationScrubber(t *testing.T) {
+	input := "declaration:default_api:get_group_topics{}"
+	got := cleanNoEmojis(input)
+	if strings.TrimSpace(got) != "" {
+		t.Errorf("expected empty string after scrubbing leaked declaration, got: %q", got)
+	}
+
+	mixed := "Here are the topics declaration:default_api:get_group_topics{} for you"
+	gotMixed := cleanNoEmojis(mixed)
+	if strings.Contains(gotMixed, "declaration") || strings.Contains(gotMixed, "default_api") {
+		t.Errorf("expected declaration to be scrubbed from mixed text, got: %q", gotMixed)
+	}
+}
+
+func TestGetActiveGroupsTool(t *testing.T) {
+	b := &Bot{
+		groupRegistry: make(map[int64]*GroupInfo),
+	}
+
+	// 1. Initial state (no groups)
+	resEmpty := b.executeToolCall(context.Background(), 12345, "get_active_groups", "{}", "skipp_dev", true)
+	if !strings.Contains(resEmpty, `"total": 0`) && !strings.Contains(resEmpty, `"total":0`) {
+		t.Errorf("expected total 0 for empty group registry, got: %s", resEmpty)
+	}
+
+	// 2. Record groups
+	b.recordGroup(-1001234567, "TeraWallet Community", "supergroup", "terawallet")
+	b.recordGroup(-1009876543, "Shipp Builders", "supergroup", "")
+
+	res := b.executeToolCall(context.Background(), 12345, "get_active_groups", "{}", "skipp_dev", true)
+	if !strings.Contains(res, "TeraWallet Community") || !strings.Contains(res, "Shipp Builders") {
+		t.Errorf("expected recorded group titles in output, got: %s", res)
+	}
+	if !strings.Contains(res, `"total": 2`) && !strings.Contains(res, `"total":2`) {
+		t.Errorf("expected total 2, got: %s", res)
 	}
 }

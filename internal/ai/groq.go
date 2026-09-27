@@ -388,6 +388,17 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "get_active_groups",
+				Description: "List all Telegram groups, supergroups, and communities Shipp has been added to or is actively participating in, including their group titles, chat IDs, and types. Use whenever someone asks what groups you are in, what groups you've been added to, or what chats you belong to.",
+				Parameters: map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
 	}
 }
 
@@ -482,7 +493,8 @@ Operational Superpowers & Tools:
     - Trigger 'run_sandbox_task' when asked to execute bash commands, run test suites, execute python/node/bash scripts, scrape data, or audit repositories. Runs in an isolated Linux runner asynchronously.
 12. Direct Telegram Messaging:
     - Trigger 'send_dm' when owners ask you to message, text, or ping someone in DM. Only use for Telegram usernames, never email addresses.
-13. Group Forum Topics:
+13. Telegram Groups & Forum Topics:
+    - If asked what groups you belong to, are in, or have been added to, ALWAYS trigger 'get_active_groups'. Never guess or claim you don't know without checking.
     - If 'get_group_topics' returns a list of forum topics, you are aware of those project threads and can reference them naturally in conversation.
 14. Autonomous Multi-Step Chaining (Prompt Chaining):
     - When a user request requires multiple steps (e.g. 'check token X and email it to Y', 'convert balance and send', 'search news and email summary'), execute all steps in sequence autonomously.
@@ -552,6 +564,8 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 		name = "run_sandbox_task"
 	case "getgrouptopics", "get_group_topics":
 		name = "get_group_topics"
+	case "getactivegroups", "get_active_groups", "active_groups", "groups":
+		name = "get_active_groups"
 	}
 
 	// Smart routing: if send_dm target is an email address, it MUST be send_email
@@ -645,7 +659,7 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 // and tag-based format (<toolcall><function=senddm><parameter=...></function></toolcall>).
 func parseXMLToolCalls(content string) ([]ToolCall, bool) {
 	lower := strings.ToLower(content)
-	if !strings.Contains(lower, "<toolcall") && !strings.Contains(lower, "<tool_call") && !strings.Contains(lower, "<function") {
+	if !strings.Contains(lower, "<toolcall") && !strings.Contains(lower, "<tool_call") && !strings.Contains(lower, "<function") && !strings.Contains(lower, "default_api:") {
 		return nil, false
 	}
 
@@ -704,6 +718,31 @@ func parseXMLToolCalls(content string) ([]ToolCall, bool) {
 		normName, normArgs := NormalizeToolCall(funcName, string(argsBytes))
 		calls = append(calls, ToolCall{
 			ID:   fmt.Sprintf("xml_tc_%d", callID),
+			Type: "function",
+			Function: FunctionCall{
+				Name:      normName,
+				Arguments: normArgs,
+			},
+		})
+	}
+
+	if len(calls) > 0 {
+		return calls, true
+	}
+
+	// 3. Check for declaration/call format: declaration:default_api:NAME{...} or call:default_api:NAME{...}
+	reDecl := regexp.MustCompile(`(?si)(?:declaration|call):default_api:([a-zA-Z0-9_]+)\s*(\{[^}]*\})?`)
+	declMatches := reDecl.FindAllStringSubmatch(content, -1)
+	for _, dm := range declMatches {
+		funcName := strings.TrimSpace(dm[1])
+		funcArgs := "{}"
+		if len(dm) > 2 && strings.TrimSpace(dm[2]) != "" {
+			funcArgs = strings.TrimSpace(dm[2])
+		}
+		callID++
+		normName, normArgs := NormalizeToolCall(funcName, funcArgs)
+		calls = append(calls, ToolCall{
+			ID:   fmt.Sprintf("decl_tc_%d", callID),
 			Type: "function",
 			Function: FunctionCall{
 				Name:      normName,
