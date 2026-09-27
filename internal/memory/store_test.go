@@ -113,3 +113,33 @@ func TestHybridStoreInMemoryFallback(t *testing.T) {
 		t.Errorf("expected error for nonexistent user")
 	}
 }
+
+func TestFindMessagesBySender(t *testing.T) {
+	store, _ := NewHybridStore("", "")
+	defer store.Close()
+	ctx := context.Background()
+
+	_ = store.SaveMessage(ctx, 100, 10, "precidobaby", "user", "hey shipp what is up")
+	_ = store.SaveMessage(ctx, 200, 20, "skipp_dev", "user", "gm shipp")
+	_ = store.SaveMessage(ctx, 100, 10, "precidobaby", "user", "are you free?")
+
+	found, err := store.FindMessagesBySender(ctx, "precidobaby", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("expected 2 messages from precidobaby, got %d", len(found))
+	}
+	if found[0].Content != "are you free?" {
+		t.Errorf("expected newest message first, got: %s", found[0].Content)
+	}
+
+	// Not found user
+	notFound, err := store.FindMessagesBySender(ctx, "nobody_here", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(notFound) != 0 {
+		t.Errorf("expected 0 messages for unknown user, got %d", len(notFound))
+	}
+}

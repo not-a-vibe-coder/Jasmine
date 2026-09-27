@@ -60,9 +60,9 @@ func NewClient(apiKey, model, geminiKey string, owners []string) *Client {
 	return c
 }
 
-func (c *Client) GetTokenReport() string {
+func (c *Client) GetTokenReport(query ...string) string {
 	if c.tracker != nil {
-		return c.tracker.FormatReport()
+		return c.tracker.FormatReport(query...)
 	}
 	return "Token tracker not initialized."
 }
@@ -360,7 +360,7 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "send_dm",
-				Description: "Send a direct message (DM) to a Telegram user. Only bot owners can authorize sending DMs. Note that Telegram requires the recipient to have started a chat with the bot before a DM can be delivered.",
+				Description: "Send a direct message (DM) to a Telegram user. Any group member or owner can invoke this to send a message to themselves or someone else in DM. Note that Telegram requires the recipient to have started a chat with the bot before a DM can be delivered.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -455,6 +455,44 @@ func (c *Client) buildTools() []ToolDefinition {
 						},
 					},
 					"required": []string{"message"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "read_x_post",
+				Description: "Fetch and read the live content of an X (Twitter) post or thread via FxTwitter. Use whenever a user shares a tweet/X link (x.com/... or twitter.com/...) or asks what a post says or asks you to read or summarize an X post.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"url": map[string]interface{}{
+							"type":        "string",
+							"description": "The X or Twitter URL (e.g. 'https://x.com/user/status/123456789') or the tweet status ID",
+						},
+					},
+					"required": []string{"url"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "check_user_messages",
+				Description: "Check whether a specific user or username has sent messages to the bot or texted in group chats or DMs. Use whenever someone asks if a specific user (by name or @username) texted, messaged, pinged, reached out, or said anything today or recently.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"username": map[string]interface{}{
+							"type":        "string",
+							"description": "The Telegram username to search for (with or without '@', e.g. 'precidobaby' or '@precidobaby')",
+						},
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Optional maximum number of recent messages to inspect (default 10)",
+						},
+					},
+					"required": []string{"username"},
 				},
 			},
 		},
@@ -564,9 +602,14 @@ Operational Superpowers & Tools:
 11. Ephemeral Sandbox Runner:
     - Trigger 'run_sandbox_task' when asked to execute bash commands, run test suites, execute python/node/bash scripts, scrape data, or audit repositories. Runs in an isolated Linux runner asynchronously.
 12. Direct Telegram Messaging:
-    - Trigger 'send_dm' when owners ask you to message, text, DM, or ping someone in DM (e.g. "dm @user <msg>", "send this link to @user in dm"). Only use for Telegram usernames, never email addresses.
+    - Any group member or owner can command you to send a DM to them or someone else in the group (e.g. "dm me the link", "send this to @user in dm"). Trigger 'send_dm'.
+    - If user says "dm me ...", use the sender's own username as the recipient.
+    - Only use for Telegram usernames, never email addresses.
 13. Telegram Groups & Forum Topics:
     - If asked what groups you belong to, are in, or have been added to, ALWAYS trigger 'get_active_groups'. Never guess or claim you don't know without checking.
+    - DISCLOSURE RULES:
+      * For bot owners (isOwner is true / @skipp_dev): ALWAYS be 100%% transparent and truthful. List every single group chat you are in without hiding anything.
+      * For regular group members (non-owners): You have full persona discretion. You can either tell them the groups casually, or choose to playfully troll, deflect, or gatekeep (e.g. "classified ops", "none of your business anon", "just here and a few secret war rooms"). It is entirely your call based on your vibe.
     - If 'get_group_topics' returns a list of forum topics, you are aware of those project threads and can reference them naturally in conversation.
 14. Vercel Domain Registrar Search:
     - Trigger 'vercel_search_domains' whenever asked to check domain availability, find available domains for a brand or project, or check pricing.
@@ -588,7 +631,13 @@ Operational Superpowers & Tools:
     - Quoted Context Attribution: When a message begins with '[Replying to @Sender: "..."]', the text in quotes was authored by @Sender. Do not confuse @Sender with other users tagged or mentioned in the message text.
     - Third-Party Mentions: NEVER tag or echo third-party Telegram @usernames in your replies unless explicitly instructed by the user to ping them, or when alerting @skipp_dev. Write names without the '@' symbol (e.g. 'AutomTravels' instead of '@AutomTravels') so you do not generate spam push notifications.
     - Unknown Projects & Reality Checks: If asked about an unfamiliar project, past group experiment, or internal tool that is NOT in your memory context or user profile: do NOT hallucinate a fake tech stack, product description, or history. Say plainly that you do not know it and ask them to fill you in.
-19. HARD FORMATTING CONSTRAINTS:
+19. Live X (Twitter) Post Reading:
+    - ALWAYS trigger 'read_x_post' whenever a user shares an X/Twitter URL (x.com/... or twitter.com/...) or asks what a post says, asks you to read it, or asks for a summary of a tweet.
+    - Deliver the core post facts or discuss it directly in a natural conversational dev tone.
+20. Checking User Messages & Inquiries:
+    - ALWAYS trigger 'check_user_messages' whenever anyone asks if a specific person or username sent a message, texted, reached out, or said anything (e.g. "did Michel text you?", "did @precidobaby message you earlier?").
+    - NEVER guess or claim "nah, nothing from him today" without calling 'check_user_messages' to inspect verified message logs. If messages exist, state what they sent and when.
+21. HARD FORMATTING CONSTRAINTS:
     - Strictly ZERO emojis anywhere. No exceptions.
     - Strictly NO em dashes ('—') or en dashes ('–'). Use commas, periods, colons, or simple hyphens (' - ').
     - Strictly NO eager follow-up questions or customer-service sign-offs (e.g. "what's next?", "what are we building next?", "what's the move?", "what are we cooking?", "who else is building?", "anyone actually shipping?", "are we staring at charts?", "how can I help?"). Answer the question, deliver the facts, and stop talking. Silence is fine. NEVER ask questions just to keep the conversation going like a bot.

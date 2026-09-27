@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -456,6 +457,62 @@ func (s *HybridStore) GetActiveChatIDs(ctx context.Context) ([]int64, error) {
 		result = append(result, id)
 	}
 	return result, nil
+}
+
+// FindMessagesBySender retrieves recent messages sent by a particular username across any chats.
+func (s *HybridStore) FindMessagesBySender(ctx context.Context, username string, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	cleanUser := strings.ToLower(strings.TrimPrefix(username, "@"))
+
+	// 1. Postgres query
+	if s.db != nil {
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT role, sender_username, content, created_at
+			FROM chat_messages
+			WHERE LOWER(sender_username) = $1 OR LOWER(sender_username) LIKE $2
+			ORDER BY created_at DESC
+			LIMIT $3`, cleanUser, "%"+cleanUser+"%", limit)
+		if err == nil {
+			defer rows.Close()
+			var msgs []Message
+			for rows.Next() {
+				var m Message
+				var u sql.NullString
+				if err := rows.Scan(&m.Role, &u, &m.Content, &m.CreatedAt); err == nil {
+					m.Sender = u.String
+					msgs = append(msgs, m)
+				}
+			}
+			if len(msgs) > 0 {
+				return msgs, nil
+			}
+		}
+	}
+
+	// 2. In-memory search fallback
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var matched []Message
+	for _, msgs := range s.memMessages {
+		for _, m := range msgs {
+			mSender := strings.ToLower(m.Sender)
+			if mSender == cleanUser || strings.Contains(mSender, cleanUser) {
+				matched = append(matched, m)
+			}
+		}
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].CreatedAt.After(matched[j].CreatedAt)
+	})
+
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, nil
 }
 
 func (s *HybridStore) GetDB() *sql.DB {

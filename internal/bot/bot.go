@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -33,7 +34,15 @@ import (
 	"shipp/internal/token"
 	"shipp/internal/vision"
 	"shipp/internal/xhandle"
+	"shipp/internal/xpost"
 )
+
+type RecentDocInfo struct {
+	Document   *tgbotapi.Document
+	ReceivedAt time.Time
+	SenderID   int64
+	Username   string
+}
 
 type Bot struct {
 	api         *tgbotapi.BotAPI
@@ -50,6 +59,7 @@ type Bot struct {
 	sandbox     *sandbox.Service
 	domain      *domain.Service
 	xhandle     *xhandle.Service
+	xpost       *xpost.Service
 	updatesChan chan tgbotapi.Update
 
 	// DM tracking (username -> chat_id for private DMs)
@@ -68,6 +78,10 @@ type Bot struct {
 	// Group registry: chatID -> *GroupInfo
 	groupMu       sync.RWMutex
 	groupRegistry map[int64]*GroupInfo
+
+	// Recent documents cached per chat
+	recentDocMu sync.RWMutex
+	recentDocs  map[int64]*RecentDocInfo
 
 	// Conversational momentum dialog tracking per group chat
 	dialogMu      sync.RWMutex
@@ -131,14 +145,18 @@ func NewBot(
 		sandbox:           sandboxSvc,
 		domain:            domainSvc,
 		xhandle:           xhandleSvc,
+		xpost:             xpost.NewService(),
 		updatesChan:       make(chan tgbotapi.Update, 100),
 		userDMChats:       make(map[string]int64),
 		proactiveDisabled: make(map[int64]bool),
 		lastProactiveTime: make(map[int64]time.Time),
 		topicRegistry:     make(map[int64]map[int]string),
 		groupRegistry:     make(map[int64]*GroupInfo),
+		recentDocs:        make(map[int64]*RecentDocInfo),
 		activeDialogs:     make(map[int64]*ActiveDialog),
 	}
+
+	b.loadGroupsFromDisk()
 
 	if sandboxSvc != nil {
 		sandboxSvc.SetHandlers(func(payload sandbox.CallbackPayload) {
@@ -283,10 +301,43 @@ func (b *Bot) handleMessageWithThread(ctx context.Context, msg *tgbotapi.Message
 	b.handleMessage(ctx, msg)
 }
 
+func defaultGroupsStoragePath() string {
+	if dir := os.Getenv("DATA_DIR"); dir != "" {
+		return filepath.Join(dir, "groups_registry.json")
+	}
+	return "groups_registry.json"
+}
+
+func (b *Bot) loadGroupsFromDisk() {
+	path := defaultGroupsStoragePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var stored map[int64]*GroupInfo
+	if err := json.Unmarshal(data, &stored); err == nil && len(stored) > 0 {
+		b.groupMu.Lock()
+		for id, g := range stored {
+			b.groupRegistry[id] = g
+		}
+		b.groupMu.Unlock()
+		log.Printf("[Bot] Loaded %d groups from %s", len(stored), path)
+	}
+}
+
+func (b *Bot) saveGroupsToDisk() {
+	path := defaultGroupsStoragePath()
+	b.groupMu.RLock()
+	data, err := json.MarshalIndent(b.groupRegistry, "", "  ")
+	b.groupMu.RUnlock()
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0644)
+}
+
 func (b *Bot) recordGroup(chatID int64, title, chatType, username string) {
 	b.groupMu.Lock()
-	defer b.groupMu.Unlock()
-
 	if title == "" {
 		title = fmt.Sprintf("Group %d", chatID)
 	}
@@ -297,6 +348,8 @@ func (b *Bot) recordGroup(chatID int64, title, chatType, username string) {
 		Username: username,
 		LastSeen: time.Now(),
 	}
+	b.groupMu.Unlock()
+	b.saveGroupsToDisk()
 }
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
@@ -377,6 +430,23 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 	// Clean bot handle from prompt
 	cleanPrompt := b.cleanPrompt(text)
+
+	// Document inspection: reply-to document or query about recent document
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.Document != nil {
+		b.processDocument(ctx, chatID, msg.MessageID, senderID, username, isOwner, msg.ReplyToMessage.Document, cleanPrompt)
+		return
+	}
+
+	lowerPrompt := strings.ToLower(cleanPrompt)
+	if isDocReadQuery(lowerPrompt) {
+		b.recentDocMu.RLock()
+		recentDoc, hasRecent := b.recentDocs[chatID]
+		b.recentDocMu.RUnlock()
+		if hasRecent && recentDoc != nil && time.Since(recentDoc.ReceivedAt) < 30*time.Minute {
+			b.processDocument(ctx, chatID, msg.MessageID, senderID, username, isOwner, recentDoc.Document, cleanPrompt)
+			return
+		}
+	}
 
 	// Direct Token CA detection (fast path when primarily a CA paste)
 	rawAddr, rawChain := token.ExtractAddressAndChain(cleanPrompt)
@@ -704,7 +774,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 			b.sendReply(msg.Chat.ID, msg.MessageID, "Search query failed.")
 			return
 		}
-		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("🔍 **Search Results for '%s':**\n\n%s", query, res))
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("**Search Results for '%s':**\n\n%s", query, res))
 
 	case "/email":
 		b.handleEmailCommand(ctx, msg, parts[1:], isOwner)
@@ -714,7 +784,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 			b.sendReply(msg.Chat.ID, msg.MessageID, "only owners can view token consumption metrics.")
 			return
 		}
-		b.sendReply(msg.Chat.ID, msg.MessageID, b.ai.GetTokenReport())
+		query := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]))
+		b.sendReply(msg.Chat.ID, msg.MessageID, b.ai.GetTokenReport(query))
 
 	case "/bash", "/sandbox", "/exec":
 		if !isOwner {
@@ -739,26 +810,41 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("spinning up ephemeral runner to run `%s` (task %s). i'll alert you when it finishes.", cmdToRun, taskID))
 
 	case "/dm":
-		if !isOwner {
-			b.sendReply(msg.Chat.ID, msg.MessageID, "only owners can authorize sending DMs.")
-			return
-		}
 		if len(parts) < 3 {
-			b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/dm @username <message>`")
+			b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/dm @username <message>` or `/dm me <message>`")
 			return
 		}
 		targetUser := strings.ToLower(strings.TrimPrefix(parts[1], "@"))
+		if targetUser == "me" || targetUser == "" {
+			targetUser = strings.ToLower(strings.TrimPrefix(msg.From.UserName, "@"))
+		}
 		textToSend := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]+" "+parts[1]))
 		b.dmMu.RLock()
 		dmChatID, exists := b.userDMChats[targetUser]
 		b.dmMu.RUnlock()
 
-		if !exists {
+		if !exists || dmChatID == 0 {
+			if b.memory != nil {
+				if uid, err := b.memory.GetUserIDByUsername(ctx, targetUser); err == nil && uid != 0 {
+					dmChatID = uid
+					exists = true
+					b.dmMu.Lock()
+					b.userDMChats[targetUser] = uid
+					b.dmMu.Unlock()
+				}
+			}
+		}
+
+		if !exists || dmChatID == 0 {
 			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("cant dm @%s directly yet because telegram restricts bots from cold-dm'ing users until they message the bot first. tell @%s to open a chat with @%s and send /start.", targetUser, targetUser, b.api.Self.UserName))
 			return
 		}
 
-		dmMsg := tgbotapi.NewMessage(dmChatID, fmt.Sprintf("Message from @%s via Shipp:\n\n%s", msg.From.UserName, textToSend))
+		senderName := msg.From.UserName
+		if senderName == "" {
+			senderName = msg.From.FirstName
+		}
+		dmMsg := tgbotapi.NewMessage(dmChatID, fmt.Sprintf("Message from @%s via Shipp:\n\n%s", senderName, textToSend))
 		if _, err := b.api.Send(dmMsg); err != nil {
 			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to send dm to @%s: %v", targetUser, err))
 			return
@@ -810,20 +896,23 @@ func (b *Bot) handleNLPAndChat(
 			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 			return
 		}
+	}
 
-		// 2c. Direct DM dispatch: if owner says "dm @user <msg>", dispatch immediately
-		if ok, targetUser, dmText := parseDMIntent(prompt); ok {
-			b.sendChatAction(chatID, tgbotapi.ChatTyping)
-			argsJSON, _ := json.Marshal(map[string]interface{}{
-				"recipient": targetUser,
-				"message":   dmText,
-			})
-			toolResult := b.executeToolCall(ctx, chatID, "send_dm", string(argsJSON), username, isOwner)
-			b.sendReply(chatID, msg.MessageID, toolResult)
-			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
-			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
-			return
+	// 2c. Direct DM dispatch: if anyone says "dm @user <msg>" or "dm me <msg>", dispatch immediately
+	if ok, targetUser, dmText := parseDMIntent(prompt); ok {
+		if strings.EqualFold(targetUser, "me") {
+			targetUser = username
 		}
+		b.sendChatAction(chatID, tgbotapi.ChatTyping)
+		argsJSON, _ := json.Marshal(map[string]interface{}{
+			"recipient": targetUser,
+			"message":   dmText,
+		})
+		toolResult := b.executeToolCall(ctx, chatID, "send_dm", string(argsJSON), username, isOwner)
+		b.sendReply(chatID, msg.MessageID, toolResult)
+		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
+		return
 	}
 
 	// 3. Run the agentic loop (ReAct: reason, act, observe, repeat)
@@ -1771,15 +1860,15 @@ func (b *Bot) executeToolCall(
 		return fmt.Sprintf("Ephemeral runner spawned for `%s` (task %s). Executing in background on GitHub Actions runner; will notify here when finished.", args.Command, taskID)
 
 	case "send_dm":
-		if !isOwner {
-			return fmt.Sprintf("Access Denied: Only bot owners (@%s) can authorize sending direct messages.", strings.Join(b.cfg.Owners, ", @"))
-		}
 		var args struct {
 			Recipient string `json:"recipient"`
 			Message   string `json:"message"`
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
 		targetUser := strings.ToLower(strings.TrimPrefix(args.Recipient, "@"))
+		if targetUser == "me" || targetUser == "" {
+			targetUser = strings.ToLower(strings.TrimPrefix(username, "@"))
+		}
 		if targetUser == "" || args.Message == "" {
 			return "Missing recipient username or message content."
 		}
@@ -1842,16 +1931,98 @@ func (b *Bot) executeToolCall(
 
 		if len(groups) == 0 {
 			if chatID < 0 {
-				return fmt.Sprintf(`{"groups": [{"title": "this group", "chat_id": %d, "type": "group"}], "total": 1, "note": "only recorded current group since last restart"}`, chatID)
+				return fmt.Sprintf(`{"groups": [{"title": "this group", "chat_id": %d, "type": "group"}], "total": 1, "is_owner": %t, "note": "only recorded current group"}`, chatID, isOwner)
 			}
-			return `{"groups": [], "total": 0, "note": "no active groups recorded yet since last bot restart"}`
+			return fmt.Sprintf(`{"groups": [], "total": 0, "is_owner": %t, "note": "no active groups recorded yet"}`, isOwner)
 		}
 
 		data, _ := json.Marshal(map[string]interface{}{
-			"groups": groups,
-			"total":  len(groups),
+			"groups":   groups,
+			"total":    len(groups),
+			"is_owner": isOwner,
 		})
 		return string(data)
+
+	case "read_x_post", "get_x_post", "fetch_tweet":
+		var args struct {
+			URL     string `json:"url"`
+			TweetID string `json:"tweet_id"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		target := args.URL
+		if target == "" {
+			target = args.TweetID
+		}
+		if target == "" {
+			if b.memory != nil {
+				recentMsgs, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
+				for i := len(recentMsgs) - 1; i >= 0; i-- {
+					if foundURL := xpost.ExtractTweetURL(recentMsgs[i].Content); foundURL != "" {
+						target = foundURL
+						break
+					}
+				}
+			}
+		}
+		if target == "" {
+			return "No X/Twitter link or tweet ID provided."
+		}
+
+		tweetID := xpost.ExtractTweetID(target)
+		if tweetID == "" {
+			return fmt.Sprintf("Could not extract a valid tweet ID from %q.", target)
+		}
+
+		tweet, err := b.xpost.FetchTweet(ctx, tweetID)
+		if err != nil {
+			return fmt.Sprintf("Failed to fetch X post: %v", err)
+		}
+		return xpost.FormatTweet(tweet)
+
+	case "check_user_messages", "find_user_messages", "get_user_messages":
+		var args struct {
+			Username string `json:"username"`
+			Limit    int    `json:"limit"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		uname := strings.TrimSpace(strings.TrimPrefix(args.Username, "@"))
+		if uname == "" {
+			return "No username provided to check."
+		}
+		limit := args.Limit
+		if limit <= 0 {
+			limit = 10
+		}
+		if b.memory == nil {
+			return "Memory store not initialized."
+		}
+		msgs, err := b.memory.FindMessagesBySender(ctx, uname, limit)
+		if err != nil {
+			return fmt.Sprintf("Error checking messages for @%s: %v", uname, err)
+		}
+		if len(msgs) == 0 {
+			return fmt.Sprintf(`{"found": false, "username": "%s", "message_count": 0, "note": "no recorded messages from @%s in memory or recent chat logs"}`, uname, uname)
+		}
+		type msgRecord struct {
+			Sender    string `json:"sender"`
+			Content   string `json:"content"`
+			Timestamp string `json:"timestamp"`
+		}
+		var list []msgRecord
+		for _, m := range msgs {
+			list = append(list, msgRecord{
+				Sender:    m.Sender,
+				Content:   m.Content,
+				Timestamp: m.CreatedAt.UTC().Format(time.RFC3339),
+			})
+		}
+		res, _ := json.Marshal(map[string]interface{}{
+			"found":         true,
+			"username":      uname,
+			"message_count": len(list),
+			"messages":      list,
+		})
+		return string(res)
 
 	case "vercel_search_domains", "search_domains":
 		if b.domain == nil {
@@ -2594,20 +2765,41 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 	}
 	isOwner := b.isSenderOwner(msg.From)
 
-	isPrivate := msg.Chat.IsPrivate()
-	shouldRespond := isPrivate || b.isAddressedToBot(msg) || msg.Caption != ""
-	if !shouldRespond {
-		return
-	}
-
 	doc := msg.Document
 	if doc == nil {
 		return
 	}
 
+	// Always cache received document so follow-up queries like "can you read this doc" work reliably
+	b.recentDocMu.Lock()
+	b.recentDocs[chatID] = &RecentDocInfo{
+		Document:   doc,
+		ReceivedAt: time.Now(),
+		SenderID:   senderID,
+		Username:   username,
+	}
+	b.recentDocMu.Unlock()
+
+	cleanCaption := b.cleanPrompt(msg.Caption)
 	mime := strings.ToLower(doc.MimeType)
 	ext := strings.ToLower(filepath.Ext(doc.FileName))
-	cleanCaption := b.cleanPrompt(msg.Caption)
+
+	// Check if this document was sent in response to the bot asking for a file/doc
+	askedForDoc := false
+	b.dialogMu.RLock()
+	if dialog, exists := b.activeDialogs[chatID]; exists && dialog != nil {
+		lowerSnippet := strings.ToLower(dialog.LastBotSnippet)
+		if strings.Contains(lowerSnippet, "file") || strings.Contains(lowerSnippet, "doc") || strings.Contains(lowerSnippet, "paste the text") {
+			askedForDoc = true
+		}
+	}
+	b.dialogMu.RUnlock()
+
+	isPrivate := msg.Chat.IsPrivate()
+	shouldRespond := isPrivate || b.isAddressedToBot(msg) || cleanCaption != "" || askedForDoc
+	if !shouldRespond {
+		return
+	}
 
 	// Check if sent as an uncompressed image file
 	if strings.HasPrefix(mime, "image/") || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" {
@@ -2632,17 +2824,33 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 		return
 	}
 
-	// Document types: .md, .pdf, .docx, .txt, .csv, .json
-	if ext != ".md" && ext != ".pdf" && ext != ".docx" && ext != ".txt" && ext != ".csv" && ext != ".json" {
-		if isPrivate {
-			b.sendReply(chatID, msg.MessageID, fmt.Sprintf("I support document analysis for `.md`, `.pdf`, and `.docx` (or `.txt`/`.json`). `%s` isn't supported yet.", doc.FileName))
-		}
+	b.processDocument(ctx, chatID, msg.MessageID, senderID, username, isOwner, doc, cleanCaption)
+}
+
+func (b *Bot) processDocument(
+	ctx context.Context,
+	chatID int64,
+	replyToMsgID int,
+	senderID int64,
+	username string,
+	isOwner bool,
+	doc *tgbotapi.Document,
+	cleanCaption string,
+) {
+	if doc == nil {
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(doc.FileName))
+	// Document types: .md, .pdf, .docx, .txt, .csv, .json, .log
+	if ext != ".md" && ext != ".pdf" && ext != ".docx" && ext != ".txt" && ext != ".csv" && ext != ".json" && ext != ".log" {
+		b.sendReply(chatID, replyToMsgID, fmt.Sprintf("I support document analysis for `.md`, `.pdf`, and `.docx` (or `.txt`/`.json`). `%s` isn't supported yet.", doc.FileName))
 		return
 	}
 
 	// 15MB file size limit
 	if doc.FileSize > 15*1024*1024 {
-		b.sendReply(chatID, msg.MessageID, "That document is too large! Please send a file under 15MB.")
+		b.sendReply(chatID, replyToMsgID, "That document is too large! Please send a file under 15MB.")
 		return
 	}
 
@@ -2650,26 +2858,26 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 
 	fileURL, err := b.api.GetFileDirectURL(doc.FileID)
 	if err != nil {
-		b.sendReply(chatID, msg.MessageID, "Couldn't fetch file from Telegram.")
+		b.sendReply(chatID, replyToMsgID, "Couldn't fetch file from Telegram.")
 		return
 	}
 
 	resp, err := http.Get(fileURL)
 	if err != nil {
-		b.sendReply(chatID, msg.MessageID, "Failed to download document.")
+		b.sendReply(chatID, replyToMsgID, "Failed to download document.")
 		return
 	}
 	defer resp.Body.Close()
 
 	docBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		b.sendReply(chatID, msg.MessageID, "Failed to read document content.")
+		b.sendReply(chatID, replyToMsgID, "Failed to read document content.")
 		return
 	}
 
 	extractedText, err := docparser.ParseDocument(doc.FileName, docBytes)
 	if err != nil || strings.TrimSpace(extractedText) == "" {
-		b.sendReply(chatID, msg.MessageID, fmt.Sprintf("Couldn't extract text from `%s`: %v", doc.FileName, err))
+		b.sendReply(chatID, replyToMsgID, fmt.Sprintf("Couldn't extract text from `%s`: %v", doc.FileName, err))
 		return
 	}
 
@@ -2682,12 +2890,19 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 	profile, _ := b.memory.GetUserProfile(ctx, chatID)
 	analysis, err := b.ai.AnalyzeDocument(ctx, username, isOwner, doc.FileName, extractedText, cleanCaption, profile)
 	if err != nil || analysis == "" {
-		b.sendReply(chatID, msg.MessageID, "I extracted the document text, but couldn't generate the analysis.")
+		b.sendReply(chatID, replyToMsgID, "I extracted the document text, but couldn't generate the analysis.")
 		return
 	}
 
-	b.sendReply(chatID, msg.MessageID, analysis)
+	b.sendReply(chatID, replyToMsgID, analysis)
 	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", analysis)
+	b.recordActiveDialog(chatID, replyToMsgID, analysis, senderID, username)
+}
+
+func isDocReadQuery(lower string) bool {
+	hasVerb := strings.Contains(lower, "read") || strings.Contains(lower, "check") || strings.Contains(lower, "summarize") || strings.Contains(lower, "analyze") || strings.Contains(lower, "what does") || strings.Contains(lower, "what is in") || strings.Contains(lower, "what's in") || strings.Contains(lower, "whats in") || strings.Contains(lower, "explain") || strings.Contains(lower, "break down")
+	hasDocNoun := strings.Contains(lower, "doc") || strings.Contains(lower, "file") || strings.Contains(lower, "pdf") || strings.Contains(lower, "document") || strings.Contains(lower, "prd") || strings.Contains(lower, "markdown")
+	return hasVerb && hasDocNoun
 }
 
 var profileTriggerWords = []string{
@@ -2736,7 +2951,7 @@ var leakedFunctionRegex = regexp.MustCompile(`(?si)<function(?:=|\s+name=)[^>]*>
 var leakedDeclarationRegex = regexp.MustCompile(`(?si)(?:declaration|call):default_api:[a-zA-Z0-9_]+\s*\{.*?\}?`)
 var eagerPromptRegex = regexp.MustCompile(`(?i)(?:,\s*|\.\s*|\s+)(?:what(?:'s|\s+is)\s+next\??|what\s+are\s+we\s+building(?:\s+next)?\??|what(?:'s|\s+is)\s+(?:the\s+)?(?:next\s+)?move\??|what\s+are\s+we\s+cooking(?:\s+next)?\??|what\s+are\s+we\s+doing(?:\s+next)?\??|how\s+can\s+i\s+help(?:\s+you)?\??|who\s+else\s+is\s+building[^?.!\n]*\??|anyone\s+(?:else\s+)?(?:actually\s+)?(?:shipping|building)[^?.!\n]*\??|are\s+we\s+all\s+just\s+staring\s+at\s+charts\??)\s*$`)
 
-var dmIntentRegex = regexp.MustCompile(`(?i)^(?:/dm|dm|send\s+dm\s+to|dm\s+to)\s+@?([a-zA-Z0-9_]{3,32})[\s:,]+(.+)$`)
+var dmIntentRegex = regexp.MustCompile(`(?i)^(?:/dm|dm|send\s+dm\s+to|dm\s+to)\s+@?([a-zA-Z0-9_]{2,32})[\s:,]+(.+)$`)
 
 func parseDMIntent(prompt string) (bool, string, string) {
 	trimmed := strings.TrimSpace(prompt)

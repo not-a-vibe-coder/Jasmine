@@ -16,3 +16,8 @@ bin/
 
 # OS
 .DS_Store
+
+# State & Cache
+tokens_usage.json
+groups_registry.json
+*.json.tmp

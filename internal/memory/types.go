@@ -33,6 +33,7 @@ type Store interface {
 	GetUserProfile(ctx context.Context, chatID int64) (*UserProfile, error)
 	GetActiveChatIDs(ctx context.Context) ([]int64, error)
 	GetUserIDByUsername(ctx context.Context, username string) (int64, error)
+	FindMessagesBySender(ctx context.Context, username string, limit int) ([]Message, error)
 	GetDB() *sql.DB
 	GetRedis() *redis.Client
 	Close() error

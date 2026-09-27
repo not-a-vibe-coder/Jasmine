@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -1032,6 +1033,118 @@ func TestTryInterceptSendCrypto(t *testing.T) {
 	intercepted4, _ := b.tryInterceptSendCrypto(ctx, nil, normalPrompt, strings.ToLower(normalPrompt), "skipp_dev", true, nil, normalReply, []string{"web_search"})
 	if intercepted4 {
 		t.Errorf("expected scenario 4 NOT to be intercepted")
+	}
+}
+
+func TestCheckUserMessagesTool(t *testing.T) {
+	mem, err := memory.NewHybridStore("", "")
+	if err != nil {
+		t.Fatalf("failed to create memory store: %v", err)
+	}
+	ctx := context.Background()
+
+	// Seed messages
+	_ = mem.SaveMessage(ctx, -1001, 100, "precidobaby", "user", "hey shipp what time is the sync?")
+	_ = mem.SaveMessage(ctx, -1001, 100, "precidobaby", "user", "drop the contract address")
+
+	b := &Bot{
+		memory: mem,
+	}
+
+	// Case 1: Check existing user
+	res := b.executeToolCall(ctx, -1001, "check_user_messages", `{"username":"precidobaby"}`, "skipp_dev", true)
+	if !strings.Contains(res, `"found": true`) && !strings.Contains(res, `"found":true`) {
+		t.Errorf("expected found:true in check_user_messages, got: %s", res)
+	}
+	if !strings.Contains(res, "what time is the sync") {
+		t.Errorf("expected message content in response, got: %s", res)
+	}
+
+	// Case 2: Check nonexistent user
+	resEmpty := b.executeToolCall(ctx, -1001, "check_user_messages", `{"username":"ghost_dev"}`, "skipp_dev", true)
+	if !strings.Contains(resEmpty, `"found": false`) && !strings.Contains(resEmpty, `"found":false`) {
+		t.Errorf("expected found:false for nonexistent user, got: %s", resEmpty)
+	}
+}
+
+func TestSendDMPermissionAnyUser(t *testing.T) {
+	mem, _ := memory.NewHybridStore("", "")
+	b := &Bot{
+		memory:      mem,
+		userDMChats: make(map[string]int64),
+		cfg: &config.Config{
+			Owners: []string{"skipp_dev"},
+		},
+		api: &tgbotapi.BotAPI{
+			Self: tgbotapi.User{UserName: "Shipp0Bot"},
+		},
+	}
+	ctx := context.Background()
+
+	// Non-owner executes send_dm
+	res := b.executeToolCall(ctx, -1001, "send_dm", `{"recipient":"someone","message":"yo"}`, "anon_member", false)
+	// It should NOT return "Access Denied: Only bot owners"
+	if strings.Contains(res, "Access Denied") {
+		t.Errorf("send_dm should allow non-owners, but got: %s", res)
+	}
+	// It should guide user about cold-DM restriction if target hasn't messaged bot
+	if !strings.Contains(res, "cant dm @someone") {
+		t.Errorf("expected cold-dm guidance message, got: %s", res)
+	}
+}
+
+func TestGroupRegistryPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	origDir := os.Getenv("DATA_DIR")
+	_ = os.Setenv("DATA_DIR", tmpDir)
+	defer func() {
+		_ = os.Setenv("DATA_DIR", origDir)
+	}()
+
+	b1 := &Bot{
+		groupRegistry: make(map[int64]*GroupInfo),
+	}
+
+	// Record groups in b1
+	b1.recordGroup(-100123, "Dev War Room", "supergroup", "war_room")
+	b1.recordGroup(-100456, "Design Group", "group", "")
+
+	// Create new bot b2 and load from disk
+	b2 := &Bot{
+		groupRegistry: make(map[int64]*GroupInfo),
+	}
+	b2.loadGroupsFromDisk()
+
+	if len(b2.groupRegistry) != 2 {
+		t.Fatalf("expected 2 groups loaded, got %d", len(b2.groupRegistry))
+	}
+	if b2.groupRegistry[-100123].Title != "Dev War Room" {
+		t.Errorf("expected group title 'Dev War Room', got %q", b2.groupRegistry[-100123].Title)
+	}
+	if b2.groupRegistry[-100456].Title != "Design Group" {
+		t.Errorf("expected group title 'Design Group', got %q", b2.groupRegistry[-100456].Title)
+	}
+}
+
+func TestIsDocReadQuery(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"shipp, can you read this doc?", true},
+		{"what is in this document?", true},
+		{"summarize the prd please", true},
+		{"can you analyze this file?", true},
+		{"explain what's in the markdown", true},
+		{"what is the price of solana?", false},
+		{"hello shipp", false},
+	}
+
+	for _, tt := range tests {
+		got := isDocReadQuery(strings.ToLower(tt.input))
+		if got != tt.want {
+			t.Errorf("isDocReadQuery(%q) = %v; want %v", tt.input, got, tt.want)
+		}
 	}
 }
 

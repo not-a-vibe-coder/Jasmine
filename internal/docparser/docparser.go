@@ -85,7 +85,7 @@ func parsePDF(data []byte) (string, error) {
 
 	result := strings.TrimSpace(sb.String())
 	if result == "" {
-		return "", fmt.Errorf("PDF text extraction returned empty — file may be image-based or encrypted")
+		return "", fmt.Errorf("PDF text extraction returned empty - file may be image-based or encrypted")
 	}
 	return result, nil
 }
