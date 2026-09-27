@@ -365,11 +365,16 @@ func (b *Bot) Start(ctx context.Context) error {
 // so replies land in the correct forum thread.
 type ctxKeyThreadID struct{}
 
+// ctxKeyReplyToMsgID is the context key used to pass the message_id through the call chain
+// so asynchronous callbacks (like sandbox execution) reply to the exact prompt message.
+type ctxKeyReplyToMsgID struct{}
+
 // handleMessageWithThread is the primary entry point for all incoming messages.
 // It extracts the forum thread ID (from webhook raw JSON) and topic name,
 // registers new topics, injects the thread ID into context, then calls handleMessage.
 func (b *Bot) handleMessageWithThread(ctx context.Context, msg *tgbotapi.Message, threadID int, topicName string) {
 	chatID := msg.Chat.ID
+	ctx = context.WithValue(ctx, ctxKeyReplyToMsgID{}, msg.MessageID)
 
 	// If this is a forum_topic_created service message, register the topic
 	if topicName != "" && threadID != 0 {
@@ -2061,7 +2066,11 @@ func (b *Bot) executeToolCall(
 		if v := ctx.Value(ctxKeyThreadID{}); v != nil {
 			threadID = v.(int)
 		}
-		taskID, err := b.sandbox.DispatchWithThread(ctx, chatID, threadID, 0, args.Command, args.Repo)
+		replyToMsgID := 0
+		if v := ctx.Value(ctxKeyReplyToMsgID{}); v != nil {
+			replyToMsgID = v.(int)
+		}
+		taskID, err := b.sandbox.DispatchWithThread(ctx, chatID, threadID, replyToMsgID, args.Command, args.Repo)
 		if err != nil {
 			return fmt.Sprintf("Failed to launch sandbox runner: %v", err)
 		}

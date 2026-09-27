@@ -25,6 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Setup Tools & Workspace
         run: |
           mkdir -p /tmp/sandbox
@@ -32,11 +35,13 @@ jobs:
 
       - name: Run Sandbox Script
         id: runner
+        env:
+          SANDBOX_CMD: ${{ github.event.inputs.command }}
         run: |
           set +e
           START_TS=$(date +%s)
           
-          OUTPUT=$(eval "${{ github.event.inputs.command }}" 2>&1)
+          OUTPUT=$(eval "$SANDBOX_CMD" 2>&1)
           EXIT_CODE=$?
           
           END_TS=$(date +%s)
@@ -49,21 +54,26 @@ jobs:
 
       - name: Send Callback to Shipp
         if: always()
+        env:
+          TASK_ID: ${{ github.event.inputs.task_id }}
+          CHAT_ID: ${{ github.event.inputs.chat_id }}
+          CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+          AUTH_TOKEN: ${{ github.event.inputs.auth_token }}
         run: |
-          if [ ! -f /tmp/task_output.txt ]; then
-            echo "Task produced no output or runner aborted" > /tmp/task_output.txt
-          fi
-          OUTPUT_JSON=$(jq -Rs . < /tmp/task_output.txt)
+          touch /tmp/task_output.txt
           EXIT_CODE="${TASK_EXIT_CODE:-1}"
           DURATION="${TASK_DURATION:-0}"
           
-          curl -s -X POST "${{ github.event.inputs.callback_url }}" \
+          jq -n \
+            --arg task_id "$TASK_ID" \
+            --arg chat_id "$CHAT_ID" \
+            --argjson exit_code "$EXIT_CODE" \
+            --argjson duration "$DURATION" \
+            --rawfile output /tmp/task_output.txt \
+            '{task_id: $task_id, chat_id: ($chat_id | tonumber), exit_code: $exit_code, duration_seconds: $duration, output: $output}' \
+            > /tmp/payload.json
+          
+          curl -s -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -H "X-Sandbox-Token: ${{ github.event.inputs.auth_token }}" \
-            -d "{
-              \"task_id\": \"${{ github.event.inputs.task_id }}\",
-              \"chat_id\": ${{ github.event.inputs.chat_id }},
-              \"exit_code\": $EXIT_CODE,
-              \"duration_seconds\": $DURATION,
-              \"output\": $OUTPUT_JSON
-            }"
+            -H "X-Sandbox-Token: $AUTH_TOKEN" \
+            --data-binary @/tmp/payload.json
