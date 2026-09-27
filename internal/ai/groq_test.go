@@ -27,6 +27,12 @@ func TestSystemPrompt(t *testing.T) {
 	if !strings.Contains(ownerPrompt, "FULL AUTHORIZATION") {
 		t.Errorf("expected owner prompt to acknowledge FULL AUTHORIZATION")
 	}
+	if !strings.Contains(ownerPrompt, "Strictly NO unsolicited task offers") {
+		t.Errorf("expected system prompt to ban unsolicited task offers")
+	}
+	if !strings.Contains(ownerPrompt, "Conversational Explanations & Quoted Replies") {
+		t.Errorf("expected system prompt to include Conversational Explanations & Quoted Replies")
+	}
 
 	// Test Non-Owner prompt
 	guestPrompt := client.systemPrompt("anon123", false, nil)

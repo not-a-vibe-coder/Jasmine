@@ -2849,6 +2849,34 @@ func cleanNoEmojis(text string) string {
 	return deduplicateResponse(res)
 }
 
+var tgMentionRegex = regexp.MustCompile(`(^|[\s(\["'])(@([a-zA-Z0-9_]{3,32}))\b`)
+
+func (b *Bot) sanitizeThirdPartyMentions(text string) string {
+	if b == nil || b.cfg == nil {
+		return text
+	}
+	return tgMentionRegex.ReplaceAllStringFunc(text, func(m string) string {
+		sub := tgMentionRegex.FindStringSubmatch(m)
+		if len(sub) < 4 {
+			return m
+		}
+		prefix := sub[1]
+		uname := sub[3]
+		if b.cfg.IsOwner(uname) {
+			return m
+		}
+		if b.api != nil && strings.EqualFold(uname, b.api.Self.UserName) {
+			return m
+		}
+		return prefix + uname
+	})
+}
+
+func (b *Bot) cleanOutgoingText(text string) string {
+	cleaned := cleanNoEmojis(text)
+	return b.sanitizeThirdPartyMentions(cleaned)
+}
+
 func extractRepoFromHistory(history []memory.Message, currentPrompt string) string {
 	// 1. Check current prompt for full github URL
 	if m := githubURLRegex.FindStringSubmatch(currentPrompt); len(m) > 1 {
@@ -2908,7 +2936,7 @@ func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, 
 	if b.api == nil {
 		return
 	}
-	htmlText := toTelegramHTML(cleanNoEmojis(text))
+	htmlText := toTelegramHTML(b.cleanOutgoingText(text))
 
 	threadID := 0
 	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
@@ -2942,7 +2970,7 @@ func (b *Bot) sendSimpleMessageCtx(ctx context.Context, chatID int64, text strin
 	if b.api == nil {
 		return
 	}
-	htmlText := toTelegramHTML(cleanNoEmojis(text))
+	htmlText := toTelegramHTML(b.cleanOutgoingText(text))
 
 	threadID := 0
 	if v := ctx.Value(ctxKeyThreadID{}); v != nil {

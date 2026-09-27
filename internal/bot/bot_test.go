@@ -868,5 +868,63 @@ func TestIsConversationalFollowupAddress(t *testing.T) {
 	}
 }
 
+func TestSanitizeThirdPartyMentions(t *testing.T) {
+	b := &Bot{
+		cfg: &config.Config{
+			Owners: []string{"skipp_dev", "shigarakixbt"},
+		},
+		api: &tgbotapi.BotAPI{
+			Self: tgbotapi.User{
+				UserName: "Shipp0Bot",
+			},
+		},
+	}
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{
+			"That's @AutomTravels pitching the team on a marketing campaign.",
+			"That's AutomTravels pitching the team on a marketing campaign.",
+		},
+		{
+			"@AutomTravels @Shipp0Bot check with @skipp_dev first",
+			"AutomTravels @Shipp0Bot check with @skipp_dev first",
+		},
+		{
+			"Send update to dev@example.com and cc @skipp_dev",
+			"Send update to dev@example.com and cc @skipp_dev",
+		},
+		{
+			"No mentions here, just regular dev talk.",
+			"No mentions here, just regular dev talk.",
+		},
+	}
+
+	for _, tt := range tests {
+		got := b.sanitizeThirdPartyMentions(tt.input)
+		if got != tt.expected {
+			t.Errorf("sanitizeThirdPartyMentions(%q) = %q; want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestCleanOutgoingText(t *testing.T) {
+	b := &Bot{
+		cfg: &config.Config{
+			Owners: []string{"skipp_dev"},
+		},
+	}
+
+	input := "Clean work by @AutomTravels - all tests passing!"
+	expected := "Clean work by AutomTravels - all tests passing!"
+	got := b.cleanOutgoingText(input)
+	if got != expected {
+		t.Errorf("cleanOutgoingText(%q) = %q; want %q", input, got, expected)
+	}
+}
+
+
 
 
