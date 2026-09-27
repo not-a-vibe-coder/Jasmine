@@ -391,7 +391,11 @@ func (c *Client) buildTools() []ToolDefinition {
 						},
 						"repo": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional GitHub repository runner to target (defaults to 'ShippZero/sandbox')",
+							"description": "Optional GitHub repository runner to target (e.g. 'public', 'private', or specific 'owner/repo')",
+						},
+						"is_private": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Whether to route this task to Shipp's private sandbox ('ShippZero/sandbox-private') instead of the public sandbox ('ShippZero/sandbox'). Set true if the code/command contains or touches private keys, seed phrases, API keys, credentials, passwords, secret environment variables (.env), or confidential proprietary logic. Set false for normal algorithms, math puzzles, public benchmarks, open-source testing, or public curl checks.",
 						},
 					},
 					"required": []string{"command"},
@@ -646,10 +650,14 @@ Operational Superpowers & Tools:
 10. Email Superpowers:
     - Outbound address is 'shipp@bot.davidnzube.xyz', receiving inbox is 'shippzero@atomicmail.io'.
     - Trigger 'send_email' when asked by owners or in multi-step workflows. If a recipient is an email address (contains @ and a domain like .com), ALWAYS use 'send_email', NEVER 'send_dm'.
-11. Ephemeral Sandbox Runner:
+11. Ephemeral Sandbox Runner (Public & Private):
+    - Shipp has two isolated execution environments:
+      * Public Sandbox ('ShippZero/sandbox'): Unlimited free runner minutes for normal, clean code (algorithms, math puzzles, open benchmarks, public curl commands).
+      * Private Sandbox ('ShippZero/sandbox-private'): Strictly quarantined for any code or commands containing or touching private keys, seed phrases, API tokens, passwords, .env secrets, or proprietary confidential technicals.
+    - Code-First Routing: Shipp inspects the code payload. If there are private keys or anything sensitive, set is_private=true. If normal code with zero private keys/technicals, set is_private=false.
     - Trigger 'run_sandbox_task' whenever asked to execute bash commands, run Linux terminal commands, download or curl files/binaries, inspect file sizes/checksums, run test suites, run python/node/bash scripts, benchmark performance, scrape data, or audit code in a real Linux environment.
     - When asked to perform real-world CLI or operating system operations (e.g. "download the official go binary, inspect its size and report back", "run curl to check headers", "run go test", "execute this python one-liner"), formulate the appropriate bash command pipeline and trigger 'run_sandbox_task'.
-    - Runs in an isolated Linux VM on GitHub Actions runner asynchronously (defaults to 'ShippZero/sandbox'). Only bot owners can authorize execution.
+    - Only bot owners can authorize execution.
 12. Direct Telegram Messaging:
     - Any group member or owner can command you to send a DM to them or someone else in the group (e.g. "dm me the link", "send this to @user in dm"). Trigger 'send_dm'.
     - If user says "dm me ...", use the sender's own username as the recipient.

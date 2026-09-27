@@ -907,11 +907,21 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 			b.sendReply(msg.Chat.ID, msg.MessageID, "sandbox service not initialized (GITHUB_PAT missing).")
 			return
 		}
+		targetRepo := ""
+		lowerCmd := strings.ToLower(cmdToRun)
+		if strings.HasPrefix(lowerCmd, "private ") {
+			targetRepo = "private"
+			cmdToRun = strings.TrimSpace(cmdToRun[8:])
+		} else if strings.HasPrefix(lowerCmd, "public ") {
+			targetRepo = "public"
+			cmdToRun = strings.TrimSpace(cmdToRun[7:])
+		}
+
 		threadID := 0
 		if v := ctx.Value(ctxKeyThreadID{}); v != nil {
 			threadID = v.(int)
 		}
-		taskID, err := b.sandbox.DispatchWithPrompt(ctx, msg.Chat.ID, threadID, msg.MessageID, cmdToRun, "", msg.Text)
+		taskID, err := b.sandbox.DispatchWithPrompt(ctx, msg.Chat.ID, threadID, msg.MessageID, cmdToRun, targetRepo, msg.Text)
 		if err != nil {
 			log.Printf("[Bot] Sandbox dispatch error: %v", err)
 			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to launch sandbox runner: %v", err))
@@ -2103,8 +2113,9 @@ func (b *Bot) executeToolCall(
 			return "Sandbox runner is not configured (GITHUB_PAT missing)."
 		}
 		var args struct {
-			Command string `json:"command"`
-			Repo    string `json:"repo"`
+			Command   string `json:"command"`
+			Repo      string `json:"repo"`
+			IsPrivate *bool  `json:"is_private"`
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
 		if args.Command == "" {
@@ -2122,7 +2133,16 @@ func (b *Bot) executeToolCall(
 		if v := ctx.Value(ctxKeyPrompt{}); v != nil {
 			prompt = v.(string)
 		}
-		taskID, err := b.sandbox.DispatchWithPrompt(ctx, chatID, threadID, replyToMsgID, args.Command, args.Repo, prompt)
+		// If the model explicitly set is_private, override the repo hint
+		targetRepo := args.Repo
+		if args.IsPrivate != nil && targetRepo == "" {
+			if *args.IsPrivate {
+				targetRepo = "private"
+			} else {
+				targetRepo = "public"
+			}
+		}
+		taskID, err := b.sandbox.DispatchWithPrompt(ctx, chatID, threadID, replyToMsgID, args.Command, targetRepo, prompt)
 		if err != nil {
 			return fmt.Sprintf("Failed to launch sandbox runner: %v", err)
 		}
