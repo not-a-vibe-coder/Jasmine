@@ -15,6 +15,161 @@ import (
 var defaultPopularTLDs = []string{".com", ".app", ".io", ".xyz", ".dev", ".ai", ".co"}
 var domainCleanRegex = regexp.MustCompile(`(?i)^(?:https?://)?(?:www\.)?([a-zA-Z0-9.-]+).*$`)
 var validDomainRegex = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$`)
+var knownTLDRegex = regexp.MustCompile(`(?i)^\.?(com|app|io|xyz|ai|dev|co|org|net|me|bot|tech|online|store|site|so|gg|sh|cc|fun|link|live|space|pro|build|run|finance)$`)
+var domainInTextRegex = regexp.MustCompile(`(?i)\b([a-zA-Z0-9-]{2,63})\.(com|app|io|xyz|ai|dev|co|org|net|me|bot|tech|online|store|site|so|gg|sh|cc|fun|link|live|space|pro|build|run|finance)\b`)
+var tldInQueryRegex = regexp.MustCompile(`(?i)\.(com|app|io|xyz|ai|dev|co|org|net|me|bot|tech|online|store|site|so|gg|sh|cc|fun|link|live|space|pro|build|run|finance)\b`)
+
+var ignoredPlatformBases = map[string]bool{
+	"vercel":         true,
+	"github":         true,
+	"google":         true,
+	"twitter":        true,
+	"x":              true,
+	"telegram":       true,
+	"t":              true,
+	"dexscreener":    true,
+	"render":         true,
+	"localhost":      true,
+	"etherscan":      true,
+	"solscan":        true,
+	"coingecko":      true,
+	"coinmarketcap":  true,
+	"basescan":       true,
+	"polygonscan":    true,
+	"arbiscan":       true,
+	"bscscan":        true,
+}
+
+var queryStopWords = map[string]bool{
+	"how":          true,
+	"much":         true,
+	"is":           true,
+	"are":          true,
+	"what":         true,
+	"about":        true,
+	"for":          true,
+	"check":        true,
+	"search":       true,
+	"price":        true,
+	"pricing":      true,
+	"cost":         true,
+	"available":    true,
+	"availability": true,
+	"the":          true,
+	"a":            true,
+	"an":           true,
+	"can":          true,
+	"you":          true,
+	"shipp":        true,
+	"shipp0bot":    true,
+	"bot":          true,
+	"domain":       true,
+	"domains":      true,
+	"it":           true,
+	"this":         true,
+	"that":         true,
+	"does":         true,
+	"do":           true,
+	"any":          true,
+	"lookup":       true,
+	"tell":         true,
+	"me":           true,
+	"find":         true,
+	"get":          true,
+	"with":         true,
+	"extension":    true,
+	"tld":          true,
+}
+
+func isStopWord(s string) bool {
+	return queryStopWords[strings.ToLower(strings.TrimSpace(s))]
+}
+
+// IsTLD returns true if the string represents a TLD extension (e.g. ".com", "com", ".xyz").
+func IsTLD(s string) bool {
+	return knownTLDRegex.MatchString(strings.TrimSpace(s))
+}
+
+// NormalizeTLD formats an extension with a leading dot, e.g. ".com".
+func NormalizeTLD(s string) string {
+	clean := strings.ToLower(strings.TrimSpace(s))
+	if !strings.HasPrefix(clean, ".") {
+		clean = "." + clean
+	}
+	return clean
+}
+
+// ExtractDomainBase extracts the main brand/project name from text, ignoring platforms.
+func ExtractDomainBase(text string) string {
+	// 1. Check if text contains a full domain (e.g. liegeagents.app)
+	matches := domainInTextRegex.FindAllStringSubmatch(text, -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		base := strings.ToLower(matches[i][1])
+		if !ignoredPlatformBases[base] {
+			return base
+		}
+	}
+
+	// 2. Check if text is a domain command with bare name (e.g. "/domain liegeagents")
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(strings.ToLower(trimmed), "/domain") {
+		parts := strings.Fields(trimmed)
+		if len(parts) >= 2 {
+			cand := strings.ToLower(strings.Trim(parts[1], `"'`+"`"+"()[]{}<>"))
+			if idx := strings.Index(cand, "."); idx != -1 {
+				cand = cand[:idx]
+			}
+			if len(cand) >= 2 && !IsTLD(cand) && !ignoredPlatformBases[cand] {
+				return cand
+			}
+		}
+	}
+
+	return ""
+}
+
+// ExtractRequestedTLDs extracts any isolated TLD extensions in natural text (e.g. "how much is .com and .xyz").
+func ExtractRequestedTLDs(text string) []string {
+	matches := tldInQueryRegex.FindAllStringSubmatch(text, -1)
+	var tlds []string
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		tld := strings.ToLower(m[0])
+		if !seen[tld] {
+			seen[tld] = true
+			tlds = append(tlds, tld)
+		}
+	}
+	return tlds
+}
+
+// ResolveDomainsWithBase resolves any bare TLDs against baseName.
+func ResolveDomainsWithBase(items []string, baseName string) []string {
+	var resolved []string
+	seen := make(map[string]bool)
+
+	for _, item := range items {
+		clean := strings.TrimSpace(item)
+		if clean == "" {
+			continue
+		}
+		if IsTLD(clean) {
+			if baseName != "" {
+				full := baseName + NormalizeTLD(clean)
+				if !seen[full] {
+					seen[full] = true
+					resolved = append(resolved, full)
+				}
+			}
+		} else {
+			if !seen[clean] {
+				seen[clean] = true
+				resolved = append(resolved, clean)
+			}
+		}
+	}
+	return resolved
+}
 
 type DomainResult struct {
 	Domain       string  `json:"domain"`
@@ -51,7 +206,7 @@ func (s *Service) SetEndpointForTesting(endpoint string) {
 }
 
 // ParseInputDomains parses user input (which can be a single domain, comma-separated list,
-// space-separated list, or bare brand name) into a list of full domains with TLDs.
+// space-separated list, bare brand name, or TLD extension queries) into domain candidates.
 func (s *Service) ParseInputDomains(input string) []string {
 	raw := strings.TrimSpace(input)
 	if raw == "" {
@@ -63,12 +218,14 @@ func (s *Service) ParseInputDomains(input string) []string {
 		return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == ';'
 	})
 
-	var domains []string
+	var fullDomains []string
+	var bareTLDs []string
+	var brandCandidates []string
 	seen := make(map[string]bool)
 
 	for _, f := range fields {
 		item := strings.TrimSpace(f)
-		item = strings.Trim(item, `"'` + "`" + `()[]{}<>`)
+		item = strings.Trim(item, `"'`+"`"+"()[]{}<>@:,?!")
 		if item == "" {
 			continue
 		}
@@ -83,29 +240,87 @@ func (s *Service) ParseInputDomains(input string) []string {
 		if strings.Contains(item, ".") {
 			if validDomainRegex.MatchString(item) && !seen[item] {
 				seen[item] = true
-				domains = append(domains, item)
+				fullDomains = append(fullDomains, item)
+			} else if IsTLD(item) {
+				norm := NormalizeTLD(item)
+				if !seen[norm] {
+					seen[norm] = true
+					bareTLDs = append(bareTLDs, norm)
+				}
+			}
+		} else if IsTLD(item) {
+			norm := NormalizeTLD(item)
+			if !seen[norm] {
+				seen[norm] = true
+				bareTLDs = append(bareTLDs, norm)
 			}
 		} else {
-			// Bare name without TLD: auto-expand across popular TLDs
 			cleanName := strings.Trim(item, ".-_")
-			if cleanName != "" {
-				for _, tld := range defaultPopularTLDs {
-					cand := cleanName + tld
-					if validDomainRegex.MatchString(cand) && !seen[cand] {
-						seen[cand] = true
-						domains = append(domains, cand)
+			if cleanName != "" && !isStopWord(cleanName) {
+				brandCandidates = append(brandCandidates, cleanName)
+			}
+		}
+	}
+
+	// 1. If full domains found:
+	if len(fullDomains) > 0 {
+		// If user also specified bare TLDs alongside a full domain (e.g. "liegeagents.app, .com, .io")
+		if len(bareTLDs) > 0 {
+			if base := ExtractDomainBase(fullDomains[0]); base != "" {
+				resolvedTLDs := ResolveDomainsWithBase(bareTLDs, base)
+				for _, r := range resolvedTLDs {
+					if !seen[r] {
+						seen[r] = true
+						fullDomains = append(fullDomains, r)
 					}
 				}
 			}
 		}
-
-		// Cap maximum query items at 15
-		if len(domains) >= 15 {
-			break
+		if len(fullDomains) > 15 {
+			fullDomains = fullDomains[:15]
 		}
+		return fullDomains
 	}
 
-	return domains
+	// 2. If both a brand name and bare TLDs are present in query (e.g. "curtainrh .com")
+	if len(brandCandidates) > 0 && len(bareTLDs) > 0 {
+		base := brandCandidates[0]
+		return ResolveDomainsWithBase(bareTLDs, base)
+	}
+
+	// 3. If bare TLDs were directly specified (e.g. ".com", ".io")
+	if len(bareTLDs) > 0 {
+		return bareTLDs
+	}
+
+	// 4. Check for TLD extensions in natural text sentences (e.g. "how much is .com and .xyz")
+	tldsInQuery := ExtractRequestedTLDs(raw)
+	if len(tldsInQuery) > 0 {
+		return tldsInQuery
+	}
+
+	// 5. Bare brand name without TLD: auto-expand across popular TLDs
+	if len(brandCandidates) > 0 {
+		var expanded []string
+		for _, b := range brandCandidates {
+			for _, tld := range defaultPopularTLDs {
+				cand := b + tld
+				if validDomainRegex.MatchString(cand) && !seen[cand] {
+					seen[cand] = true
+					expanded = append(expanded, cand)
+				}
+				if len(expanded) >= 15 {
+					break
+				}
+			}
+			if len(expanded) >= 15 {
+				break
+			}
+		}
+		return expanded
+	}
+
+	return nil
 }
 
 // Search searches Vercel registrar for domain availability and pricing.
@@ -122,6 +337,27 @@ func (s *Service) SearchDomains(ctx context.Context, domains []string) (*SearchR
 	if len(domains) == 0 {
 		return nil, fmt.Errorf("domains list cannot be empty")
 	}
+
+	// Filter and validate domains: ensure no bare TLD extensions are passed to Vercel API
+	var validDomains []string
+	for _, d := range domains {
+		clean := strings.TrimSpace(d)
+		if clean == "" {
+			continue
+		}
+		if IsTLD(clean) || strings.HasPrefix(clean, ".") || !strings.Contains(clean, ".") {
+			continue
+		}
+		if validDomainRegex.MatchString(clean) {
+			validDomains = append(validDomains, clean)
+		}
+	}
+
+	if len(validDomains) == 0 {
+		return nil, fmt.Errorf("no fully qualified domain names provided (found bare extensions: %s)", strings.Join(domains, ", "))
+	}
+	domains = validDomains
+
 	if len(domains) > 20 {
 		domains = domains[:20]
 	}

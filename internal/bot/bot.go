@@ -550,6 +550,11 @@ func (b *Bot) isConversationalFollowup(msg *tgbotapi.Message, text string) (bool
 		}
 	}
 
+	// Heuristic 5: Short TLD extension follow-up (e.g. ".com", "check .io", ".xyz")
+	if len(fields) <= 5 && len(domain.ExtractRequestedTLDs(lower)) > 0 {
+		return true, dialog.LastBotSnippet
+	}
+
 	return false, ""
 }
 
@@ -1660,6 +1665,34 @@ func (b *Bot) executeToolCall(
 			return "Please specify domain names or a brand name to search (e.g. 'curtainrh.com' or 'liegeagents')."
 		}
 
+		// Check if any domain is a bare TLD extension (e.g. ".com", ".io")
+		hasBareTLD := false
+		for _, d := range inputList {
+			if domain.IsTLD(d) {
+				hasBareTLD = true
+				break
+			}
+		}
+		if hasBareTLD {
+			var baseName string
+			if b.memory != nil {
+				recentMsgs, _ := b.memory.GetRecentMessages(ctx, chatID, 10)
+				baseName = b.extractDomainBaseFromHistory(recentMsgs, "")
+			}
+			if baseName == "" {
+				b.dialogMu.RLock()
+				if dialog, exists := b.activeDialogs[chatID]; exists && dialog != nil {
+					baseName = domain.ExtractDomainBase(dialog.LastBotSnippet)
+				}
+				b.dialogMu.RUnlock()
+			}
+			if baseName != "" {
+				inputList = domain.ResolveDomainsWithBase(inputList, baseName)
+			} else {
+				return "Which domain or project name would you like to check for " + strings.Join(inputList, ", ") + "? (e.g. liegeagents" + domain.NormalizeTLD(inputList[0]) + ")"
+			}
+		}
+
 		res, err := b.domain.SearchDomains(ctx, inputList)
 		if err != nil {
 			return fmt.Sprintf("Domain search error: %v", err)
@@ -1899,8 +1932,42 @@ func (b *Bot) handleDomainCommand(ctx context.Context, msg *tgbotapi.Message, ar
 		return
 	}
 
+	inputList := b.domain.ParseInputDomains(query)
+	if len(inputList) == 0 {
+		b.sendReply(msg.Chat.ID, msg.MessageID, "No valid domain names found in query.")
+		return
+	}
+
+	hasBareTLD := false
+	for _, d := range inputList {
+		if domain.IsTLD(d) {
+			hasBareTLD = true
+			break
+		}
+	}
+	if hasBareTLD {
+		var baseName string
+		if b.memory != nil {
+			recentMsgs, _ := b.memory.GetRecentMessages(ctx, msg.Chat.ID, 10)
+			baseName = b.extractDomainBaseFromHistory(recentMsgs, "")
+		}
+		if baseName == "" {
+			b.dialogMu.RLock()
+			if dialog, exists := b.activeDialogs[msg.Chat.ID]; exists && dialog != nil {
+				baseName = domain.ExtractDomainBase(dialog.LastBotSnippet)
+			}
+			b.dialogMu.RUnlock()
+		}
+		if baseName != "" {
+			inputList = domain.ResolveDomainsWithBase(inputList, baseName)
+		} else {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "Which domain or project name would you like to check for "+strings.Join(inputList, ", ")+"? (e.g. liegeagents"+domain.NormalizeTLD(inputList[0])+")")
+			return
+		}
+	}
+
 	b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
-	res, err := b.domain.Search(ctx, query)
+	res, err := b.domain.SearchDomains(ctx, inputList)
 	if err != nil {
 		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("Domain search failed: %v", err))
 		return
@@ -1910,6 +1977,21 @@ func (b *Bot) handleDomainCommand(ctx context.Context, msg *tgbotapi.Message, ar
 	b.sendReply(msg.Chat.ID, msg.MessageID, formatted)
 	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", formatted)
 	b.recordActiveDialog(msg.Chat.ID, msg.MessageID, formatted, msg.From.ID, msg.From.UserName)
+}
+
+func (b *Bot) extractDomainBaseFromHistory(history []memory.Message, currentPrompt string) string {
+	if currentPrompt != "" {
+		if base := domain.ExtractDomainBase(currentPrompt); base != "" {
+			return base
+		}
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		content := history[i].Content
+		if base := domain.ExtractDomainBase(content); base != "" {
+			return base
+		}
+	}
+	return ""
 }
 
 func (b *Bot) runProactiveEngine(ctx context.Context) {

@@ -127,3 +127,80 @@ func TestMockVercelSearchAPI(t *testing.T) {
 		t.Errorf("unexpected result 1: %+v", resp.Results[1])
 	}
 }
+
+func TestContextualDomainResolution(t *testing.T) {
+	// 1. IsTLD and NormalizeTLD
+	if !IsTLD(".com") || !IsTLD("com") || !IsTLD(".xyz") || !IsTLD("io") {
+		t.Errorf("IsTLD failed on valid TLDs")
+	}
+	if IsTLD("liegeagents") || IsTLD("curtainrh") {
+		t.Errorf("IsTLD falsely matched brand names")
+	}
+	if NormalizeTLD("com") != ".com" || NormalizeTLD(".io") != ".io" {
+		t.Errorf("NormalizeTLD failed")
+	}
+
+	// 2. ExtractDomainBase
+	text1 := "• liegeagents.app - Available: $14.99/yr"
+	if base := ExtractDomainBase(text1); base != "liegeagents" {
+		t.Errorf("ExtractDomainBase(%q) = %q; want liegeagents", text1, base)
+	}
+
+	// Platform domains like vercel.com or github.com should be ignored
+	text2 := "check on vercel.com or github.com for liegeagents.io"
+	if base := ExtractDomainBase(text2); base != "liegeagents" {
+		t.Errorf("ExtractDomainBase(%q) = %q; want liegeagents", text2, base)
+	}
+
+	// Bare command format
+	text3 := "/domain liegeagents"
+	if base := ExtractDomainBase(text3); base != "liegeagents" {
+		t.Errorf("ExtractDomainBase(%q) = %q; want liegeagents", text3, base)
+	}
+
+	// 3. ResolveDomainsWithBase
+	items := []string{".com", ".xyz", "curtainrh.com"}
+	resolved := ResolveDomainsWithBase(items, "liegeagents")
+	expected := []string{"liegeagents.com", "liegeagents.xyz", "curtainrh.com"}
+	if len(resolved) != 3 || resolved[0] != expected[0] || resolved[1] != expected[1] || resolved[2] != expected[2] {
+		t.Errorf("ResolveDomainsWithBase failed: got %v, want %v", resolved, expected)
+	}
+
+	// 4. ParseInputDomains with TLD queries
+	svc := NewService("")
+
+	// Bare extension
+	p1 := svc.ParseInputDomains(".com")
+	if len(p1) != 1 || p1[0] != ".com" {
+		t.Errorf("ParseInputDomains('.com') = %v, want ['.com']", p1)
+	}
+
+	// Conversational TLD question
+	p2 := svc.ParseInputDomains("how much is .com @Shipp0Bot")
+	if len(p2) != 1 || p2[0] != ".com" {
+		t.Errorf("ParseInputDomains('how much is .com') = %v, want ['.com']", p2)
+	}
+
+	// Brand + TLD in single query
+	p3 := svc.ParseInputDomains("curtainrh .com")
+	if len(p3) != 1 || p3[0] != "curtainrh.com" {
+		t.Errorf("ParseInputDomains('curtainrh .com') = %v, want ['curtainrh.com']", p3)
+	}
+
+	// Full domain + extra TLDs
+	p4 := svc.ParseInputDomains("liegeagents.app, .com, .io")
+	if len(p4) != 3 || p4[0] != "liegeagents.app" || p4[1] != "liegeagents.com" || p4[2] != "liegeagents.io" {
+		t.Errorf("ParseInputDomains('liegeagents.app, .com, .io') = %v", p4)
+	}
+}
+
+func TestSearchDomainsRejectsBareTLDs(t *testing.T) {
+	svc := NewService("")
+	_, err := svc.SearchDomains(context.Background(), []string{".com", ".xyz"})
+	if err == nil {
+		t.Fatalf("expected error when searching bare TLDs, got nil")
+	}
+	if !strings.Contains(err.Error(), "no fully qualified domain names") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}

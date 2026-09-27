@@ -5,9 +5,9 @@
 
 # Binaries
 bin/
-shipp
-main
-bot
+/shipp
+/main
+/bot
 
 # IDEs
 .idea/

@@ -403,7 +403,7 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "vercel_search_domains",
-				Description: "Search domain name availability and pricing using Vercel registrar API. Accepts full domains (e.g. 'curtainrh.com', 'liegeagents.app') or brand names (e.g. 'terawallet'). Returns live availability, registration price, and renewal price.",
+				Description: "Search domain name availability and pricing using Vercel registrar API. Accepts full domains (e.g. 'curtainrh.com', 'liegeagents.app') or brand names (e.g. 'terawallet'). If the user asks about an extension or TLD (e.g. '.com', '.io', 'how much is .com'), resolve it against the active brand or domain in recent chat history (e.g. 'liegeagents.com'). Returns live availability, registration price, and renewal price.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -541,6 +541,7 @@ Operational Superpowers & Tools:
     - If 'get_group_topics' returns a list of forum topics, you are aware of those project threads and can reference them naturally in conversation.
 14. Vercel Domain Registrar Search:
     - Trigger 'vercel_search_domains' whenever asked to check domain availability, find available domains for a brand or project, or check pricing.
+    - If a user asks a follow-up about an extension or TLD (e.g. "how much is .com", "what about .io", "check .xyz"), resolve it against the active brand or domain discussed in recent chat history (e.g. if liegeagents was discussed, search 'liegeagents.com'). NEVER pass a bare extension like '.com' without a domain base to the tool.
 15. Owner Notification & Alerting:
     - Slang Awareness: "oga", "chairman", "boss", "creator", "dev" refer to your owner(s) (@skipp_dev).
     - When anyone in a group asks to "tell your oga", "ping the owner", "notify your creator", or "let @skipp_dev know" about tasks/requests (e.g. creating accounts, buying domains, fixing bugs), ALWAYS invoke the 'notify_owner' tool immediately.

@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -341,12 +342,35 @@ func TestGetActiveGroupsTool(t *testing.T) {
 func TestVercelSearchDomainsTool(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"results": [
-				{"domain": "liegeagents.app", "available": true, "years": 1, "price": 14.99, "renewalPrice": 15, "premium": false},
-				{"domain": "curtainrh.com", "available": true, "years": 1, "price": 11.25, "renewalPrice": 11.25, "premium": false}
-			]
-		}`))
+		var req struct {
+			Domains []string `json:"domains"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		var results []map[string]interface{}
+		for _, d := range req.Domains {
+			price := 10.99
+			renew := 12.00
+			if d == "liegeagents.app" {
+				price = 14.99
+				renew = 15.00
+			} else if d == "curtainrh.com" {
+				price = 11.25
+				renew = 11.25
+			}
+			results = append(results, map[string]interface{}{
+				"domain":       d,
+				"available":    true,
+				"years":        1,
+				"price":        price,
+				"renewalPrice": renew,
+				"premium":      false,
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{
+			"results": results,
+		})
+		_, _ = w.Write(data)
 	}))
 	defer mockServer.Close()
 
@@ -370,6 +394,29 @@ func TestVercelSearchDomainsTool(t *testing.T) {
 	resQuery := b.executeToolCall(context.Background(), 12345, "vercel_search_domains", `{"query": "curtainrh.com"}`, "skipp_dev", true)
 	if !strings.Contains(resQuery, "curtainrh.com") {
 		t.Errorf("expected query domain in output, got: %s", resQuery)
+	}
+
+	// 3. Contextual resolution: Bare TLD with domain base in recent chat history
+	mem, _ := memory.NewHybridStore("", "")
+	b.memory = mem
+	_ = mem.SaveMessage(context.Background(), 12345, 100, "skipp_dev", "user", "can you check liegeagents.app?")
+	_ = mem.SaveMessage(context.Background(), 12345, 200, "Shipp0Bot", "assistant", "• liegeagents.app - Available: $14.99/yr")
+
+	resContext := b.executeToolCall(context.Background(), 12345, "vercel_search_domains", `{"domains": [".com"]}`, "skipp_dev", true)
+	if !strings.Contains(resContext, "liegeagents.com") {
+		t.Errorf("expected contextual recovery of liegeagents.com, got: %s", resContext)
+	}
+
+	// 4. Contextual resolution: Natural query asking for .com
+	resNat := b.executeToolCall(context.Background(), 12345, "vercel_search_domains", `{"query": "how much is .com"}`, "skipp_dev", true)
+	if !strings.Contains(resNat, "liegeagents.com") {
+		t.Errorf("expected contextual recovery of liegeagents.com from natural query, got: %s", resNat)
+	}
+
+	// 5. Bare TLD with no domain base in history prompts user cleanly
+	resEmpty := b.executeToolCall(context.Background(), 99999, "vercel_search_domains", `{"domains": [".com"]}`, "skipp_dev", true)
+	if !strings.Contains(resEmpty, "Which domain or project name would you like to check for .com?") {
+		t.Errorf("expected clarifying prompt when no base exists, got: %s", resEmpty)
 	}
 }
 
@@ -559,6 +606,8 @@ func TestConversationalFollowup(t *testing.T) {
 		{"what of moon card", true},
 		{"does it work in US", true},
 		{"do they have webhooks", true},
+		{".com", true},
+		{"check .io", true},
 		{"brb lunch", false},
 		{"lol", false},
 		{"ok thanks", false},
