@@ -312,3 +312,90 @@ func TestGetActiveGroupsTool(t *testing.T) {
 		t.Errorf("expected total 2, got: %s", res)
 	}
 }
+
+func TestToTelegramHTML(t *testing.T) {
+	// 1. Bullet with bold (as seen in summary bug: "* **Bot Behavior:**")
+	input1 := "* **Bot Behavior:** Shipp0Bot struggled to execute commands."
+	got1 := toTelegramHTML(input1)
+	if !strings.Contains(got1, "• <b>Bot Behavior:</b>") {
+		t.Errorf("expected bullet with bold HTML, got: %q", got1)
+	}
+
+	// 2. Email with underscores inside code ticks
+	input2 := "sent email to `michael.j.vianney@gmail.com`."
+	got2 := toTelegramHTML(input2)
+	if !strings.Contains(got2, "<code>michael.j.vianney@gmail.com</code>") {
+		t.Errorf("expected inline code with preserved email, got: %q", got2)
+	}
+
+	// 3. Links
+	input3 := "Check out [DexScreener](https://dexscreener.com/base/0x123)."
+	got3 := toTelegramHTML(input3)
+	if !strings.Contains(got3, `<a href="https://dexscreener.com/base/0x123">DexScreener</a>`) {
+		t.Errorf("expected HTML anchor tag, got: %q", got3)
+	}
+
+	// 4. HTML entity escaping (<, >, &)
+	input4 := "Market cap is > $36K & < $50K."
+	got4 := toTelegramHTML(input4)
+	if !strings.Contains(got4, "&gt;") || !strings.Contains(got4, "&lt;") || !strings.Contains(got4, "&amp;") {
+		t.Errorf("expected escaped entities, got: %q", got4)
+	}
+}
+
+func TestStripHTMLTags(t *testing.T) {
+	input := "• <b>Bot Behavior:</b> <code>code</code> &amp; test"
+	got := stripHTMLTags(input)
+	expected := "• Bot Behavior: code & test"
+	if got != expected {
+		t.Errorf("stripHTMLTags(%q) = %q; expected %q", input, got, expected)
+	}
+}
+
+func TestParseDMIntent(t *testing.T) {
+	cases := []struct {
+		prompt     string
+		wantOK     bool
+		wantUser   string
+		wantMsgSub string
+	}{
+		{
+			prompt:     "Dm @shigarakiXBT this link: https://x.com/cardtonic/status/2095950101445333355",
+			wantOK:     true,
+			wantUser:   "shigarakiXBT",
+			wantMsgSub: "https://x.com/cardtonic/status/2095950101445333355",
+		},
+		{
+			prompt:     "dm @skipp_dev check the logs",
+			wantOK:     true,
+			wantUser:   "skipp_dev",
+			wantMsgSub: "check the logs",
+		},
+		{
+			prompt:     "send dm to @someone: hello world",
+			wantOK:     true,
+			wantUser:   "someone",
+			wantMsgSub: "hello world",
+		},
+		{
+			prompt:     "what is the price of solana?",
+			wantOK:     false,
+		},
+	}
+
+	for _, c := range cases {
+		ok, user, msg := parseDMIntent(c.prompt)
+		if ok != c.wantOK {
+			t.Errorf("parseDMIntent(%q) ok=%v, want %v", c.prompt, ok, c.wantOK)
+			continue
+		}
+		if c.wantOK {
+			if !strings.EqualFold(user, c.wantUser) {
+				t.Errorf("parseDMIntent(%q) user=%q, want %q", c.prompt, user, c.wantUser)
+			}
+			if !strings.Contains(msg, c.wantMsgSub) {
+				t.Errorf("parseDMIntent(%q) msg=%q, want substring %q", c.prompt, msg, c.wantMsgSub)
+			}
+		}
+	}
+}

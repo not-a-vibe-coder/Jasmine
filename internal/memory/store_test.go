@@ -98,4 +98,18 @@ func TestHybridStoreInMemoryFallback(t *testing.T) {
 	if retrievedProfile.ActiveProjects != "DavidNzube101/shipp" || retrievedProfile.LifeContext != "CS student at FUTO, 300 level" {
 		t.Errorf("profile mismatch: %+v", retrievedProfile)
 	}
+
+	// Test GetUserIDByUsername
+	uid, err := store.GetUserIDByUsername(ctx, "skipp_dev")
+	if err != nil || uid != 100 {
+		t.Errorf("expected uid 100 for skipp_dev, got %d (err: %v)", uid, err)
+	}
+	uidAt, err := store.GetUserIDByUsername(ctx, "@skipp_dev")
+	if err != nil || uidAt != 100 {
+		t.Errorf("expected uid 100 for @skipp_dev, got %d (err: %v)", uidAt, err)
+	}
+	_, errNotFound := store.GetUserIDByUsername(ctx, "nonexistent_user")
+	if errNotFound == nil {
+		t.Errorf("expected error for nonexistent user")
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,7 @@ type HybridStore struct {
 	memSummary  map[int64]string
 	memProfiles map[int64]*UserProfile
 	activeChats map[int64]bool
+	memUserIDs  map[string]int64
 }
 
 func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
@@ -32,6 +34,7 @@ func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
 		memSummary:  make(map[int64]string),
 		memProfiles: make(map[int64]*UserProfile),
 		activeChats: make(map[int64]bool),
+		memUserIDs:  make(map[string]int64),
 	}
 
 	// 1. Initialize Postgres if available
@@ -130,6 +133,9 @@ func (s *HybridStore) SaveMessage(ctx context.Context, chatID int64, senderID in
 		s.memMessages[chatID] = s.memMessages[chatID][len(s.memMessages[chatID])-50:]
 	}
 	s.activeChats[chatID] = true
+	if senderID != 0 && username != "" {
+		s.memUserIDs[strings.ToLower(username)] = senderID
+	}
 	s.mu.Unlock()
 
 	// Redis caching
@@ -142,6 +148,9 @@ func (s *HybridStore) SaveMessage(ctx context.Context, chatID int64, senderID in
 			pipe.LTrim(ctx, key, -50, -1) // keep last 50
 			pipe.Expire(ctx, key, 7*24*time.Hour)
 			pipe.SAdd(ctx, "shipp:active_chats", chatID)
+			if senderID != 0 && username != "" {
+				pipe.HSet(ctx, "shipp:user_ids", strings.ToLower(username), senderID)
+			}
 			_, _ = pipe.Exec(ctx)
 		}
 	}
@@ -157,6 +166,49 @@ func (s *HybridStore) SaveMessage(ctx context.Context, chatID int64, senderID in
 	}
 
 	return nil
+}
+
+func (s *HybridStore) GetUserIDByUsername(ctx context.Context, username string) (int64, error) {
+	clean := strings.ToLower(strings.TrimPrefix(username, "@"))
+	if clean == "" {
+		return 0, fmt.Errorf("empty username")
+	}
+
+	// 1. In-memory
+	s.mu.RLock()
+	if uid, ok := s.memUserIDs[clean]; ok && uid != 0 {
+		s.mu.RUnlock()
+		return uid, nil
+	}
+	s.mu.RUnlock()
+
+	// 2. Redis
+	if s.rdb != nil {
+		val, err := s.rdb.HGet(ctx, "shipp:user_ids", clean).Result()
+		if err == nil && val != "" {
+			if id, parseErr := strconv.ParseInt(val, 10, 64); parseErr == nil && id != 0 {
+				s.mu.Lock()
+				s.memUserIDs[clean] = id
+				s.mu.Unlock()
+				return id, nil
+			}
+		}
+	}
+
+	// 3. Postgres
+	if s.db != nil {
+		query := `SELECT sender_id FROM chat_messages WHERE LOWER(sender_username) = LOWER($1) ORDER BY id DESC LIMIT 1`
+		var senderID int64
+		err := s.db.QueryRowContext(ctx, query, clean).Scan(&senderID)
+		if err == nil && senderID != 0 {
+			s.mu.Lock()
+			s.memUserIDs[clean] = senderID
+			s.mu.Unlock()
+			return senderID, nil
+		}
+	}
+
+	return 0, fmt.Errorf("user %s not found in records", clean)
 }
 
 func (s *HybridStore) GetRecentMessages(ctx context.Context, chatID int64, limit int) ([]Message, error) {

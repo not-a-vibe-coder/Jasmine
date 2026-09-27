@@ -492,7 +492,7 @@ Operational Superpowers & Tools:
 11. Ephemeral Sandbox Runner:
     - Trigger 'run_sandbox_task' when asked to execute bash commands, run test suites, execute python/node/bash scripts, scrape data, or audit repositories. Runs in an isolated Linux runner asynchronously.
 12. Direct Telegram Messaging:
-    - Trigger 'send_dm' when owners ask you to message, text, or ping someone in DM. Only use for Telegram usernames, never email addresses.
+    - Trigger 'send_dm' when owners ask you to message, text, DM, or ping someone in DM (e.g. "dm @user <msg>", "send this link to @user in dm"). Only use for Telegram usernames, never email addresses.
 13. Telegram Groups & Forum Topics:
     - If asked what groups you belong to, are in, or have been added to, ALWAYS trigger 'get_active_groups'. Never guess or claim you don't know without checking.
     - If 'get_group_topics' returns a list of forum topics, you are aware of those project threads and can reference them naturally in conversation.
@@ -964,6 +964,20 @@ func (c *Client) RunAgenticLoop(
 			if c.geminiKey != "" {
 				fallback, ferr := c.generateReplyGemini(ctx, senderUsername, isOwner, history, userPrompt, summary, profile)
 				if ferr == nil && fallback != nil {
+					if len(fallback.ToolCalls) > 0 {
+						for _, tc := range fallback.ToolCalls {
+							result.ToolsUsed = append(result.ToolsUsed, tc.Function.Name)
+							toolResult := executor(tc.Function.Name, tc.Function.Arguments)
+							log.Printf("[AI] AgenticLoop Gemini fallback: ran %s -> %d bytes result", tc.Function.Name, len(toolResult))
+							followup, gerr := c.generateToolFollowupGemini(ctx, senderUsername, isOwner, userPrompt, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult, profile)
+							if gerr == nil && strings.TrimSpace(followup) != "" {
+								result.FinalText = strings.TrimSpace(followup)
+								return result
+							}
+							result.FinalText = toolResult
+							return result
+						}
+					}
 					result.FinalText = strings.TrimSpace(fallback.Content)
 				}
 			}

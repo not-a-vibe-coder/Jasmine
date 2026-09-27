@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"math/rand"
@@ -281,11 +282,11 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		username = msg.From.FirstName
 	}
 
-	// Record private chat ID for DMs
-	if msg.From != nil && msg.From.UserName != "" && msg.Chat.IsPrivate() {
+	// Record user ID for direct messaging (in Telegram, user's private chat ID is their numeric From.ID)
+	if msg.From != nil && msg.From.UserName != "" {
 		uClean := strings.ToLower(strings.TrimPrefix(msg.From.UserName, "@"))
 		b.dmMu.Lock()
-		b.userDMChats[uClean] = msg.Chat.ID
+		b.userDMChats[uClean] = msg.From.ID
 		b.dmMu.Unlock()
 	}
 
@@ -608,6 +609,20 @@ func (b *Bot) handleNLPAndChat(
 	//     call github_edit_file directly to avoid clarification loops.
 	if isOwner {
 		if b.trySmartDispatch(ctx, msg, prompt, lowerPrompt, username, isOwner, history) {
+			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
+			return
+		}
+
+		// 2c. Direct DM dispatch: if owner says "dm @user <msg>", dispatch immediately
+		if ok, targetUser, dmText := parseDMIntent(prompt); ok {
+			b.sendChatAction(chatID, tgbotapi.ChatTyping)
+			argsJSON, _ := json.Marshal(map[string]interface{}{
+				"recipient": targetUser,
+				"message":   dmText,
+			})
+			toolResult := b.executeToolCall(ctx, chatID, "send_dm", string(argsJSON), username, isOwner)
+			b.sendReply(chatID, msg.MessageID, toolResult)
+			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
 			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 			return
 		}
@@ -1337,8 +1352,20 @@ func (b *Bot) executeToolCall(
 		dmChatID, exists := b.userDMChats[targetUser]
 		b.dmMu.RUnlock()
 
-		if !exists {
-			return fmt.Sprintf("Cannot DM @%s directly yet. Telegram prohibits bots from sending unprompted DMs until the user initiates a conversation by sending /start to @%s.", targetUser, b.api.Self.UserName)
+		if !exists || dmChatID == 0 {
+			if b.memory != nil {
+				if uid, err := b.memory.GetUserIDByUsername(ctx, targetUser); err == nil && uid != 0 {
+					dmChatID = uid
+					exists = true
+					b.dmMu.Lock()
+					b.userDMChats[targetUser] = uid
+					b.dmMu.Unlock()
+				}
+			}
+		}
+
+		if !exists || dmChatID == 0 {
+			return fmt.Sprintf("cant dm @%s directly yet because telegram restricts bots from cold-dm'ing users until they message the bot first. tell @%s to send /start to @%s.", targetUser, targetUser, b.api.Self.UserName)
 		}
 
 		dmMsg := tgbotapi.NewMessage(dmChatID, fmt.Sprintf("Message from @%s via Shipp:\n\n%s", username, args.Message))
@@ -1994,12 +2021,106 @@ var leakedFunctionRegex = regexp.MustCompile(`(?si)<function(?:=|\s+name=)[^>]*>
 var leakedDeclarationRegex = regexp.MustCompile(`(?si)(?:declaration|call):default_api:[a-zA-Z0-9_]+\s*\{.*?\}?`)
 var eagerPromptRegex = regexp.MustCompile(`(?i)(?:,\s*|\.\s*|\s+)(?:what(?:'s|\s+is)\s+next\??|what\s+are\s+we\s+building(?:\s+next)?\??|what(?:'s|\s+is)\s+(?:the\s+)?(?:next\s+)?move\??|what\s+are\s+we\s+cooking(?:\s+next)?\??|what\s+are\s+we\s+doing(?:\s+next)?\??|how\s+can\s+i\s+help(?:\s+you)?\??)\s*$`)
 
+var dmIntentRegex = regexp.MustCompile(`(?i)^(?:/dm|dm|send\s+dm\s+to|dm\s+to)\s+@?([a-zA-Z0-9_]{3,32})[\s:,]+(.+)$`)
+
+func parseDMIntent(prompt string) (bool, string, string) {
+	trimmed := strings.TrimSpace(prompt)
+	m := dmIntentRegex.FindStringSubmatch(trimmed)
+	if len(m) == 3 {
+		target := strings.TrimSpace(m[1])
+		msg := strings.TrimSpace(m[2])
+		if target != "" && msg != "" {
+			return true, target, msg
+		}
+	}
+	return false, "", ""
+}
+
+// toTelegramHTML converts Markdown/text to clean Telegram-compatible HTML.
+// Telegram HTML avoids entity-parsing crashes caused by underscores in usernames/emails/URLs.
+func toTelegramHTML(text string) string {
+	if text == "" {
+		return ""
+	}
+
+	// 1. Normalize bullet points (* or - at line start) to clean Unicode bullet (•)
+	// This prevents "* *Bold Title*" syntax collisions.
+	bulletRegex := regexp.MustCompile(`(?m)^[\t ]*[\*\-][\t ]+`)
+	text = bulletRegex.ReplaceAllString(text, "• ")
+
+	// 2. Protect multi-line code blocks
+	var codeBlocks []string
+	codeBlockRegex := regexp.MustCompile("(?s)```(?:[a-zA-Z0-9_+-]+)?\n?(.*?)```")
+	text = codeBlockRegex.ReplaceAllStringFunc(text, func(m string) string {
+		sub := codeBlockRegex.FindStringSubmatch(m)
+		if len(sub) > 1 {
+			content := html.EscapeString(sub[1])
+			idx := len(codeBlocks)
+			codeBlocks = append(codeBlocks, fmt.Sprintf("<pre><code>%s</code></pre>", content))
+			return fmt.Sprintf("___CODE_BLOCK_%d___", idx)
+		}
+		return m
+	})
+
+	// 3. Protect inline code
+	var inlineCodes []string
+	inlineCodeRegex := regexp.MustCompile("`([^`\n]+)`")
+	text = inlineCodeRegex.ReplaceAllStringFunc(text, func(m string) string {
+		sub := inlineCodeRegex.FindStringSubmatch(m)
+		if len(sub) > 1 {
+			content := html.EscapeString(sub[1])
+			idx := len(inlineCodes)
+			inlineCodes = append(inlineCodes, fmt.Sprintf("<code>%s</code>", content))
+			return fmt.Sprintf("___INLINE_CODE_%d___", idx)
+		}
+		return m
+	})
+
+	// 4. HTML escape remaining plain text
+	text = html.EscapeString(text)
+
+	// 5. Convert links: [text](url) -> <a href="url">text</a>
+	linkRegex := regexp.MustCompile(`\[([^\]\n]+)\]\((https?://[^)\s]+)\)`)
+	text = linkRegex.ReplaceAllString(text, `<a href="$2">$1</a>`)
+
+	// 6. Convert **bold** -> <b>bold</b>
+	boldRegex := regexp.MustCompile(`\*\*(.+?)\*\*`)
+	text = boldRegex.ReplaceAllString(text, "<b>$1</b>")
+
+	// 7. Convert single *bold* (markdown legacy) -> <b>bold</b>
+	singleBoldRegex := regexp.MustCompile(`(?:^|[\s(])\*([^*\n\t]+?)\*(?:[\s),.:!?]|$)`)
+	text = singleBoldRegex.ReplaceAllStringFunc(text, func(m string) string {
+		start := strings.Index(m, "*")
+		end := strings.LastIndex(m, "*")
+		if start >= 0 && end > start {
+			return m[:start] + "<b>" + m[start+1:end] + "</b>" + m[end+1:]
+		}
+		return m
+	})
+
+	// 8. Restore code blocks and inline code
+	for idx, code := range inlineCodes {
+		text = strings.ReplaceAll(text, fmt.Sprintf("___INLINE_CODE_%d___", idx), code)
+	}
+	for idx, block := range codeBlocks {
+		text = strings.ReplaceAll(text, fmt.Sprintf("___CODE_BLOCK_%d___", idx), block)
+	}
+
+	return text
+}
+
+var htmlTagRegex = regexp.MustCompile(`<[^>]*>`)
+
+func stripHTMLTags(s string) string {
+	s = htmlTagRegex.ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+	return strings.TrimSpace(s)
+}
+
 // toTelegramMarkdown converts GitHub-flavored markdown to Telegram Markdown v1.
-// Telegram uses *bold* and _italic_, not **bold** / __italic__.
+// Kept for backward-compatibility with tests.
 func toTelegramMarkdown(text string) string {
-	// **bold** → *bold*
 	text = doubleBoldRegex.ReplaceAllString(text, "*$1*")
-	// __italic__ → _italic_  (only if not already single-underscore)
 	text = doubleUnderscoreRegex.ReplaceAllString(text, "_$1_")
 	return text
 }
@@ -2224,7 +2345,7 @@ func (b *Bot) sendReply(chatID int64, replyToMsgID int, text string) {
 }
 
 func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, text string) {
-	text = toTelegramMarkdown(cleanNoEmojis(text))
+	htmlText := toTelegramHTML(cleanNoEmojis(text))
 
 	threadID := 0
 	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
@@ -2232,18 +2353,19 @@ func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, 
 	}
 
 	if threadID != 0 {
-		b.sendViaThreadAPI(ctx, chatID, threadID, replyToMsgID, text)
+		b.sendViaThreadAPI(ctx, chatID, threadID, replyToMsgID, htmlText)
 		return
 	}
 
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown"
+	msg := tgbotapi.NewMessage(chatID, htmlText)
+	msg.ParseMode = "HTML"
 	if replyToMsgID > 0 {
 		msg.ReplyToMessageID = replyToMsgID
 	}
 	_, err := b.api.Send(msg)
 	if err != nil {
 		msg.ParseMode = ""
+		msg.Text = stripHTMLTags(htmlText)
 		_, _ = b.api.Send(msg)
 	}
 }
@@ -2254,7 +2376,7 @@ func (b *Bot) sendSimpleMessage(chatID int64, text string) {
 }
 
 func (b *Bot) sendSimpleMessageCtx(ctx context.Context, chatID int64, text string) {
-	text = toTelegramMarkdown(cleanNoEmojis(text))
+	htmlText := toTelegramHTML(cleanNoEmojis(text))
 
 	threadID := 0
 	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
@@ -2262,34 +2384,36 @@ func (b *Bot) sendSimpleMessageCtx(ctx context.Context, chatID int64, text strin
 	}
 
 	if threadID != 0 {
-		b.sendViaThreadAPI(ctx, chatID, threadID, 0, text)
+		b.sendViaThreadAPI(ctx, chatID, threadID, 0, htmlText)
 		return
 	}
 
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown"
+	msg := tgbotapi.NewMessage(chatID, htmlText)
+	msg.ParseMode = "HTML"
 	_, err := b.api.Send(msg)
 	if err != nil {
 		msg.ParseMode = ""
+		msg.Text = stripHTMLTags(htmlText)
 		_, _ = b.api.Send(msg)
 	}
 }
 
 // sendViaThreadAPI sends a message into a specific Telegram forum thread using
 // the raw MakeRequest path, since tgbotapi v5.5.1 BaseChat lacks MessageThreadID.
-func (b *Bot) sendViaThreadAPI(_ context.Context, chatID int64, threadID int, replyToMsgID int, text string) {
+func (b *Bot) sendViaThreadAPI(_ context.Context, chatID int64, threadID int, replyToMsgID int, htmlText string) {
 	params := tgbotapi.Params{}
 	params.AddNonZero64("chat_id", chatID)
-	params.AddNonEmpty("text", text)
-	params.AddNonEmpty("parse_mode", "Markdown")
+	params.AddNonEmpty("text", htmlText)
+	params.AddNonEmpty("parse_mode", "HTML")
 	params.AddNonZero("message_thread_id", threadID)
 	if replyToMsgID > 0 {
 		params.AddNonZero("reply_to_message_id", replyToMsgID)
 	}
 	_, err := b.api.MakeRequest("sendMessage", params)
 	if err != nil {
-		// Fallback: retry without parse mode
+		// Fallback: retry without parse mode and strip any broken HTML tags
 		params["parse_mode"] = ""
+		params["text"] = stripHTMLTags(htmlText)
 		_, _ = b.api.MakeRequest("sendMessage", params)
 	}
 }
