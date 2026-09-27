@@ -41,6 +41,13 @@ func TestSystemPrompt(t *testing.T) {
 	if !strings.Contains(profilePrompt, "DavidNzube101/shipp") || !strings.Contains(profilePrompt, "FUTO 300 level CS") {
 		t.Errorf("expected profile context to be injected into prompt")
 	}
+
+	// Test Chat Context (DM vs GC) injection
+	dmContext := "- YOU ARE IN A DIRECT 1-ON-1 PRIVATE CHAT (DM) WITH @skipp_dev."
+	dmPrompt := client.systemPrompt("skipp_dev", true, profile, dmContext)
+	if !strings.Contains(dmPrompt, "Chat Type & Environment:") || !strings.Contains(dmPrompt, "DIRECT 1-ON-1 PRIVATE CHAT") {
+		t.Errorf("expected chat environment context to be injected into system prompt")
+	}
 }
 
 func TestToolsDefinition(t *testing.T) {

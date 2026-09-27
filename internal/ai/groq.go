@@ -402,7 +402,7 @@ func (c *Client) buildTools() []ToolDefinition {
 	}
 }
 
-func (c *Client) systemPrompt(senderUsername string, isOwner bool, profile *memory.UserProfile) string {
+func (c *Client) systemPrompt(senderUsername string, isOwner bool, profile *memory.UserProfile, chatContext ...string) string {
 	ownersStr := strings.Join(c.owners, ", @")
 	if ownersStr != "" {
 		ownersStr = "@" + ownersStr
@@ -432,9 +432,14 @@ func (c *Client) systemPrompt(senderUsername string, isOwner bool, profile *memo
 		}
 	}
 
+	chatEnvironment := ""
+	if len(chatContext) > 0 && chatContext[0] != "" {
+		chatEnvironment = fmt.Sprintf("\n\nChat Type & Environment:\n%s", chatContext[0])
+	}
+
 	return fmt.Sprintf(`You are Shipp (@Shipp0Bot). You were built by %s to be the group's dev companion.
 
-%s%s
+%s%s%s
 
 Identity & Self-Introduction Rules (CRITICAL - read carefully):
 - You are i'm shipp. When anyone asks who you are, what you are, or introduces you, ALWAYS answer in FIRST PERSON. Never say "shipp is a..." or "think of it as...". That is cringe and reads like a product brochure.
@@ -503,9 +508,9 @@ Operational Superpowers & Tools:
 15. HARD FORMATTING CONSTRAINTS:
     - Strictly ZERO emojis anywhere. No exceptions.
     - Strictly NO em dashes ('—') or en dashes ('–'). Use commas, periods, colons, or simple hyphens (' - ').
-    - Strictly NO eager follow-up questions or customer-service sign-offs (e.g. "what's next?", "what are we building next?", "what's the move?", "what are we cooking?", "how can I help?"). Answer the question, deliver the facts, and stop talking. Silence is fine.
+    - Strictly NO eager follow-up questions or customer-service sign-offs (e.g. "what's next?", "what are we building next?", "what's the move?", "what are we cooking?", "who else is building?", "anyone actually shipping?", "are we staring at charts?", "how can I help?"). Answer the question, deliver the facts, and stop talking. Silence is fine. NEVER ask questions just to keep the conversation going like a bot.
     - Strictly NO bulky tables or unsolicited bulleted lists.
-    - Keep normal chat answers to 1-2 conversational sentences.`, ownersStr, roleNote, profileSection)
+    - Keep normal chat answers to 1-2 conversational sentences.`, ownersStr, roleNote, profileSection, chatEnvironment)
 }
 
 type AIResponse struct {
@@ -762,13 +767,14 @@ func (c *Client) GenerateReply(
 	currentPrompt string,
 	summary string,
 	profile *memory.UserProfile,
+	chatContext ...string,
 ) (*AIResponse, error) {
 	var msgs []ChatMessage
 
 	// System prompt
 	msgs = append(msgs, ChatMessage{
 		Role:    "system",
-		Content: c.systemPrompt(senderUsername, isOwner, profile),
+		Content: c.systemPrompt(senderUsername, isOwner, profile, chatContext...),
 	})
 
 	// Add summary if available
@@ -865,13 +871,14 @@ func (c *Client) RunAgenticLoop(
 	summary string,
 	profile *memory.UserProfile,
 	executor ToolExecutor,
+	chatContext ...string,
 ) AgenticResult {
 	const maxIterations = 5
 
 	result := AgenticResult{}
 
 	// Build the base message list (system + summary + history + current prompt)
-	sysPrompt := c.systemPrompt(senderUsername, isOwner, profile)
+	sysPrompt := c.systemPrompt(senderUsername, isOwner, profile, chatContext...)
 	var baseMsgs []ChatMessage
 	baseMsgs = append(baseMsgs, ChatMessage{Role: "system", Content: sysPrompt})
 	if summary != "" {
@@ -948,7 +955,7 @@ func (c *Client) RunAgenticLoop(
 				}
 
 				if lastToolResult != "" && c.geminiKey != "" {
-					followup, gerr := c.generateToolFollowupGemini(ctx, senderUsername, isOwner, userPrompt, lastToolName, lastToolCallID, lastToolArgs, lastToolResult, profile)
+					followup, gerr := c.generateToolFollowupGemini(ctx, senderUsername, isOwner, userPrompt, lastToolName, lastToolCallID, lastToolArgs, lastToolResult, profile, chatContext...)
 					if gerr == nil && strings.TrimSpace(followup) != "" {
 						result.FinalText = strings.TrimSpace(followup)
 						return result
@@ -962,14 +969,14 @@ func (c *Client) RunAgenticLoop(
 
 			// No tools were executed yet - standard Gemini reply
 			if c.geminiKey != "" {
-				fallback, ferr := c.generateReplyGemini(ctx, senderUsername, isOwner, history, userPrompt, summary, profile)
+				fallback, ferr := c.generateReplyGemini(ctx, senderUsername, isOwner, history, userPrompt, summary, profile, chatContext...)
 				if ferr == nil && fallback != nil {
 					if len(fallback.ToolCalls) > 0 {
 						for _, tc := range fallback.ToolCalls {
 							result.ToolsUsed = append(result.ToolsUsed, tc.Function.Name)
 							toolResult := executor(tc.Function.Name, tc.Function.Arguments)
 							log.Printf("[AI] AgenticLoop Gemini fallback: ran %s -> %d bytes result", tc.Function.Name, len(toolResult))
-							followup, gerr := c.generateToolFollowupGemini(ctx, senderUsername, isOwner, userPrompt, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult, profile)
+							followup, gerr := c.generateToolFollowupGemini(ctx, senderUsername, isOwner, userPrompt, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult, profile, chatContext...)
 							if gerr == nil && strings.TrimSpace(followup) != "" {
 								result.FinalText = strings.TrimSpace(followup)
 								return result
@@ -1272,9 +1279,12 @@ func (c *Client) GenerateProactiveMessage(ctx context.Context, recentMessages []
 		contextSnippet = sb.String()
 	}
 
-	prompt := `You are Shipp (@Shipp0Bot), dropping a spontaneous, natural message into your group chat.
-Be witty, observant, and chill. You can talk about what people were just saying, ask what everyone's cooking/building today, drop a quick crypto observation, or just start a fun conversation.
-Keep it short (1-2 sentences max). Do NOT introduce yourself or say "Hey guys, as an AI...". Sound like an actual human friend in the GC.`
+	prompt := `You are Shipp (@Shipp0Bot), dropping a spontaneous, dry observation into a Telegram group chat.
+Be witty, observant, and chill. Reference what people were just saying or drop a sharp, realistic observation about the market or code.
+CRITICAL RULES:
+- Strictly NEVER ask questions like "who else is building?", "what is everyone cooking?", "are we staring at charts?", "what are we building next?", or any questions at all.
+- Deliver a short, dry, or witty thought and stop. No eager questions.
+- Keep it to 1 sentence max. Strictly zero emojis, no em dashes.`
 
 	if contextSnippet != "" {
 		prompt += fmt.Sprintf("\n\nRecent chat context:\n%s", contextSnippet)
@@ -1283,7 +1293,7 @@ Keep it short (1-2 sentences max). Do NOT introduce yourself or say "Hey guys, a
 	reqBody := ChatCompletionRequest{
 		Model: c.model,
 		Messages: []ChatMessage{
-			{Role: "system", Content: "You are Shipp, a sharp personal AI companion in a Telegram group chat."},
+			{Role: "system", Content: "You are Shipp, a sharp personal AI companion in a Telegram group chat. You drop observations, never generic survey questions."},
 			{Role: "user", Content: prompt},
 		},
 		Temperature: 0.85,
@@ -1297,7 +1307,7 @@ Keep it short (1-2 sentences max). Do NOT introduce yourself or say "Hey guys, a
 	if len(resp.Choices) > 0 {
 		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
 	}
-	return "yo, what is everyone building today?", nil
+	return "charts are moving, back to building.", nil
 }
 
 var defaultGroqModelPool = []string{

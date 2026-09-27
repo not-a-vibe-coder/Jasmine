@@ -178,8 +178,9 @@ func (c *Client) generateReplyGemini(
 	currentPrompt string,
 	summary string,
 	profile *memory.UserProfile,
+	chatContext ...string,
 ) (*AIResponse, error) {
-	sysPrompt := c.systemPrompt(senderUsername, isOwner, profile)
+	sysPrompt := c.systemPrompt(senderUsername, isOwner, profile, chatContext...)
 	if summary != "" {
 		sysPrompt += fmt.Sprintf("\n\n[Past Chat Summary Context]: %s", summary)
 	}
@@ -279,8 +280,9 @@ func (c *Client) generateToolFollowupGemini(
 	toolArgs string,
 	toolResult string,
 	profile *memory.UserProfile,
+	chatContext ...string,
 ) (string, error) {
-	sysPrompt := c.systemPrompt(senderUsername, isOwner, profile)
+	sysPrompt := c.systemPrompt(senderUsername, isOwner, profile, chatContext...)
 	req := geminiChatReq{
 		SystemInstruction: &geminiChatContent{
 			Parts: []geminiChatPart{{Text: sysPrompt}},

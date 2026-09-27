@@ -645,12 +645,23 @@ func (b *Bot) handleNLPAndChat(
 		strings.Contains(lowerPrompt, "execute") ||
 		strings.Contains(lowerPrompt, "sandbox")
 
+	var chatContext string
+	if msg.Chat.IsPrivate() {
+		chatContext = fmt.Sprintf("- YOU ARE IN A DIRECT 1-ON-1 PRIVATE CHAT (DM) WITH @%s.\n- There is nobody else in this chat. Do NOT say 'who else', 'what is everyone doing', 'anyone here', or speak to an imaginary room. Speak directly to @%s.\n- Strictly do NOT ask eager follow-up questions.", username, username)
+	} else {
+		title := msg.Chat.Title
+		if title == "" {
+			title = "this group"
+		}
+		chatContext = fmt.Sprintf("- YOU ARE IN A TELEGRAM GROUP CHAT: %q.\n- Speak to the room or to @%s as appropriate.\n- Strictly do NOT ask eager follow-up questions.", title, username)
+	}
+
 	// Quick pre-flight: if prompt explicitly mentions a GitHub URL or sandbox,
 	// send a working ack before the loop starts so the chat doesn't feel frozen.
 	if isOwner && mightBeAsync && (extractRepoFromHistory(nil, prompt) != "" || strings.Contains(lowerPrompt, "sandbox") || strings.Contains(lowerPrompt, "run sandbox")) {
 		b.sendReply(chatID, msg.MessageID, b.getRandomWorkingAck())
 		go func() {
-			agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor)
+			agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor, chatContext)
 			finalText := agResult.FinalText
 			if strings.TrimSpace(finalText) == "" {
 				finalText = b.getRandomEmptyAck()
@@ -662,7 +673,7 @@ func (b *Bot) handleNLPAndChat(
 		return
 	}
 
-	agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor)
+	agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor, chatContext)
 
 	// 4. Intercept hallucinated git/merge actions from the final text (safety net)
 	finalText := strings.TrimSpace(agResult.FinalText)
@@ -1637,6 +1648,12 @@ func (b *Bot) triggerProactiveMessage(ctx context.Context) {
 
 	now := time.Now()
 	for _, chatID := range shuffled {
+		// NEVER send proactive messages to private chats! In Telegram, private DMs have chatID > 0.
+		// Proactive messages are strictly for group chats (chatID < 0).
+		if chatID > 0 {
+			continue
+		}
+
 		b.proactiveMu.RLock()
 		disabled := b.proactiveDisabled[chatID]
 		lastSent := b.lastProactiveTime[chatID]
@@ -2019,7 +2036,7 @@ var doubleUnderscoreRegex = regexp.MustCompile(`__(.+?)__`)
 var leakedToolCallRegex = regexp.MustCompile(`(?si)<(?:toolcall|tool_call)[^>]*>.*?</(?:toolcall|tool_call)>`)
 var leakedFunctionRegex = regexp.MustCompile(`(?si)<function(?:=|\s+name=)[^>]*>.*?</function>`)
 var leakedDeclarationRegex = regexp.MustCompile(`(?si)(?:declaration|call):default_api:[a-zA-Z0-9_]+\s*\{.*?\}?`)
-var eagerPromptRegex = regexp.MustCompile(`(?i)(?:,\s*|\.\s*|\s+)(?:what(?:'s|\s+is)\s+next\??|what\s+are\s+we\s+building(?:\s+next)?\??|what(?:'s|\s+is)\s+(?:the\s+)?(?:next\s+)?move\??|what\s+are\s+we\s+cooking(?:\s+next)?\??|what\s+are\s+we\s+doing(?:\s+next)?\??|how\s+can\s+i\s+help(?:\s+you)?\??)\s*$`)
+var eagerPromptRegex = regexp.MustCompile(`(?i)(?:,\s*|\.\s*|\s+)(?:what(?:'s|\s+is)\s+next\??|what\s+are\s+we\s+building(?:\s+next)?\??|what(?:'s|\s+is)\s+(?:the\s+)?(?:next\s+)?move\??|what\s+are\s+we\s+cooking(?:\s+next)?\??|what\s+are\s+we\s+doing(?:\s+next)?\??|how\s+can\s+i\s+help(?:\s+you)?\??|who\s+else\s+is\s+building[^?.!\n]*\??|anyone\s+(?:else\s+)?(?:actually\s+)?(?:shipping|building)[^?.!\n]*\??|are\s+we\s+all\s+just\s+staring\s+at\s+charts\??)\s*$`)
 
 var dmIntentRegex = regexp.MustCompile(`(?i)^(?:/dm|dm|send\s+dm\s+to|dm\s+to)\s+@?([a-zA-Z0-9_]{3,32})[\s:,]+(.+)$`)
 
@@ -2446,11 +2463,10 @@ var dynamicVisionFallbacks = []string{
 }
 
 var dynamicEmptyAcks = []string{
-	"yo, i'm with you.",
-	"heard that, what's good?",
-	"got you, what's next?",
-	"locked in, talk to me.",
-	"all eyes anon, what's the move?",
+	"heard you.",
+	"locked in.",
+	"got that.",
+	"loud and clear.",
 }
 
 var dynamicWorkingAcks = []string{

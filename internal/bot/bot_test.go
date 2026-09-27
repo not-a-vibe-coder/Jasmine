@@ -102,6 +102,27 @@ func TestCleanNoEmojisAndEmDashes(t *testing.T) {
 	}
 }
 
+func TestEagerPromptScrubbing(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Pushed to main. What are we building next?", "Pushed to main"},
+		{"Pushed to main. What's next?", "Pushed to main"},
+		{"Got it sorted. What are we cooking?", "Got it sorted"},
+		{"The build passed. Who else is building today?", "The build passed"},
+		{"Everything is deployed. Anyone actually shipping this weekend?", "Everything is deployed"},
+		{"Chart looks green. Are we all just staring at charts?", "Chart looks green"},
+	}
+
+	for _, tt := range tests {
+		got := cleanNoEmojis(tt.input)
+		if got != tt.expected {
+			t.Errorf("cleanNoEmojis(%q) = %q; want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
 func TestExtractRepoFromHistory(t *testing.T) {
 	// 1. In prompt
 	prompt := "Go to https://github.com/DavidNzube101/shipp and update the description"
