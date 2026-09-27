@@ -39,6 +39,12 @@ func TestSystemPrompt(t *testing.T) {
 	if !strings.Contains(ownerPrompt, "Strictly NO hallucinated or fabricated project architectures") {
 		t.Errorf("expected system prompt to forbid fabricated architectures")
 	}
+	if !strings.Contains(ownerPrompt, "STRICT TRANSACTION RULES") {
+		t.Errorf("expected system prompt to include STRICT TRANSACTION RULES")
+	}
+	if !strings.Contains(ownerPrompt, "NEVER simulate, pretend, claim, or promise in text that you have sent") {
+		t.Errorf("expected system prompt to ban fake transfer claims")
+	}
 
 	// Test Non-Owner prompt
 	guestPrompt := client.systemPrompt("anon123", false, nil)
@@ -243,6 +249,9 @@ func TestLiveModelDynamicToolFollowup(t *testing.T) {
 	rawBalData := `{"total_usd_value": "$1.30", "active_holdings": [{"chain": "robinhood", "token": "ETH", "amount": "0.0004835", "usd": "$1.30"}], "dry_chains": ["solana", "base", "ethereum", "arbitrum", "bnb"]}`
 	outBal, err := c.GenerateToolFollowup(ctx, "skipp_dev", true, "How much you got?", "get_balances", "call_1", `{}`, rawBalData, nil)
 	if err != nil {
+		if strings.Contains(err.Error(), "503") || strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "rate limit") || strings.Contains(err.Error(), "exhausted") || strings.Contains(err.Error(), "UNAVAILABLE") {
+			t.Skipf("skipping live test due to upstream API limits/service availability: %v", err)
+		}
 		t.Fatalf("GenerateToolFollowup balance failed: %v", err)
 	}
 	t.Logf("Generated dynamic balance followup: %s", outBal)
@@ -254,6 +263,9 @@ func TestLiveModelDynamicToolFollowup(t *testing.T) {
 	rawAddrData := `{"solana_address": "8N3V7dZKpU19kL", "evm_address": "0x4b7e1234567890", "supported_evm_chains": ["base", "robinhood", "ethereum", "arbitrum", "bnb"]}`
 	outAddr, err := c.GenerateToolFollowup(ctx, "skipp_dev", true, "where can i send you some funds?", "get_wallet_address", "call_2", `{}`, rawAddrData, nil)
 	if err != nil {
+		if strings.Contains(err.Error(), "503") || strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "rate limit") || strings.Contains(err.Error(), "exhausted") || strings.Contains(err.Error(), "UNAVAILABLE") {
+			t.Skipf("skipping live test due to upstream API limits/service availability: %v", err)
+		}
 		t.Fatalf("GenerateToolFollowup address failed: %v", err)
 	}
 	t.Logf("Generated dynamic address followup: %s", outAddr)

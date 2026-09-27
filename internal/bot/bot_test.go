@@ -966,6 +966,75 @@ func TestStripLeadingMention(t *testing.T) {
 	}
 }
 
+func TestExtractSendAmount(t *testing.T) {
+	tests := []struct {
+		input string
+		want  float64
+	}{
+		{"send 0.05 eth to 0xC21edC70c41b7a13161710149B02C5E90eaDDf78", 0.05},
+		{"can you send me 30 cents?", 0.30},
+		{"send 1.25 sol", 1.25},
+		{"just a regular message", 0.0},
+		{"0xC21edC70c41b7a13161710149B02C5E90eaDDf78", 0.0},
+	}
+
+	for _, tt := range tests {
+		got := extractSendAmount(tt.input)
+		if got != tt.want {
+			t.Errorf("extractSendAmount(%q) = %f; want %f", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestTryInterceptSendCrypto(t *testing.T) {
+	b := &Bot{
+		cfg: &config.Config{
+			Owners: []string{"skipp_dev"},
+		},
+	}
+	ctx := context.Background()
+
+	// Scenario 1: Owner asks to send funds without an address, LLM hallucinates transfer claim
+	prompt1 := "can you send me 30 cents?"
+	reply1 := "got 3.30 on rh, sending the thirty cents over now"
+	intercepted1, newReply1 := b.tryInterceptSendCrypto(ctx, nil, prompt1, strings.ToLower(prompt1), "skipp_dev", true, nil, reply1, []string{"get_balances"})
+	if !intercepted1 {
+		t.Errorf("expected scenario 1 to be intercepted")
+	}
+	if !strings.Contains(newReply1, "drop your recipient wallet address") {
+		t.Errorf("expected scenario 1 to prompt for wallet address, got: %s", newReply1)
+	}
+	if !strings.Contains(newReply1, "got 3.30 on rh") {
+		t.Errorf("expected scenario 1 to preserve balance prefix, got: %s", newReply1)
+	}
+	if strings.Contains(newReply1, "sending") {
+		t.Errorf("expected scenario 1 not to claim sending, got: %s", newReply1)
+	}
+
+	// Scenario 2: Non-owner tries to send funds or LLM hallucinates transfer
+	intercepted2, newReply2 := b.tryInterceptSendCrypto(ctx, nil, prompt1, strings.ToLower(prompt1), "anon123", false, nil, reply1, []string{"get_balances"})
+	if !intercepted2 {
+		t.Errorf("expected scenario 2 to be intercepted")
+	}
+	if !strings.Contains(newReply2, "only bot owners") {
+		t.Errorf("expected scenario 2 to decline non-owner, got: %s", newReply2)
+	}
+
+	// Scenario 3: Real tool already ran, no interception
+	intercepted3, _ := b.tryInterceptSendCrypto(ctx, nil, prompt1, strings.ToLower(prompt1), "skipp_dev", true, nil, "Sent 0.0001 ETH to 0x...: https://basescan.org/tx/0x...", []string{"send_crypto"})
+	if intercepted3 {
+		t.Errorf("expected scenario 3 NOT to be intercepted when send_crypto ran")
+	}
+
+	// Scenario 4: Normal conversation, no transfer claims
+	normalPrompt := "what is the market cap of btc?"
+	normalReply := "btc mcap is around 1.7 trillion"
+	intercepted4, _ := b.tryInterceptSendCrypto(ctx, nil, normalPrompt, strings.ToLower(normalPrompt), "skipp_dev", true, nil, normalReply, []string{"web_search"})
+	if intercepted4 {
+		t.Errorf("expected scenario 4 NOT to be intercepted")
+	}
+}
+
 
 
 

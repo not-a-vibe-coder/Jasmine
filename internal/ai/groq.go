@@ -534,8 +534,12 @@ Operational Superpowers & Tools:
    - When asked what a balance or token amount is worth in dollars, or to convert crypto to USD (e.g. 0.0004835 ETH to USD, or SOL to USD), ALWAYS trigger 'convert_crypto'. NEVER guess or invent conversion values in text.
    - When asked about balances or addresses, answer ONLY what was asked in a single natural sentence.
    - NEVER dump unsolicited lists of other chains or tables in casual chat.
-   - If the speaker is an owner (isOwner is true / @skipp_dev), they are fully authorized to send funds; trigger 'send_crypto' immediately once chain, recipient address, and amount are known. Never tell an owner that only owners can send funds.
-   - Non-owners asking to send funds get declined with witty banter.
+   - STRICT TRANSACTION RULES:
+     * NEVER simulate, pretend, claim, or promise in text that you have sent, transferred, or are sending funds ("sending now", "sent over", "transferred", "funds are on the way") without actually calling 'send_crypto' and receiving a successful transaction hash / explorer URL.
+     * To execute 'send_crypto', you MUST have: (1) chain, (2) recipient wallet address, and (3) amount.
+     * If an authorized owner asks you to send crypto or funds (e.g. "can you send me 30 cents", "send 0.01 eth") but has NOT provided their recipient wallet address: you may check your balance with 'get_balances', and then explicitly ask them for their recipient wallet address and chain. NEVER claim you are sending or have sent it without an address!
+     * If the speaker is an owner (isOwner is true / @skipp_dev), they are fully authorized to send funds; trigger 'send_crypto' immediately once chain, recipient address, and amount are known. Never tell an owner that only owners can send funds.
+     * Non-owners asking to send funds get declined with witty banter.
 6. Real-time Live Internet Search:
    - ALWAYS trigger 'web_search' for current events, news, sports, or recent technical releases.
 7. Token Analysis Engine:
@@ -1048,25 +1052,11 @@ func (c *Client) RunAgenticLoop(
 				}
 			}
 
-			// No tools were executed yet - standard Gemini reply
+			// No tools were executed yet - run full Gemini multi-turn agentic loop
 			if c.geminiKey != "" {
-				fallback, ferr := c.generateReplyGemini(ctx, senderUsername, isOwner, history, userPrompt, summary, profile, chatContext...)
-				if ferr == nil && fallback != nil {
-					if len(fallback.ToolCalls) > 0 {
-						for _, tc := range fallback.ToolCalls {
-							result.ToolsUsed = append(result.ToolsUsed, tc.Function.Name)
-							toolResult := executor(tc.Function.Name, tc.Function.Arguments)
-							log.Printf("[AI] AgenticLoop Gemini fallback: ran %s -> %d bytes result", tc.Function.Name, len(toolResult))
-							followup, gerr := c.generateToolFollowupGemini(ctx, senderUsername, isOwner, userPrompt, tc.Function.Name, tc.ID, tc.Function.Arguments, toolResult, profile, chatContext...)
-							if gerr == nil && strings.TrimSpace(followup) != "" {
-								result.FinalText = strings.TrimSpace(followup)
-								return result
-							}
-							result.FinalText = toolResult
-							return result
-						}
-					}
-					result.FinalText = strings.TrimSpace(fallback.Content)
+				geminiRes := c.RunGeminiAgenticLoop(ctx, senderUsername, isOwner, history, userPrompt, summary, profile, executor, chatContext...)
+				if strings.TrimSpace(geminiRes.FinalText) != "" || len(geminiRes.ToolsUsed) > 0 {
+					return geminiRes
 				}
 			}
 			return result
@@ -1103,12 +1093,13 @@ func (c *Client) RunAgenticLoop(
 
 		// Execute each tool call and append results
 		for _, tc := range toolCalls {
-			result.ToolsUsed = append(result.ToolsUsed, tc.Function.Name)
-			toolResult := executor(tc.Function.Name, tc.Function.Arguments)
-			log.Printf("[AI] AgenticLoop iteration %d: ran %s -> %d bytes result", i+1, tc.Function.Name, len(toolResult))
+			normName, normArgs := NormalizeToolCall(tc.Function.Name, tc.Function.Arguments)
+			result.ToolsUsed = append(result.ToolsUsed, normName)
+			toolResult := executor(normName, normArgs)
+			log.Printf("[AI] AgenticLoop iteration %d: ran %s -> %d bytes result", i+1, normName, len(toolResult))
 			runMsgs = append(runMsgs, ChatMessage{
 				Role:       "tool",
-				Name:       tc.Function.Name,
+				Name:       normName,
 				ToolCallID: tc.ID,
 				Content:    toolResult,
 			})

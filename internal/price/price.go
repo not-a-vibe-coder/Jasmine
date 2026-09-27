@@ -29,11 +29,12 @@ var defaultPrices = Prices{
 }
 
 type Service struct {
-	httpClient *http.Client
-	cache      Prices
-	cacheTime  time.Time
-	cacheMu    sync.RWMutex
-	cacheTTL   time.Duration
+	httpClient        *http.Client
+	cache             Prices
+	cacheTime         time.Time
+	cacheMu           sync.RWMutex
+	cacheTTL          time.Duration
+	coingeckoCooldown time.Time
 }
 
 func NewService() *Service {
@@ -63,14 +64,21 @@ func (s *Service) GetPrices(ctx context.Context) Prices {
 		return s.cache
 	}
 
-	// 1. Primary: CoinGecko
-	prices, err := s.fetchCoinGecko(ctx)
-	if err == nil && prices.ETH > 0 && prices.SOL > 0 {
-		s.cache = prices
-		s.cacheTime = time.Now()
-		return s.cache
+	// 1. Primary: CoinGecko (skip if under 429 rate limit cooldown)
+	if time.Now().After(s.coingeckoCooldown) {
+		prices, err := s.fetchCoinGecko(ctx)
+		if err == nil && prices.ETH > 0 && prices.SOL > 0 {
+			s.cache = prices
+			s.cacheTime = time.Now()
+			return s.cache
+		}
+		if err != nil && strings.Contains(err.Error(), "429") {
+			s.coingeckoCooldown = time.Now().Add(10 * time.Minute)
+			log.Printf("[PriceService] CoinGecko rate limited (status 429), cooling down until %s; falling back to Coinbase/Binance", s.coingeckoCooldown.Format("15:04:05"))
+		} else {
+			log.Printf("[PriceService] CoinGecko fetch failed: %v", err)
+		}
 	}
-	log.Printf("[PriceService] CoinGecko fetch failed: %v", err)
 
 	// 2. Secondary: Coinbase Spot API
 	cbPrices, cbErr := s.fetchCoinbase(ctx)
@@ -149,6 +157,9 @@ func (s *Service) fetchCoinGecko(ctx context.Context) (Prices, error) {
 func (s *Service) fetchCoinbase(ctx context.Context) (Prices, error) {
 	symbols := []string{"ETH", "SOL", "BNB", "BTC"}
 	p := defaultPrices
+	if s.cache.BNB > 0 {
+		p.BNB = s.cache.BNB
+	}
 	var anySuccess bool
 
 	for _, sym := range symbols {

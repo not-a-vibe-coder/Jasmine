@@ -861,6 +861,9 @@ func (b *Bot) handleNLPAndChat(
 		go func() {
 			agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor, chatContext)
 			finalText := agResult.FinalText
+			if intercepted, newFinalText := b.tryInterceptSendCrypto(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText, agResult.ToolsUsed); intercepted {
+				finalText = newFinalText
+			}
 			if strings.TrimSpace(finalText) == "" {
 				finalText = b.getRandomEmptyAck()
 			}
@@ -884,6 +887,11 @@ func (b *Bot) handleNLPAndChat(
 
 	// 4b. Intercept owner alerts / ping requests (safety net)
 	b.tryInterceptOwnerAlert(ctx, chatID, prompt, finalText, username, agResult.ToolsUsed)
+
+	// 4c. Intercept hallucinated or unprocessed crypto transfers (safety net)
+	if intercepted, newFinalText := b.tryInterceptSendCrypto(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText, agResult.ToolsUsed); intercepted {
+		finalText = newFinalText
+	}
 
 	if finalText == "" {
 		finalText = b.getRandomEmptyAck()
@@ -1092,6 +1100,151 @@ func (b *Bot) alertOwners(ctx context.Context, alertText string) []string {
 	return notified
 }
 
+var (
+	fakeTransferClaimRegex = regexp.MustCompile(`(?i)(?:sending\s+(?:the\s+)?(?:\$?\d+|thirty|forty|twenty|ten|fifty|\d+\s+cents|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt|dollars|cents)?|funds|crypto|it)\s+over\s+now|sending\s+(?:the\s+)?(?:\$?\d+|thirty|forty|twenty|ten|fifty|\d+\s+cents|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt|dollars|cents)|funds|crypto)\s+over\b|sending\s+(?:the\s+)?(?:thirty|forty|twenty|ten|\d+)\s+cents\s+over\s+now|sending\s+(?:the\s+)?funds\s+now|sending\s+(?:the\s+)?crypto\s+now|funds\s+are\s+on\s+the\s+way|transferred\s+(?:the\s+)?(?:\$?\d+|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt)|funds|crypto)\s+to|sent\s+(?:the\s+)?(?:\$?\d+|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt)|funds|crypto)\s+to|just\s+sent\s+(?:the\s+)?(?:\$?\d+|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt)|thirty|twenty|ten|\d+)\s+(?:cents|eth|sol|bnb|over))`)
+	evmAddressRegex        = regexp.MustCompile(`(?i)\b0x[a-f0-9]{40}\b`)
+	solanaAddressRegex     = regexp.MustCompile(`\b[1-9A-HJ-NP-Za-km-z]{32,44}\b`)
+)
+
+func extractSendAmount(text string) float64 {
+	cleanText := evmAddressRegex.ReplaceAllString(text, "")
+	cleanText = solanaAddressRegex.ReplaceAllString(cleanText, "")
+	re := regexp.MustCompile(`\b([0-9]+(?:\.[0-9]+)?)\s*(cents?|eth|sol|bnb|usdc|usdt|dollars?)?\b`)
+	matches := re.FindAllStringSubmatch(cleanText, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			val, err := strconv.ParseFloat(m[1], 64)
+			if err == nil && val > 0 {
+				lowerFull := strings.ToLower(m[0])
+				if strings.Contains(lowerFull, "cent") {
+					return val / 100.0
+				}
+				return val
+			}
+		}
+	}
+	return 0
+}
+
+// tryInterceptSendCrypto catches hallucinated crypto transfer claims or unprocessed transfer requests
+// when send_crypto was never actually executed.
+func (b *Bot) tryInterceptSendCrypto(
+	ctx context.Context,
+	msg *tgbotapi.Message,
+	prompt, lowerPrompt, username string,
+	isOwner bool,
+	history []memory.Message,
+	replyText string,
+	toolsUsed []string,
+) (bool, string) {
+	for _, t := range toolsUsed {
+		if t == "send_crypto" {
+			return false, replyText
+		}
+	}
+
+	isClaim := fakeTransferClaimRegex.MatchString(replyText)
+	isExplicitSend := strings.HasPrefix(lowerPrompt, "/send") ||
+		strings.HasPrefix(lowerPrompt, "send ") ||
+		strings.Contains(lowerPrompt, "send me ") ||
+		strings.Contains(lowerPrompt, "send crypto") ||
+		strings.HasPrefix(lowerPrompt, "transfer ")
+
+	if !isClaim && !isExplicitSend {
+		return false, replyText
+	}
+
+	// 1. Non-owners are never allowed to execute crypto transfers or receive fake confirmations
+	if !isOwner {
+		prefix := ""
+		claimIdx := fakeTransferClaimRegex.FindStringIndex(replyText)
+		if len(claimIdx) > 0 && claimIdx[0] > 0 {
+			cand := strings.TrimSpace(replyText[:claimIdx[0]])
+			cand = strings.TrimRight(cand, ",-:. ")
+			if cand != "" {
+				prefix = cand + ". "
+			}
+		}
+		ownersList := "@skipp_dev"
+		if b.cfg != nil && len(b.cfg.Owners) > 0 {
+			ownersList = "@" + strings.Join(b.cfg.Owners, ", @")
+		}
+		return true, prefix + fmt.Sprintf("nice try anon, only bot owners (%s) can authorize crypto transfers", ownersList)
+	}
+
+	// 2. Owner request: check for recipient wallet address
+	evmAddr := evmAddressRegex.FindString(prompt)
+	solAddr := ""
+	if evmAddr == "" {
+		candidates := solanaAddressRegex.FindAllString(prompt, -1)
+		for _, cand := range candidates {
+			lowerCand := strings.ToLower(cand)
+			if lowerCand == "robinhood" || lowerCand == "ethereum" || lowerCand == "arbitrum" || lowerCand == "sandbox" {
+				continue
+			}
+			if len(cand) >= 32 && len(cand) <= 44 {
+				solAddr = cand
+				break
+			}
+		}
+	}
+
+	toAddr := evmAddr
+	isSol := false
+	if toAddr == "" && solAddr != "" {
+		toAddr = solAddr
+		isSol = true
+	}
+
+	// If NO address was provided, funds cannot be sent.
+	// Reject the fake claim and ask for the recipient wallet address.
+	if toAddr == "" {
+		prefix := ""
+		claimIdx := fakeTransferClaimRegex.FindStringIndex(replyText)
+		if len(claimIdx) > 0 && claimIdx[0] > 0 {
+			cand := strings.TrimSpace(replyText[:claimIdx[0]])
+			cand = strings.TrimRight(cand, ",-:. ")
+			if cand != "" {
+				prefix = cand + ". "
+			}
+		}
+		log.Printf("[Bot] Intercepted fake crypto transfer claim from LLM (no address provided). Sanitized.")
+		return true, prefix + "drop your recipient wallet address and chain where you want the funds sent"
+	}
+
+	// Address IS provided: determine chain and amount
+	chain := ""
+	if isSol {
+		chain = "solana"
+	} else {
+		chains := []string{"robinhood", "rh", "base", "arbitrum", "arb", "ethereum", "eth", "bnb", "bsc"}
+		for _, c := range chains {
+			if strings.Contains(lowerPrompt, c) {
+				chain = c
+				break
+			}
+		}
+		if chain == "rh" {
+			chain = "robinhood"
+		} else if chain == "arb" {
+			chain = "arbitrum"
+		} else if chain == "bsc" {
+			chain = "bnb"
+		}
+		if chain == "" {
+			chain = "base"
+		}
+	}
+
+	amount := extractSendAmount(prompt)
+	if amount <= 0 {
+		return true, fmt.Sprintf("specify the amount of %s you want sent to %s", strings.ToUpper(chain), toAddr)
+	}
+
+	log.Printf("[Bot] Intercepted crypto transfer without tool execution: executing send_crypto to %s on %s (%.6f)", toAddr, chain, amount)
+	result := b.executeCryptoSend(ctx, chain, toAddr, amount)
+	return true, result
+}
 
 func (b *Bot) executeToolCall(
 	ctx context.Context,

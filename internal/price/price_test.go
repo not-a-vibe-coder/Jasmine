@@ -71,3 +71,17 @@ func TestPriceServiceLiveOrFallback(t *testing.T) {
 		t.Errorf("expected identical cached prices")
 	}
 }
+
+func TestCoinGecko429Cooldown(t *testing.T) {
+	svc := NewService()
+	// Simulate active cooldown
+	svc.coingeckoCooldown = time.Now().Add(5 * time.Minute)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	p := svc.GetPrices(ctx)
+	if p.ETH <= 0 || p.SOL <= 0 {
+		t.Errorf("expected valid fallback prices during CoinGecko cooldown, got %+v", p)
+	}
+}

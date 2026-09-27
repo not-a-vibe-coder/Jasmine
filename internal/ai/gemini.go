@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -38,11 +39,13 @@ type geminiChatPart struct {
 }
 
 type geminiFunctionCall struct {
+	ID   string                 `json:"id,omitempty"`
 	Name string                 `json:"name"`
 	Args map[string]interface{} `json:"args"`
 }
 
 type geminiFunctionResp struct {
+	ID       string                 `json:"id,omitempty"`
 	Name     string                 `json:"name"`
 	Response map[string]interface{} `json:"response"`
 }
@@ -308,7 +311,7 @@ func (c *Client) generateToolFollowupGemini(
 				Role: "user",
 				Parts: []geminiChatPart{
 					{
-						Text: "Now answer naturally in 1-2 conversational sentences based strictly on the tool result. Strictly zero emojis, no em dashes, no bulky lists.",
+						Text: "Now answer naturally in 1-2 conversational sentences based strictly on the tool result. Strictly zero emojis, no em dashes, no bulky lists. CRITICAL: Never claim you sent or are sending crypto or funds unless the tool executed was send_crypto and returned a successful transaction hash. If funds were requested without a recipient address, ask for their wallet address.",
 					},
 				},
 			},
@@ -331,6 +334,174 @@ func (c *Client) generateToolFollowupGemini(
 		}
 	}
 	return strings.Join(textParts, " "), nil
+}
+
+// RunGeminiAgenticLoop executes a multi-turn agentic tool-calling loop using Gemini when Groq is unavailable.
+func (c *Client) RunGeminiAgenticLoop(
+	ctx context.Context,
+	senderUsername string,
+	isOwner bool,
+	history []memory.Message,
+	userPrompt string,
+	summary string,
+	profile *memory.UserProfile,
+	executor func(name string, args string) string,
+	chatContext ...string,
+) AgenticResult {
+	result := AgenticResult{}
+
+	sysPrompt := c.systemPrompt(senderUsername, isOwner, profile, chatContext...)
+	if summary != "" {
+		sysPrompt += fmt.Sprintf("\n\n[Past Chat Summary Context]: %s", summary)
+	}
+
+	req := geminiChatReq{
+		SystemInstruction: &geminiChatContent{
+			Parts: []geminiChatPart{{Text: sysPrompt}},
+		},
+		GenerationConfig: &geminiChatGenConfig{
+			Temperature:     0.5,
+			MaxOutputTokens: 400,
+		},
+	}
+
+	// Build function declarations from tools
+	var decls []geminiFunctionDecl
+	for _, t := range c.tools {
+		decls = append(decls, geminiFunctionDecl{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			Parameters:  t.Function.Parameters,
+		})
+	}
+	if len(decls) > 0 {
+		req.Tools = []geminiChatTool{{FunctionDeclarations: decls}}
+	}
+
+	// Format history
+	for _, h := range history {
+		role := "user"
+		if h.Role == "assistant" {
+			role = "model"
+		}
+		prefix := ""
+		if h.Sender != "" && role == "user" {
+			prefix = fmt.Sprintf("@%s: ", h.Sender)
+		}
+		content := h.Content
+		if len(content) > 350 {
+			content = content[:350] + "..."
+		}
+		req.Contents = append(req.Contents, geminiChatContent{
+			Role:  role,
+			Parts: []geminiChatPart{{Text: prefix + content}},
+		})
+	}
+
+	// Current user prompt
+	currContent := userPrompt
+	if senderUsername != "" {
+		currContent = fmt.Sprintf("@%s: %s", senderUsername, userPrompt)
+	}
+	req.Contents = append(req.Contents, geminiChatContent{
+		Role:  "user",
+		Parts: []geminiChatPart{{Text: currContent}},
+	})
+
+	maxIterations := 5
+	for iter := 0; iter < maxIterations; iter++ {
+		result.Iterations++
+		resp, err := c.callGeminiGenerate(ctx, req)
+		if err != nil {
+			log.Printf("[AI] GeminiAgenticLoop error on iter %d: %v", iter+1, err)
+			break
+		}
+		if len(resp.Candidates) == 0 {
+			break
+		}
+
+		cand := resp.Candidates[0]
+		var textParts []string
+		var funcCalls []geminiFunctionCall
+
+		for _, part := range cand.Content.Parts {
+			if strings.TrimSpace(part.Text) != "" {
+				textParts = append(textParts, strings.TrimSpace(part.Text))
+			}
+			if part.FunctionCall != nil {
+				funcCalls = append(funcCalls, *part.FunctionCall)
+			}
+		}
+
+		// No function calls - this is the final conversational answer
+		if len(funcCalls) == 0 {
+			result.FinalText = strings.TrimSpace(strings.Join(textParts, "\n"))
+			log.Printf("[AI] GeminiAgenticLoop finished with final text on iter %d (%d tools used)", iter+1, len(result.ToolsUsed))
+			return result
+		}
+
+		// Tool calls requested by Gemini
+		// 1. Append the model candidate content to contents history
+		req.Contents = append(req.Contents, geminiChatContent{
+			Role:  cand.Content.Role,
+			Parts: cand.Content.Parts,
+		})
+
+		// 2. Execute each tool call and collect functionResponse parts
+		var respParts []geminiChatPart
+		for _, fc := range funcCalls {
+			rawArgsBytes, _ := json.Marshal(fc.Args)
+			normName, normArgs := NormalizeToolCall(fc.Name, string(rawArgsBytes))
+			result.ToolsUsed = append(result.ToolsUsed, normName)
+
+			toolResult := executor(normName, normArgs)
+			log.Printf("[AI] GeminiAgenticLoop iter %d: ran %s -> %d bytes result", iter+1, normName, len(toolResult))
+
+			respParts = append(respParts, geminiChatPart{
+				FunctionResponse: &geminiFunctionResp{
+					ID:   fc.ID,
+					Name: fc.Name,
+					Response: map[string]interface{}{
+						"result": toolResult,
+					},
+				},
+			})
+		}
+
+		// 3. Append function responses turn (role: "user" in Gemini v1beta)
+		req.Contents = append(req.Contents, geminiChatContent{
+			Role:  "user",
+			Parts: respParts,
+		})
+	}
+
+	// If iterations finished without final text but tools were executed, synthesize
+	if strings.TrimSpace(result.FinalText) == "" && len(result.ToolsUsed) > 0 {
+		synthReq := geminiChatReq{
+			SystemInstruction: req.SystemInstruction,
+			Contents: append(req.Contents, geminiChatContent{
+				Role: "user",
+				Parts: []geminiChatPart{
+					{Text: "Wrap up and answer naturally in 1-2 casual sentences for chat based strictly on the tool results. Strictly zero emojis, no em dashes, no bulky lists. CRITICAL: Never claim you sent or are sending crypto or funds unless the tool executed was send_crypto and returned a successful transaction hash."},
+				},
+			}),
+			GenerationConfig: &geminiChatGenConfig{
+				Temperature:     0.5,
+				MaxOutputTokens: 250,
+			},
+		}
+		if synthResp, err := c.callGeminiGenerate(ctx, synthReq); err == nil && len(synthResp.Candidates) > 0 {
+			var synthParts []string
+			for _, p := range synthResp.Candidates[0].Content.Parts {
+				if strings.TrimSpace(p.Text) != "" {
+					synthParts = append(synthParts, strings.TrimSpace(p.Text))
+				}
+			}
+			result.FinalText = strings.TrimSpace(strings.Join(synthParts, " "))
+		}
+	}
+
+	return result
 }
 
 func (c *Client) refactorFileGemini(
