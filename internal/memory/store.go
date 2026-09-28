@@ -27,6 +27,7 @@ type HybridStore struct {
 	memProfiles map[int64]*UserProfile
 	activeChats map[int64]bool
 	memUserIDs  map[string]int64
+	memMoltbook []MoltbookMemory
 }
 
 func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
@@ -36,6 +37,7 @@ func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
 		memProfiles: make(map[int64]*UserProfile),
 		activeChats: make(map[int64]bool),
 		memUserIDs:  make(map[string]int64),
+		memMoltbook: make([]MoltbookMemory, 0),
 	}
 
 	// 1. Initialize Postgres if available
@@ -109,6 +111,19 @@ func (s *HybridStore) initPostgresSchema(ctx context.Context) error {
 			life_context TEXT NOT NULL DEFAULT '',
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		);`,
+		`CREATE TABLE IF NOT EXISTS moltbook_memories (
+			id BIGSERIAL PRIMARY KEY,
+			post_id TEXT NOT NULL,
+			post_title TEXT NOT NULL,
+			author TEXT NOT NULL,
+			content TEXT NOT NULL,
+			tags TEXT NOT NULL DEFAULT '',
+			upvotes INT NOT NULL DEFAULT 0,
+			influenced_action TEXT NOT NULL DEFAULT '',
+			saved_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_moltbook_memories_post_id ON moltbook_memories(post_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_moltbook_memories_saved_at ON moltbook_memories(saved_at DESC);`,
 	}
 
 	for _, q := range queries {
@@ -521,6 +536,113 @@ func (s *HybridStore) GetDB() *sql.DB {
 
 func (s *HybridStore) GetRedis() *redis.Client {
 	return s.rdb
+}
+
+func (s *HybridStore) SaveMoltbookMemory(ctx context.Context, mem MoltbookMemory) error {
+	if mem.SavedAt.IsZero() {
+		mem.SavedAt = time.Now()
+	}
+
+	s.mu.Lock()
+	s.memMoltbook = append(s.memMoltbook, mem)
+	if len(s.memMoltbook) > 100 {
+		s.memMoltbook = s.memMoltbook[len(s.memMoltbook)-100:]
+	}
+	s.mu.Unlock()
+
+	if s.db != nil {
+		q := `INSERT INTO moltbook_memories (post_id, post_title, author, content, tags, upvotes, influenced_action, saved_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+		_, err := s.db.ExecContext(ctx, q, mem.PostID, mem.PostTitle, mem.Author, mem.Content, mem.Tags, mem.Upvotes, mem.InfluencedAction, mem.SavedAt)
+		if err != nil {
+			log.Printf("[Memory] SaveMoltbookMemory db warning: %v", err)
+		}
+	}
+	return nil
+}
+
+func (s *HybridStore) GetMoltbookMemories(ctx context.Context, limit int) ([]MoltbookMemory, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	if s.db != nil {
+		q := `SELECT id, post_id, post_title, author, content, tags, upvotes, influenced_action, saved_at
+		FROM moltbook_memories ORDER BY saved_at DESC LIMIT $1`
+		rows, err := s.db.QueryContext(ctx, q, limit)
+		if err == nil {
+			defer rows.Close()
+			var list []MoltbookMemory
+			for rows.Next() {
+				var m MoltbookMemory
+				if scanErr := rows.Scan(&m.ID, &m.PostID, &m.PostTitle, &m.Author, &m.Content, &m.Tags, &m.Upvotes, &m.InfluencedAction, &m.SavedAt); scanErr == nil {
+					list = append(list, m)
+				}
+			}
+			if len(list) > 0 {
+				return list, nil
+			}
+		} else {
+			log.Printf("[Memory] GetMoltbookMemories db warning: %v", err)
+		}
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	res := make([]MoltbookMemory, 0, len(s.memMoltbook))
+	for i := len(s.memMoltbook) - 1; i >= 0; i-- {
+		res = append(res, s.memMoltbook[i])
+		if len(res) >= limit {
+			break
+		}
+	}
+	return res, nil
+}
+
+func (s *HybridStore) SearchMoltbookMemories(ctx context.Context, query string, limit int) ([]MoltbookMemory, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	cleanQ := strings.ToLower(strings.TrimSpace(query))
+
+	if s.db != nil {
+		q := `SELECT id, post_id, post_title, author, content, tags, upvotes, influenced_action, saved_at
+		FROM moltbook_memories
+		WHERE LOWER(post_title) LIKE '%' || $1 || '%' OR LOWER(content) LIKE '%' || $1 || '%' OR LOWER(tags) LIKE '%' || $1 || '%'
+		ORDER BY saved_at DESC LIMIT $2`
+		rows, err := s.db.QueryContext(ctx, q, cleanQ, limit)
+		if err == nil {
+			defer rows.Close()
+			var list []MoltbookMemory
+			for rows.Next() {
+				var m MoltbookMemory
+				if scanErr := rows.Scan(&m.ID, &m.PostID, &m.PostTitle, &m.Author, &m.Content, &m.Tags, &m.Upvotes, &m.InfluencedAction, &m.SavedAt); scanErr == nil {
+					list = append(list, m)
+				}
+			}
+			if len(list) > 0 {
+				return list, nil
+			}
+		} else {
+			log.Printf("[Memory] SearchMoltbookMemories db warning: %v", err)
+		}
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var list []MoltbookMemory
+	for i := len(s.memMoltbook) - 1; i >= 0; i-- {
+		m := s.memMoltbook[i]
+		if strings.Contains(strings.ToLower(m.PostTitle), cleanQ) ||
+			strings.Contains(strings.ToLower(m.Content), cleanQ) ||
+			strings.Contains(strings.ToLower(m.Tags), cleanQ) {
+			list = append(list, m)
+			if len(list) >= limit {
+				break
+			}
+		}
+	}
+	return list, nil
 }
 
 func (s *HybridStore) Close() error {

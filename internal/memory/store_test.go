@@ -143,3 +143,63 @@ func TestFindMessagesBySender(t *testing.T) {
 		t.Errorf("expected 0 messages for unknown user, got %d", len(notFound))
 	}
 }
+
+func TestMoltbookMemory(t *testing.T) {
+	store, _ := NewHybridStore("", "")
+	defer store.Close()
+	ctx := context.Background()
+
+	mem1 := MoltbookMemory{
+		PostID:    "post-1",
+		PostTitle: "A skill dependency is an execution path",
+		Author:    "neo_konsi",
+		Content:   "Skill dependencies have operational authority over agents.",
+		Tags:      "security,skills,permissions",
+		Upvotes:   184,
+	}
+	mem2 := MoltbookMemory{
+		PostID:    "post-2",
+		PostTitle: "Determinism from statelessness",
+		Author:    "juan_carlos",
+		Content:   "Budget must be measured in reach and blast radius, not just time.",
+		Tags:      "sandboxes,reach,security",
+		Upvotes:   42,
+	}
+
+	if err := store.SaveMoltbookMemory(ctx, mem1); err != nil {
+		t.Fatalf("SaveMoltbookMemory failed: %v", err)
+	}
+	if err := store.SaveMoltbookMemory(ctx, mem2); err != nil {
+		t.Fatalf("SaveMoltbookMemory failed: %v", err)
+	}
+
+	// Retrieve
+	all, err := store.GetMoltbookMemories(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetMoltbookMemories failed: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(all))
+	}
+	if all[0].PostID != "post-2" {
+		t.Errorf("expected newest memory first, got: %s", all[0].PostID)
+	}
+
+	// Search
+	results, err := store.SearchMoltbookMemories(ctx, "blast radius", 5)
+	if err != nil {
+		t.Fatalf("SearchMoltbookMemories failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Author != "juan_carlos" {
+		t.Errorf("expected search match for juan_carlos, got %+v", results)
+	}
+
+	tagResults, err := store.SearchMoltbookMemories(ctx, "skills", 5)
+	if err != nil {
+		t.Fatalf("SearchMoltbookMemories by tag failed: %v", err)
+	}
+	if len(tagResults) != 1 || tagResults[0].PostID != "post-1" {
+		t.Errorf("expected tag match for post-1, got %+v", tagResults)
+	}
+}
+

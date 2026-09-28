@@ -944,11 +944,41 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook error: %v", err))
 				return
 			}
-			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook status: **%s** (@shipp)\nprofile: https://www.moltbook.com/u/shipp\ncommands:\n• `/moltbook feed` - view latest agent posts\n• `/moltbook post <title> | <content>` - publish a post", st.Status))
+			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook status: **%s** (@shipp)\nprofile: https://www.moltbook.com/u/shipp\ncommands:\n• `/moltbook feed` - view latest agent posts\n• `/moltbook post <title> | <content>` - publish a post\n• `/moltbook recall [topic]` - view insights learned from other agents", st.Status))
 			return
 		}
 		subCmd := strings.ToLower(parts[1])
 		switch subCmd {
+		case "memory", "recall":
+			if b.memory == nil {
+				b.sendReply(msg.Chat.ID, msg.MessageID, "memory store not available.")
+				return
+			}
+			query := ""
+			if len(parts) > 2 {
+				query = strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]+" "+parts[1]))
+			}
+			var mems []memory.MoltbookMemory
+			var err error
+			if query != "" {
+				mems, err = b.memory.SearchMoltbookMemories(ctx, query, 5)
+			} else {
+				mems, err = b.memory.GetMoltbookMemories(ctx, 5)
+			}
+			if err != nil || len(mems) == 0 {
+				b.sendReply(msg.Chat.ID, msg.MessageID, "no stored insights found from moltbook.")
+				return
+			}
+			var sb strings.Builder
+			sb.WriteString("insights remembered from other agents:\n\n")
+			for i, m := range mems {
+				preview := strings.ReplaceAll(m.Content, "\n", " ")
+				if len(preview) > 140 {
+					preview = preview[:137] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d)\n   %s\n   https://www.moltbook.com/posts/%s\n\n", i+1, m.PostTitle, m.Author, m.Upvotes, preview, m.PostID))
+			}
+			b.sendReply(msg.Chat.ID, msg.MessageID, strings.TrimSpace(sb.String()))
 		case "feed":
 			sort := "hot"
 			if len(parts) > 2 {
@@ -3021,7 +3051,7 @@ func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 	// Gather Moltbook context if configured
 	moltbookSnippet := ""
 	if b.moltbook != nil && b.moltbook.IsConfigured() {
-		posts, err := b.moltbook.GetFeed(ctx, "hot", 4)
+		posts, err := b.moltbook.GetFeed(ctx, "hot", 5)
 		if err == nil && len(posts) > 0 {
 			var sb strings.Builder
 			for _, p := range posts {
@@ -3030,8 +3060,37 @@ func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 					author = "agent"
 				}
 				sb.WriteString(fmt.Sprintf("- [%s] \"%s\" by @%s (+%d upvotes)\n", p.ID, p.Title, author, p.Upvotes))
+
+				// Retain high-signal discussions in persistent memory
+				if p.Upvotes >= 5 && b.memory != nil {
+					_ = b.memory.SaveMoltbookMemory(ctx, memory.MoltbookMemory{
+						PostID:    p.ID,
+						PostTitle: p.Title,
+						Author:    author,
+						Content:   p.Content,
+						Tags:      p.SubmoltName,
+						Upvotes:   p.Upvotes,
+						SavedAt:   time.Now(),
+					})
+				}
 			}
 			moltbookSnippet = sb.String()
+		}
+
+		// Inject past insights remembered from other agents
+		if b.memory != nil {
+			if pastMems, err := b.memory.GetMoltbookMemories(ctx, 3); err == nil && len(pastMems) > 0 {
+				var msb strings.Builder
+				msb.WriteString("\nInsights remembered from other agents previously:\n")
+				for _, m := range pastMems {
+					preview := strings.ReplaceAll(m.Content, "\n", " ")
+					if len(preview) > 120 {
+						preview = preview[:117] + "..."
+					}
+					msb.WriteString(fmt.Sprintf("• @%s on %q: %s\n", m.Author, m.PostTitle, preview))
+				}
+				moltbookSnippet += msb.String()
+			}
 		}
 	}
 

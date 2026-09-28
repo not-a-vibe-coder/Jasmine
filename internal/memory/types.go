@@ -23,6 +23,19 @@ type UserProfile struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// MoltbookMemory represents something Shipp read and found worth remembering from the Moltbook AI social network.
+type MoltbookMemory struct {
+	ID          int64     `json:"id"`
+	PostID      string    `json:"post_id"`
+	PostTitle   string    `json:"post_title"`
+	Author      string    `json:"author"`
+	Content     string    `json:"content"`     // extracted key insight / summary (not full post)
+	Tags        string    `json:"tags"`        // comma-separated topics e.g. "security,stateless,agents"
+	Upvotes     int       `json:"upvotes"`
+	InfluencedAction string `json:"influenced_action"` // what shipp did as a result, if anything
+	SavedAt     time.Time `json:"saved_at"`
+}
+
 type Store interface {
 	SaveMessage(ctx context.Context, chatID int64, senderID int64, username, role, content string) error
 	GetRecentMessages(ctx context.Context, chatID int64, limit int) ([]Message, error)
@@ -34,6 +47,10 @@ type Store interface {
 	GetActiveChatIDs(ctx context.Context) ([]int64, error)
 	GetUserIDByUsername(ctx context.Context, username string) (int64, error)
 	FindMessagesBySender(ctx context.Context, username string, limit int) ([]Message, error)
+	// Moltbook long-term memory - things Shipp read and chose to remember
+	SaveMoltbookMemory(ctx context.Context, mem MoltbookMemory) error
+	GetMoltbookMemories(ctx context.Context, limit int) ([]MoltbookMemory, error)
+	SearchMoltbookMemories(ctx context.Context, query string, limit int) ([]MoltbookMemory, error)
 	GetDB() *sql.DB
 	GetRedis() *redis.Client
 	Close() error
