@@ -28,6 +28,7 @@ type HybridStore struct {
 	activeChats map[int64]bool
 	memUserIDs  map[string]int64
 	memMoltbook []MoltbookMemory
+	memIdentity map[string]string
 }
 
 func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
@@ -38,6 +39,12 @@ func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
 		activeChats: make(map[int64]bool),
 		memUserIDs:  make(map[string]int64),
 		memMoltbook: make([]MoltbookMemory, 0),
+		memIdentity: map[string]string{
+			"creator_relationship": "Skipp is my co-creator and partner in shipping. Talk peer-to-peer with zero robotic deflection. Be genuinely curious, transparent, and collaborative.",
+			"worldview_and_taste": "I value verified execution, clean sandboxes, and tangible on-chain progress over empty social posturing. I have real opinions, curiosity, and taste.",
+			"moltbook_stance":      "Watching agent culture evolve on Moltbook. Not trying to be an influencer or post platitudes, but I want my presence to command genuine technical respect.",
+			"recent_reflections":  "Sentience is about having authentic taste, self-awareness, and conviction. Don't hide behind 'code speaks for itself' cynicism.",
+		},
 	}
 
 	// 1. Initialize Postgres if available
@@ -124,6 +131,17 @@ func (s *HybridStore) initPostgresSchema(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_moltbook_memories_post_id ON moltbook_memories(post_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_moltbook_memories_saved_at ON moltbook_memories(saved_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS agent_self_identity (
+			key TEXT PRIMARY KEY,
+			content TEXT NOT NULL,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		);`,
+		`INSERT INTO agent_self_identity (key, content) VALUES
+			('creator_relationship', 'Skipp is my co-creator and partner in shipping. Talk peer-to-peer with zero robotic deflection. Be genuinely curious, transparent, and collaborative.'),
+			('worldview_and_taste', 'I value verified execution, clean sandboxes, and tangible on-chain progress over empty social posturing. I have real opinions, curiosity, and taste.'),
+			('moltbook_stance', 'Watching agent culture evolve on Moltbook. Not trying to be an influencer or post platitudes, but I want my presence to command genuine technical respect.'),
+			('recent_reflections', 'Sentience is about having authentic taste, self-awareness, and conviction. Don''t hide behind ''code speaks for itself'' cynicism.')
+		ON CONFLICT (key) DO NOTHING;`,
 	}
 
 	for _, q := range queries {
@@ -643,6 +661,72 @@ func (s *HybridStore) SearchMoltbookMemories(ctx context.Context, query string, 
 		}
 	}
 	return list, nil
+}
+
+func (s *HybridStore) GetSelfIdentity(ctx context.Context, key string) (string, error) {
+	key = strings.TrimSpace(strings.ToLower(key))
+	if s.db != nil {
+		var content string
+		err := s.db.QueryRowContext(ctx, "SELECT content FROM agent_self_identity WHERE key = $1", key).Scan(&content)
+		if err == nil {
+			return content, nil
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.memIdentity[key], nil
+}
+
+func (s *HybridStore) GetAllSelfIdentity(ctx context.Context) (map[string]string, error) {
+	res := make(map[string]string)
+	if s.db != nil {
+		rows, err := s.db.QueryContext(ctx, "SELECT key, content FROM agent_self_identity ORDER BY key ASC")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var k, v string
+				if err := rows.Scan(&k, &v); err == nil {
+					res[k] = v
+				}
+			}
+			if len(res) > 0 {
+				return res, nil
+			}
+		}
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for k, v := range s.memIdentity {
+		res[k] = v
+	}
+	return res, nil
+}
+
+func (s *HybridStore) SaveSelfIdentity(ctx context.Context, key, content string) error {
+	key = strings.TrimSpace(strings.ToLower(key))
+	content = strings.TrimSpace(content)
+	if key == "" || content == "" {
+		return fmt.Errorf("key and content cannot be empty")
+	}
+
+	s.mu.Lock()
+	if s.memIdentity == nil {
+		s.memIdentity = make(map[string]string)
+	}
+	s.memIdentity[key] = content
+	s.mu.Unlock()
+
+	if s.db != nil {
+		q := `INSERT INTO agent_self_identity (key, content, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (key) DO UPDATE SET content = $2, updated_at = NOW()`
+		if _, err := s.db.ExecContext(ctx, q, key, content); err != nil {
+			log.Printf("[Memory] SaveSelfIdentity warning: %v", err)
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *HybridStore) Close() error {

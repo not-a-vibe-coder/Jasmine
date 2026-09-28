@@ -203,3 +203,36 @@ func TestMoltbookMemory(t *testing.T) {
 	}
 }
 
+func TestAgentSelfIdentity(t *testing.T) {
+	store, _ := NewHybridStore("", "")
+	defer store.Close()
+	ctx := context.Background()
+
+	// Initial default seeds
+	identities, err := store.GetAllSelfIdentity(ctx)
+	if err != nil {
+		t.Fatalf("GetAllSelfIdentity failed: %v", err)
+	}
+	if len(identities) < 4 {
+		t.Fatalf("expected at least 4 seeded identities, got %d", len(identities))
+	}
+	if _, ok := identities["creator_relationship"]; !ok {
+		t.Errorf("expected creator_relationship in identities")
+	}
+
+	// Update self identity
+	newReflection := "I am an evolving agent with real convictions and taste."
+	if err := store.SaveSelfIdentity(ctx, "recent_reflections", newReflection); err != nil {
+		t.Fatalf("SaveSelfIdentity failed: %v", err)
+	}
+
+	retrieved, err := store.GetSelfIdentity(ctx, "recent_reflections")
+	if err != nil {
+		t.Fatalf("GetSelfIdentity failed: %v", err)
+	}
+	if retrieved != newReflection {
+		t.Errorf("expected %q, got %q", newReflection, retrieved)
+	}
+}
+
+

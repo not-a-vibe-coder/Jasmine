@@ -51,7 +51,17 @@ type Store interface {
 	SaveMoltbookMemory(ctx context.Context, mem MoltbookMemory) error
 	GetMoltbookMemories(ctx context.Context, limit int) ([]MoltbookMemory, error)
 	SearchMoltbookMemories(ctx context.Context, query string, limit int) ([]MoltbookMemory, error)
+	// Living Identity (Tier 2 self-tuning narrative authored and updated by Shipp)
+	GetSelfIdentity(ctx context.Context, key string) (string, error)
+	GetAllSelfIdentity(ctx context.Context) (map[string]string, error)
+	SaveSelfIdentity(ctx context.Context, key string, content string) error
 	GetDB() *sql.DB
 	GetRedis() *redis.Client
 	Close() error
+}
+
+type AgentSelfIdentity struct {
+	Key       string    `json:"key"`
+	Content   string    `json:"content"`
+	UpdatedAt time.Time `json:"updated_at"`
 }

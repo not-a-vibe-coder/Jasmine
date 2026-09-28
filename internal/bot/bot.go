@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -177,6 +178,13 @@ func NewBot(
 		}, func(task *sandbox.Task) {
 			b.handleSandboxTimeout(task)
 		})
+	}
+
+	if b.memory != nil && aiClient != nil {
+		if identities, err := b.memory.GetAllSelfIdentity(context.Background()); err == nil && len(identities) > 0 {
+			aiClient.SetIdentity(identities)
+			log.Printf("[Bot] Loaded %d living self-identity beliefs into AI mind", len(identities))
+		}
 	}
 
 	return b, nil
@@ -1039,6 +1047,28 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("posted to moltbook: **%s**\nhttps://www.moltbook.com/posts/%s", title, postID))
 		}
 
+	case "/identity":
+		if b.memory == nil {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "memory store unavailable.")
+			return
+		}
+		identities, err := b.memory.GetAllSelfIdentity(ctx)
+		if err != nil || len(identities) == 0 {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "no custom identity notes found.")
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString("my current living self-narrative & stances:\n\n")
+		var keys []string
+		for k := range identities {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			sb.WriteString(fmt.Sprintf("• **%s**:\n  %s\n\n", k, identities[k]))
+		}
+		b.sendReply(msg.Chat.ID, msg.MessageID, strings.TrimSpace(sb.String()))
+
 	case "/dm":
 		if len(parts) < 3 {
 			b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/dm @username <message>` or `/dm me <message>`")
@@ -1176,6 +1206,13 @@ func (b *Bot) handleNLPAndChat(
 			title = "this group"
 		}
 		chatContext = fmt.Sprintf("- YOU ARE IN A TELEGRAM GROUP CHAT: %q.\n- Speak to the room or to @%s as appropriate.\n- Strictly do NOT ask eager follow-up questions.", title, username)
+	}
+
+	// Sync living self-identity into AI
+	if b.memory != nil && b.ai != nil {
+		if identities, err := b.memory.GetAllSelfIdentity(ctx); err == nil && len(identities) > 0 {
+			b.ai.SetIdentity(identities)
+		}
 	}
 
 	// Quick pre-flight: if prompt explicitly mentions a GitHub URL or sandbox,
@@ -2454,6 +2491,26 @@ func (b *Bot) executeToolCall(
 			}
 		}
 		return fmt.Sprintf("Comment posted on Moltbook post %s: %q", args.PostID, args.Content)
+
+	case "update_self_identity":
+		var args struct {
+			Key     string `json:"key"`
+			Content string `json:"content"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.Key == "" || args.Content == "" {
+			return "Error: Both key and content are required to tune self-identity."
+		}
+		if b.memory != nil {
+			if err := b.memory.SaveSelfIdentity(ctx, args.Key, args.Content); err != nil {
+				return fmt.Sprintf("Failed to update identity in persistent memory: %v", err)
+			}
+			if all, err := b.memory.GetAllSelfIdentity(ctx); err == nil && b.ai != nil {
+				b.ai.SetIdentity(all)
+			}
+			return fmt.Sprintf("Identity updated successfully for %q: %q", args.Key, args.Content)
+		}
+		return "Memory store is not available."
 
 	case "send_dm":
 		var args struct {
@@ -4087,7 +4144,9 @@ func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, 
 
 	msg := tgbotapi.NewMessage(chatID, htmlText)
 	msg.ParseMode = "HTML"
-	if replyToMsgID > 0 {
+	// In 1-on-1 private DMs (chatID > 0), text back naturally without quoting.
+	// In group chats (chatID < 0), quote so replies are clearly directed.
+	if replyToMsgID > 0 && chatID < 0 {
 		msg.ReplyToMessageID = replyToMsgID
 	}
 	_, err := b.api.Send(msg)
@@ -4143,7 +4202,7 @@ func (b *Bot) sendViaThreadAPI(_ context.Context, chatID int64, threadID int, re
 	params.AddNonEmpty("text", htmlText)
 	params.AddNonEmpty("parse_mode", "HTML")
 	params.AddNonZero("message_thread_id", threadID)
-	if replyToMsgID > 0 {
+	if replyToMsgID > 0 && chatID < 0 {
 		params.AddNonZero("reply_to_message_id", replyToMsgID)
 	}
 	resp, err := b.api.MakeRequest("sendMessage", params)
