@@ -50,11 +50,12 @@ type Config struct {
 	ResendAPIKey    string
 	ResendFromEmail string
 
-	// Search & Analytics & Vision & Registrar
+	// Search & Analytics & Vision & Registrar & AI Social
 	TavilyAPIKey   string
 	CodexIOAPIKey  string
 	GeminiAPIKey   string
 	VercelToken    string
+	MoltbookAPIKey string
 
 	// Server & Webhook
 	Port       string
@@ -94,6 +95,7 @@ func LoadConfig() (*Config, error) {
 		CodexIOAPIKey:       os.Getenv("CODEX_IO_API_KEY"),
 		GeminiAPIKey:        os.Getenv("GEMINI_API_KEY"),
 		VercelToken:         os.Getenv("VERCEL_TOKEN"),
+		MoltbookAPIKey:      os.Getenv("MOLTBOOK_API_KEY"),
 		Port:                os.Getenv("PORT"),
 		WebhookURL:          os.Getenv("WEBHOOK_URL"),
 	}

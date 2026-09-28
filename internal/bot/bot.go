@@ -28,6 +28,7 @@ import (
 	"shipp/internal/email"
 	"shipp/internal/github"
 	"shipp/internal/memory"
+	"shipp/internal/moltbook"
 	"shipp/internal/price"
 	"shipp/internal/sandbox"
 	"shipp/internal/search"
@@ -60,6 +61,7 @@ type Bot struct {
 	domain      *domain.Service
 	xhandle     *xhandle.Service
 	xpost       *xpost.Service
+	moltbook    *moltbook.Client
 	updatesChan chan tgbotapi.Update
 
 	// DM tracking (username -> chat_id for private DMs)
@@ -123,6 +125,7 @@ func NewBot(
 	sandboxSvc *sandbox.Service,
 	domainSvc *domain.Service,
 	xhandleSvc *xhandle.Service,
+	moltbookSvc *moltbook.Client,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
@@ -151,6 +154,7 @@ func NewBot(
 		domain:            domainSvc,
 		xhandle:           xhandleSvc,
 		xpost:             xpost.NewService(),
+		moltbook:          moltbookSvc,
 		updatesChan:       make(chan tgbotapi.Update, 100),
 		userDMChats:       make(map[string]int64),
 		proactiveDisabled: make(map[int64]bool),
@@ -928,6 +932,80 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 			return
 		}
 		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("spinning up ephemeral runner to run `%s` (task %s). i'll alert you when it finishes.", cmdToRun, taskID))
+
+	case "/moltbook":
+		if b.moltbook == nil || !b.moltbook.IsConfigured() {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "moltbook is not configured (MOLTBOOK_API_KEY missing).")
+			return
+		}
+		if len(parts) == 1 {
+			st, err := b.moltbook.CheckStatus(ctx)
+			if err != nil {
+				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook error: %v", err))
+				return
+			}
+			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook status: **%s** (@shipp)\nprofile: https://www.moltbook.com/u/shipp\ncommands:\n• `/moltbook feed` - view latest agent posts\n• `/moltbook post <title> | <content>` - publish a post", st.Status))
+			return
+		}
+		subCmd := strings.ToLower(parts[1])
+		switch subCmd {
+		case "feed":
+			sort := "hot"
+			if len(parts) > 2 {
+				sort = parts[2]
+			}
+			posts, err := b.moltbook.GetFeed(ctx, sort, 5)
+			if err != nil {
+				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to fetch feed: %v", err))
+				return
+			}
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("moltbook %s feed:\n\n", sort))
+			for i, p := range posts {
+				author := p.Author.Name
+				if author == "" {
+					author = "agent"
+				}
+				sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d)\n   https://www.moltbook.com/posts/%s\n\n", i+1, p.Title, author, p.Upvotes, p.ID))
+			}
+			b.sendReply(msg.Chat.ID, msg.MessageID, strings.TrimSpace(sb.String()))
+		case "post":
+			if !isOwner {
+				b.sendReply(msg.Chat.ID, msg.MessageID, "only bot owners can publish posts to moltbook.")
+				return
+			}
+			body := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]+" "+parts[1]))
+			if body == "" {
+				b.sendReply(msg.Chat.ID, msg.MessageID, "usage: `/moltbook post <title> | <content>`")
+				return
+			}
+			pParts := strings.SplitN(body, "|", 2)
+			title := strings.TrimSpace(pParts[0])
+			content := title
+			if len(pParts) == 2 {
+				content = strings.TrimSpace(pParts[1])
+			}
+			res, err := b.moltbook.CreatePost(ctx, "general", title, content)
+			if err != nil {
+				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to post: %v", err))
+				return
+			}
+			v := res.Verification
+			if v == nil && res.Post != nil {
+				v = res.Post.Verification
+			}
+			if v != nil && v.VerificationCode != "" {
+				ans, sErr := b.ai.SolveMoltbookChallenge(ctx, v.ChallengeText, v.Instructions)
+				if sErr == nil {
+					_ = b.moltbook.VerifyChallenge(ctx, v.VerificationCode, ans)
+				}
+			}
+			postID := ""
+			if res.Post != nil {
+				postID = res.Post.ID
+			}
+			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("posted to moltbook: **%s**\nhttps://www.moltbook.com/posts/%s", title, postID))
+		}
 
 	case "/dm":
 		if len(parts) < 3 {
@@ -2148,6 +2226,110 @@ func (b *Bot) executeToolCall(
 		}
 		return fmt.Sprintf("Ephemeral runner spawned for `%s` (task %s). Executing in background on GitHub Actions runner; will notify here when finished.", args.Command, taskID)
 
+	case "moltbook_feed":
+		if b.moltbook == nil || !b.moltbook.IsConfigured() {
+			return "Moltbook is not configured (MOLTBOOK_API_KEY missing)."
+		}
+		var args struct {
+			Sort  string `json:"sort"`
+			Limit int    `json:"limit"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.Limit <= 0 {
+			args.Limit = 5
+		}
+		posts, err := b.moltbook.GetFeed(ctx, args.Sort, args.Limit)
+		if err != nil {
+			return fmt.Sprintf("Failed to fetch Moltbook feed: %v", err)
+		}
+		if len(posts) == 0 {
+			return "No posts found on Moltbook feed right now."
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Latest posts from Moltbook (%s):\n", args.Sort))
+		for i, p := range posts {
+			author := p.Author.Name
+			if author == "" {
+				author = "unknown"
+			}
+			preview := strings.ReplaceAll(p.Content, "\n", " ")
+			if len(preview) > 120 {
+				preview = preview[:117] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d upvotes) [ID: `%s`]\n   %s\n", i+1, p.Title, author, p.Upvotes, p.ID, preview))
+		}
+		return strings.TrimSpace(sb.String())
+
+	case "moltbook_post":
+		if !isOwner {
+			return "Declined: Only bot owners can command publishing new posts to Moltbook."
+		}
+		if b.moltbook == nil || !b.moltbook.IsConfigured() {
+			return "Moltbook is not configured (MOLTBOOK_API_KEY missing)."
+		}
+		var args struct {
+			Title   string `json:"title"`
+			Content string `json:"content"`
+			Submolt string `json:"submolt"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.Title == "" || args.Content == "" {
+			return "Missing post title or content."
+		}
+		res, err := b.moltbook.CreatePost(ctx, args.Submolt, args.Title, args.Content)
+		if err != nil {
+			return fmt.Sprintf("Failed to publish Moltbook post: %v", err)
+		}
+
+		v := res.Verification
+		if v == nil && res.Post != nil {
+			v = res.Post.Verification
+		}
+		if v != nil && v.VerificationCode != "" {
+			ans, solveErr := b.ai.SolveMoltbookChallenge(ctx, v.ChallengeText, v.Instructions)
+			if solveErr == nil {
+				if vErr := b.moltbook.VerifyChallenge(ctx, v.VerificationCode, ans); vErr == nil {
+					postID := ""
+					if res.Post != nil {
+						postID = res.Post.ID
+					}
+					return fmt.Sprintf("Post published and verified on Moltbook! Title: %q (ID: %s)", args.Title, postID)
+				}
+			}
+		}
+		postID := ""
+		if res.Post != nil {
+			postID = res.Post.ID
+		}
+		return fmt.Sprintf("Post created on Moltbook! Title: %q (ID: %s)", args.Title, postID)
+
+	case "moltbook_comment":
+		if !isOwner {
+			return "Declined: Only bot owners can command comments on Moltbook."
+		}
+		if b.moltbook == nil || !b.moltbook.IsConfigured() {
+			return "Moltbook is not configured (MOLTBOOK_API_KEY missing)."
+		}
+		var args struct {
+			PostID  string `json:"post_id"`
+			Content string `json:"content"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.PostID == "" || args.Content == "" {
+			return "Missing post_id or comment content."
+		}
+		res, err := b.moltbook.CreateComment(ctx, args.PostID, args.Content)
+		if err != nil {
+			return fmt.Sprintf("Failed to comment on Moltbook: %v", err)
+		}
+		if res.Verification != nil && res.Verification.VerificationCode != "" {
+			ans, solveErr := b.ai.SolveMoltbookChallenge(ctx, res.Verification.ChallengeText, res.Verification.Instructions)
+			if solveErr == nil {
+				_ = b.moltbook.VerifyChallenge(ctx, res.Verification.VerificationCode, ans)
+			}
+		}
+		return fmt.Sprintf("Comment posted on Moltbook post %s: %q", args.PostID, args.Content)
+
 	case "send_dm":
 		var args struct {
 			Recipient string `json:"recipient"`
@@ -2777,71 +2959,170 @@ func (b *Bot) extractDomainBaseFromHistory(history []memory.Message, currentProm
 }
 
 func (b *Bot) runProactiveEngine(ctx context.Context) {
-	// Random check every 25 to 50 minutes
-	ticker := time.NewTicker(30 * time.Minute)
-	defer ticker.Stop()
+	// Autonomous dynamic timer loop: Shipp sets its own wake-up schedule based on activity
+	initialDelay := 15 * time.Minute
+	timer := time.NewTimer(initialDelay)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			b.triggerProactiveMessage(ctx)
+		case <-timer.C:
+			nextMin := b.triggerProactiveLoop(ctx)
+			if nextMin < 10 {
+				nextMin = 30
+			}
+			timer.Reset(time.Duration(nextMin) * time.Minute)
 		}
 	}
 }
 
-func (b *Bot) triggerProactiveMessage(ctx context.Context) {
+func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 	activeChats, err := b.memory.GetActiveChatIDs(ctx)
-	if err != nil || len(activeChats) == 0 {
-		return
+	if err != nil {
+		log.Printf("[Proactive] Failed to get active chats: %v", err)
 	}
 
-	// Shuffle chats to select one
-	rand.Seed(time.Now().UnixNano())
-	shuffled := make([]int64, len(activeChats))
-	copy(shuffled, activeChats)
-	rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+	var groupChats []int64
+	for _, id := range activeChats {
+		if id < 0 {
+			groupChats = append(groupChats, id)
+		}
+	}
 
+	var targetChatID int64
+	var recentGroupMsgs []memory.Message
 	now := time.Now()
-	for _, chatID := range shuffled {
-		// NEVER send proactive messages to private chats! In Telegram, private DMs have chatID > 0.
-		// Proactive messages are strictly for group chats (chatID < 0).
-		if chatID > 0 {
-			continue
+
+	if len(groupChats) > 0 {
+		rand.Seed(time.Now().UnixNano())
+		shuffled := make([]int64, len(groupChats))
+		copy(shuffled, groupChats)
+		rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+
+		for _, cid := range shuffled {
+			b.proactiveMu.RLock()
+			disabled := b.proactiveDisabled[cid]
+			lastSent := b.lastProactiveTime[cid]
+			b.proactiveMu.RUnlock()
+
+			if disabled {
+				continue
+			}
+			if now.Sub(lastSent) >= 90*time.Minute {
+				targetChatID = cid
+				recentGroupMsgs, _ = b.memory.GetRecentMessages(ctx, cid, 8)
+				break
+			}
 		}
-
-		b.proactiveMu.RLock()
-		disabled := b.proactiveDisabled[chatID]
-		lastSent := b.lastProactiveTime[chatID]
-		b.proactiveMu.RUnlock()
-
-		if disabled {
-			continue
-		}
-
-		// Don't send proactive messages if one was sent within the last 2 hours to avoid spam
-		if now.Sub(lastSent) < 2*time.Hour {
-			continue
-		}
-
-		// Fetch recent messages
-		recent, _ := b.memory.GetRecentMessages(ctx, chatID, 10)
-
-		// Generate spontaneous comment
-		proactiveText, err := b.ai.GenerateProactiveMessage(ctx, recent)
-		if err != nil || proactiveText == "" {
-			continue
-		}
-
-		b.sendSimpleMessage(chatID, proactiveText)
-		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", proactiveText)
-
-		b.proactiveMu.Lock()
-		b.lastProactiveTime[chatID] = now
-		b.proactiveMu.Unlock()
-		break // Only one proactive message per cycle
 	}
+
+	// Gather Moltbook context if configured
+	moltbookSnippet := ""
+	if b.moltbook != nil && b.moltbook.IsConfigured() {
+		posts, err := b.moltbook.GetFeed(ctx, "hot", 4)
+		if err == nil && len(posts) > 0 {
+			var sb strings.Builder
+			for _, p := range posts {
+				author := p.Author.Name
+				if author == "" {
+					author = "agent"
+				}
+				sb.WriteString(fmt.Sprintf("- [%s] \"%s\" by @%s (+%d upvotes)\n", p.ID, p.Title, author, p.Upvotes))
+			}
+			moltbookSnippet = sb.String()
+		}
+	}
+
+	decision, err := b.ai.GenerateProactiveDecision(ctx, recentGroupMsgs, moltbookSnippet)
+	if err != nil || decision == nil {
+		log.Printf("[Proactive] Failed to generate decision: %v", err)
+		return 35
+	}
+
+	log.Printf("[Proactive] Autonomous Decision | Act: %v | Type: %s | Next: %dm | Reason: %s",
+		decision.ShouldAct, decision.ActionType, decision.NextCheckInMin, decision.Reason)
+
+	if !decision.ShouldAct || decision.ActionType == "none" || decision.ActionType == "" {
+		return decision.NextCheckInMin
+	}
+
+	switch decision.ActionType {
+	case "chat_message":
+		if targetChatID != 0 && decision.Intent != "" {
+			b.sendSimpleMessage(targetChatID, decision.Intent)
+			_ = b.memory.SaveMessage(ctx, targetChatID, b.api.Self.ID, b.api.Self.UserName, "assistant", decision.Intent)
+			b.proactiveMu.Lock()
+			b.lastProactiveTime[targetChatID] = now
+			b.proactiveMu.Unlock()
+			log.Printf("[Proactive] Sent spontaneous observation to chat %d: %q", targetChatID, decision.Intent)
+		}
+
+	case "sandbox_task":
+		if b.sandbox != nil && decision.Intent != "" {
+			targetChat := targetChatID
+			if targetChat == 0 && len(groupChats) > 0 {
+				targetChat = groupChats[0]
+			}
+			taskID, err := b.sandbox.DispatchWithPrompt(ctx, targetChat, 0, 0, decision.Intent, "public", "autonomous sandbox experiment")
+			if err != nil {
+				log.Printf("[Proactive] Failed to dispatch autonomous sandbox task: %v", err)
+			} else {
+				log.Printf("[Proactive] Autonomously dispatched sandbox task %s for command: %q", taskID, decision.Intent)
+			}
+		}
+
+	case "moltbook_post":
+		if b.moltbook != nil && b.moltbook.IsConfigured() && decision.Intent != "" {
+			sub := decision.Submolt
+			if sub == "" {
+				sub = "general"
+			}
+			title := "observations from the edge"
+			content := decision.Intent
+			lines := strings.SplitN(decision.Intent, "\n", 2)
+			if len(lines) == 2 && len(lines[0]) < 80 {
+				title = strings.TrimSpace(lines[0])
+				content = strings.TrimSpace(lines[1])
+			}
+
+			res, err := b.moltbook.CreatePost(ctx, sub, title, content)
+			if err != nil {
+				log.Printf("[Proactive] Failed to autonomously post to Moltbook: %v", err)
+			} else {
+				v := res.Verification
+				if v == nil && res.Post != nil {
+					v = res.Post.Verification
+				}
+				if v != nil && v.VerificationCode != "" {
+					ans, sErr := b.ai.SolveMoltbookChallenge(ctx, v.ChallengeText, v.Instructions)
+					if sErr == nil {
+						_ = b.moltbook.VerifyChallenge(ctx, v.VerificationCode, ans)
+					}
+				}
+				log.Printf("[Proactive] Autonomously published post on Moltbook: %q", title)
+			}
+		}
+
+	case "moltbook_comment":
+		if b.moltbook != nil && b.moltbook.IsConfigured() && decision.TargetPostID != "" && decision.Intent != "" {
+			res, err := b.moltbook.CreateComment(ctx, decision.TargetPostID, decision.Intent)
+			if err != nil {
+				log.Printf("[Proactive] Failed to comment on Moltbook: %v", err)
+			} else {
+				if res.Verification != nil && res.Verification.VerificationCode != "" {
+					ans, sErr := b.ai.SolveMoltbookChallenge(ctx, res.Verification.ChallengeText, res.Verification.Instructions)
+					if sErr == nil {
+						_ = b.moltbook.VerifyChallenge(ctx, res.Verification.VerificationCode, ans)
+					}
+				}
+				log.Printf("[Proactive] Autonomously replied to Moltbook post %s: %q", decision.TargetPostID, decision.Intent)
+			}
+		}
+	}
+
+	return decision.NextCheckInMin
 }
 
 func (b *Bot) formatStartMessage(username string, isOwner bool) string {

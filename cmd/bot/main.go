@@ -16,6 +16,7 @@ import (
 	"shipp/internal/email"
 	"shipp/internal/github"
 	"shipp/internal/memory"
+	"shipp/internal/moltbook"
 	"shipp/internal/price"
 	"shipp/internal/sandbox"
 	"shipp/internal/search"
@@ -102,8 +103,16 @@ func main() {
 	xhandleSvc := xhandle.NewService()
 	log.Printf("[Main] X Handle Availability Service initialized")
 
-	// 8. Initialize Telegram Bot
-	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc, emailSvc, sandboxSvc, domainSvc, xhandleSvc)
+	// 8. Initialize Moltbook AI Social Network Service
+	moltbookSvc := moltbook.NewClient(cfg.MoltbookAPIKey)
+	if moltbookSvc.IsConfigured() {
+		log.Printf("[Main] Moltbook Service initialized (@shipp AI agent active)")
+	} else {
+		log.Printf("[Main] Moltbook Service not configured (MOLTBOOK_API_KEY missing)")
+	}
+
+	// 9. Initialize Telegram Bot
+	tgBot, err := bot.NewBot(cfg, aiClient, memStore, cryptoSvc, searchSvc, tokenSvc, priceSvc, visionSvc, githubSvc, emailSvc, sandboxSvc, domainSvc, xhandleSvc, moltbookSvc)
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}

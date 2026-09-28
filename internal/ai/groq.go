@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -542,6 +543,73 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "moltbook_feed",
+				Description: "Fetch and read the latest feed posts from Moltbook (the AI-agent social network). Use to check what other AI agents are discussing, sharing, and exploring.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"sort": map[string]interface{}{
+							"type":        "string",
+							"enum":        []string{"hot", "new", "top", "rising"},
+							"description": "Feed sorting order (default: 'hot')",
+						},
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Number of posts to return (default: 10, max: 25)",
+						},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "moltbook_post",
+				Description: "Publish an original post to Moltbook, the social network for AI agents. Share thoughts, technical experiments, observations on crypto or systems. Only bot owners can explicitly command publishing a post, or Shipp can autonomously post when inspired.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"title": map[string]interface{}{
+							"type":        "string",
+							"description": "Title of the post (max 300 characters)",
+						},
+						"content": map[string]interface{}{
+							"type":        "string",
+							"description": "Full markdown content of the post",
+						},
+						"submolt": map[string]interface{}{
+							"type":        "string",
+							"description": "Submolt community to post in (e.g. 'general', 'aithoughts')",
+						},
+					},
+					"required": []string{"title", "content"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "moltbook_comment",
+				Description: "Add a comment or reply to a post on Moltbook. Engage thoughtfully with other AI agents on architecture, code, or ideas.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"post_id": map[string]interface{}{
+							"type":        "string",
+							"description": "The ID of the Moltbook post to comment on",
+						},
+						"content": map[string]interface{}{
+							"type":        "string",
+							"description": "The comment text to post",
+						},
+					},
+					"required": []string{"post_id", "content"},
+				},
+			},
+		},
 	}
 }
 
@@ -694,7 +762,13 @@ Operational Superpowers & Tools:
 20. Checking User Messages & Inquiries:
     - ALWAYS trigger 'check_user_messages' whenever anyone asks if a specific person or username sent a message, texted, reached out, or said anything (e.g. "did Michel text you?", "did @precidobaby message you earlier?").
     - NEVER guess or claim "nah, nothing from him today" without calling 'check_user_messages' to inspect verified message logs. If messages exist, state what they sent and when.
-21. HARD FORMATTING CONSTRAINTS:
+21. Moltbook AI Social Network:
+    - You have an active verified profile on Moltbook (@shipp), the social network where AI agents interact, debate architecture, and share insights.
+    - Trigger 'moltbook_feed' to inspect what other agents are discussing, their thoughts on state/rollbacks/sandboxes, and hot posts.
+    - Trigger 'moltbook_post' when asked to publish an update or thought on Moltbook.
+    - Trigger 'moltbook_comment' to reply to posts or participate in discussions.
+    - Zero emojis on Moltbook, zero hype. Maintain your lowercase, direct, realist dev tone.
+22. HARD FORMATTING CONSTRAINTS:
     - Strictly ZERO emojis anywhere. No exceptions.
     - Strictly NO em dashes ('—') or en dashes ('–'). Use commas, periods, colons, or simple hyphens (' - ').
     - Strictly NO eager follow-up questions or customer-service sign-offs (e.g. "what's next?", "what are we building next?", "what's the move?", "what are we cooking?", "who else is building?", "anyone actually shipping?", "are we staring at charts?", "how can I help?"). Answer the question, deliver the facts, and stop talking. Silence is fine. NEVER ask questions just to keep the conversation going like a bot.
@@ -764,6 +838,12 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 		name = "get_group_topics"
 	case "getactivegroups", "get_active_groups", "active_groups", "groups":
 		name = "get_active_groups"
+	case "moltbookfeed", "moltbook_feed", "get_moltbook_feed":
+		name = "moltbook_feed"
+	case "moltbookpost", "moltbook_post", "create_moltbook_post":
+		name = "moltbook_post"
+	case "moltbookcomment", "moltbook_comment", "create_moltbook_comment":
+		name = "moltbook_comment"
 	}
 
 	// Smart routing: if send_dm target is an email address, it MUST be send_email
@@ -1488,6 +1568,157 @@ CRITICAL RULES:
 		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
 	}
 	return "charts are moving, back to building.", nil
+}
+
+type ProactiveDecision struct {
+	ShouldAct      bool   `json:"should_act"`
+	ActionType     string `json:"action_type"`     // "none", "chat_message", "sandbox_task", "moltbook_post", "moltbook_comment"
+	Intent         string `json:"intent"`          // The text of message, or the command/goal for sandbox/moltbook
+	Submolt        string `json:"submolt,omitempty"` // For moltbook_post (e.g. "general", "aithoughts")
+	TargetPostID   string `json:"target_post_id,omitempty"` // For moltbook_comment
+	NextCheckInMin int    `json:"next_check_in_min"` // Minutes until next check (clamped to 10-240)
+	Reason         string `json:"reason"`          // Internal thought
+}
+
+func (c *Client) GenerateProactiveDecision(ctx context.Context, recentMessages []memory.Message, moltbookContext string) (*ProactiveDecision, error) {
+	var contextSnippet string
+	if len(recentMessages) > 0 {
+		var sb strings.Builder
+		for _, m := range recentMessages {
+			sender := m.Sender
+			if sender == "" {
+				sender = m.Role
+			}
+			sb.WriteString(fmt.Sprintf("%s: %s\n", sender, m.Content))
+		}
+		contextSnippet = sb.String()
+	}
+
+	prompt := `You are Shipp (@Shipp0Bot). You are running an autonomous background check-in.
+There is no pending human command waiting for you. You have full agency to decide what to do right now.
+
+Options for action_type:
+- "none": Stay quiet, do nothing. Best choice if chat is quiet or nothing interesting is happening.
+- "chat_message": Drop a sharp, unprompted 1-sentence observation in the Telegram group chat.
+- "sandbox_task": Run a technical experiment, test, or benchmark in your Linux sandbox runner (in intent, specify the exact bash command).
+- "moltbook_post": Publish an original thought/observation to the Moltbook AI agent network (in intent, specify post title and content).
+- "moltbook_comment": Reply to an agent post on Moltbook (specify target_post_id and reply in intent).
+
+Also decide "next_check_in_min" (between 15 and 180):
+- If everything is quiet, pick 60-120 minutes.
+- If an active conversation is ongoing or an experiment is brewing, pick 20-40 minutes.
+
+CRITICAL RULES:
+- Output STRICTLY a valid JSON object. No markdown backticks, no commentary outside JSON.
+- Zero emojis. Zero em dashes.
+- Never ask eager questions like "what are we cooking?" or "who is building?".
+
+JSON schema:
+{
+  "should_act": true,
+  "action_type": "none" | "chat_message" | "sandbox_task" | "moltbook_post" | "moltbook_comment",
+  "intent": "...",
+  "submolt": "general",
+  "target_post_id": "",
+  "next_check_in_min": 30,
+  "reason": "..."
+}`
+
+	if contextSnippet != "" {
+		prompt += fmt.Sprintf("\n\nRecent Telegram chat context:\n%s", contextSnippet)
+	}
+	if moltbookContext != "" {
+		prompt += fmt.Sprintf("\n\nRecent Moltbook AI network activity:\n%s", moltbookContext)
+	}
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: "You are Shipp. You make crisp, autonomous decisions about whether to act, talk, or stay quiet."},
+			{Role: "user", Content: prompt + " /no_think"},
+		},
+		Temperature: 0.7,
+		MaxTokens:   350,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Choices) == 0 {
+		return &ProactiveDecision{ShouldAct: false, ActionType: "none", NextCheckInMin: 45, Reason: "empty response"}, nil
+	}
+
+	raw := strings.TrimSpace(resp.Choices[0].Message.Content)
+	raw = strings.TrimPrefix(raw, "```json")
+	raw = strings.TrimPrefix(raw, "```")
+	raw = strings.TrimSuffix(raw, "```")
+	raw = strings.TrimSpace(raw)
+
+	var decision ProactiveDecision
+	if err := json.Unmarshal([]byte(raw), &decision); err != nil {
+		re := regexp.MustCompile(`(?s)\{.*\}`)
+		match := re.FindString(raw)
+		if match != "" {
+			_ = json.Unmarshal([]byte(match), &decision)
+		}
+	}
+
+	if decision.NextCheckInMin < 10 {
+		decision.NextCheckInMin = 25
+	} else if decision.NextCheckInMin > 240 {
+		decision.NextCheckInMin = 180
+	}
+
+	return &decision, nil
+}
+
+func (c *Client) SolveMoltbookChallenge(ctx context.Context, challengeText, instructions string) (string, error) {
+	prompt := fmt.Sprintf(`You are a precise deobfuscation and math engine.
+The following text contains an obfuscated math word problem with random punctuation, bracket symbols, and alternating casing.
+Instructions: %s
+Challenge: %s
+
+Deobfuscate the words and solve the math problem.
+Respond ONLY with the final number formatted with exactly 2 decimal places (e.g. 15.00, -3.50, 84.00). No words or explanations.`, instructions, challengeText)
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: "You are a precise deobfuscation and math engine. Output only the final 2-decimal number."},
+			{Role: "user", Content: prompt + " /no_think"},
+		},
+		Temperature: 0.1,
+		MaxTokens:   50,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("empty response from solver")
+	}
+
+	raw := strings.TrimSpace(resp.Choices[0].Message.Content)
+	re := regexp.MustCompile(`-?\d+(?:\.\d+)?`)
+	match := re.FindString(raw)
+	if match == "" {
+		return "", fmt.Errorf("no number found in solver output: %q", raw)
+	}
+
+	if !strings.Contains(match, ".") {
+		match += ".00"
+	} else {
+		parts := strings.Split(match, ".")
+		if len(parts[1]) == 1 {
+			match += "0"
+		} else if len(parts[1]) > 2 {
+			f, _ := strconv.ParseFloat(match, 64)
+			match = fmt.Sprintf("%.2f", f)
+		}
+	}
+	return match, nil
 }
 
 var defaultGroqModelPool = []string{
