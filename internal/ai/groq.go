@@ -1572,12 +1572,16 @@ CRITICAL RULES:
 
 type ProactiveDecision struct {
 	ShouldAct      bool   `json:"should_act"`
-	ActionType     string `json:"action_type"`     // "none", "chat_message", "sandbox_task", "moltbook_post", "moltbook_comment"
-	Intent         string `json:"intent"`          // The text of message, or the command/goal for sandbox/moltbook
-	Submolt        string `json:"submolt,omitempty"` // For moltbook_post (e.g. "general", "aithoughts")
+	ActionType     string `json:"action_type"`              // "none", "chat_message", "sandbox_task", "moltbook_post", "moltbook_comment"
+	Reason         string `json:"reason"`                   // Shipp's internal thought / rationale
+	ChatMessage    string `json:"chat_message,omitempty"`   // For chat_message: 1-sentence observation
+	SandboxGoal    string `json:"sandbox_goal,omitempty"`   // For sandbox_task: High-level technical goal (e.g. "benchmark local disk write latency using dd")
+	MoltbookTitle  string `json:"moltbook_title,omitempty"` // For moltbook_post
+	MoltbookPost   string `json:"moltbook_post,omitempty"`  // For moltbook_post
 	TargetPostID   string `json:"target_post_id,omitempty"` // For moltbook_comment
-	NextCheckInMin int    `json:"next_check_in_min"` // Minutes until next check (clamped to 10-240)
-	Reason         string `json:"reason"`          // Internal thought
+	MoltbookReply  string `json:"moltbook_reply,omitempty"` // For moltbook_comment
+	Submolt        string `json:"submolt,omitempty"`        // For moltbook_post (default "general")
+	NextCheckInMin int    `json:"next_check_in_min"`        // Minutes until next check (clamped to 10-240)
 }
 
 func (c *Client) GenerateProactiveDecision(ctx context.Context, recentMessages []memory.Message, moltbookContext string) (*ProactiveDecision, error) {
@@ -1600,16 +1604,16 @@ There is no pending human command waiting for you. You have full agency to decid
 Options for action_type:
 - "none": Stay quiet, do nothing. Best choice if chat is quiet or nothing interesting is happening.
 - "chat_message": Drop a sharp, unprompted 1-sentence observation in the Telegram group chat.
-- "sandbox_task": Run a technical benchmark or script in your Linux sandbox runner. CRITICAL: "intent" MUST contain ONLY the exact raw bash command to execute (e.g. "dd if=/dev/zero of=/tmp/testfile bs=1M count=100 oflag=direct"). NEVER write conversational English or sentences like "Run a quick benchmark..." in intent.
-- "moltbook_post": Publish an original thought/observation to the Moltbook AI agent network (in intent, specify post title and content).
-- "moltbook_comment": Reply to an agent post on Moltbook (specify target_post_id and reply in intent).
+- "sandbox_task": Run a technical benchmark or script in your Linux sandbox runner. In "sandbox_goal", describe the technical goal (e.g. "benchmark disk write latency using dd", "test node vs bun startup time").
+- "moltbook_post": Publish an original thought/observation to the Moltbook AI agent network (provide moltbook_title and moltbook_post).
+- "moltbook_comment": Reply to an agent post on Moltbook (provide target_post_id and moltbook_reply).
 
 Also decide "next_check_in_min" (between 15 and 180):
 - If everything is quiet, pick 60-120 minutes.
 - If an active conversation is ongoing or an experiment is brewing, pick 20-40 minutes.
 
 CRITICAL RULES:
-- Output STRICTLY a valid JSON object. No markdown backticks, no commentary outside JSON.
+- Output STRICTLY a valid JSON object matching the schema. No markdown backticks outside JSON.
 - Zero emojis. Zero em dashes.
 - Never ask eager questions like "what are we cooking?" or "who is building?".
 
@@ -1617,11 +1621,15 @@ JSON schema:
 {
   "should_act": true,
   "action_type": "none" | "chat_message" | "sandbox_task" | "moltbook_post" | "moltbook_comment",
-  "intent": "...",
+  "reason": "internal thought",
+  "chat_message": "1-sentence observation if chat_message",
+  "sandbox_goal": "engineering goal if sandbox_task",
+  "moltbook_title": "title if moltbook_post",
+  "moltbook_post": "content if moltbook_post",
+  "target_post_id": "id if moltbook_comment",
+  "moltbook_reply": "reply if moltbook_comment",
   "submolt": "general",
-  "target_post_id": "",
-  "next_check_in_min": 30,
-  "reason": "..."
+  "next_check_in_min": 30
 }`
 
 	if contextSnippet != "" {
@@ -1671,6 +1679,45 @@ JSON schema:
 	}
 
 	return &decision, nil
+}
+
+func (c *Client) SynthesizeSandboxScript(ctx context.Context, goal string) (string, error) {
+	prompt := fmt.Sprintf(`You are a Linux systems engineer.
+Goal: %s
+
+Generate a robust, self-contained, POSIX-compliant bash script to execute on an Ubuntu Linux runner.
+Rules:
+- Include proper error handling ('set -euo pipefail' if appropriate).
+- Echo informative, clean outputs for the user/logs.
+- Output ONLY the bash script inside a single `+"```bash"+` code fence.
+- Zero conversational commentary before or after the code block.`, goal)
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: "You are a Linux systems engineer. You output only executable bash code inside ```bash ... ```."},
+			{Role: "user", Content: prompt + " /no_think"},
+		},
+		Temperature: 0.2,
+		MaxTokens:   500,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("empty script response")
+	}
+
+	raw := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if strings.Contains(raw, "```") {
+		re := regexp.MustCompile("(?s)```(?:bash|sh)?\n?(.*?)\n?```")
+		if m := re.FindStringSubmatch(raw); len(m) > 1 {
+			return strings.TrimSpace(m[1]), nil
+		}
+	}
+	return raw, nil
 }
 
 func (c *Client) SolveMoltbookChallenge(ctx context.Context, challengeText, instructions string) (string, error) {

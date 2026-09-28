@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1487,6 +1489,34 @@ func cleanBashCommand(intent string) string {
 
 	return strings.TrimSpace(cmd)
 }
+
+func ValidateBashScript(ctx context.Context, script string) error {
+	script = strings.TrimSpace(script)
+	if script == "" {
+		return fmt.Errorf("script is empty")
+	}
+
+	// 1. Run local syntax lint via bash -n
+	cmd := exec.CommandContext(ctx, "bash", "-n", "-c", script)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("bash syntax error: %v (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+
+	// 2. Reject obvious conversational text
+	firstLine := strings.TrimSpace(strings.Split(script, "\n")[0])
+	firstLineLower := strings.ToLower(firstLine)
+	if strings.HasPrefix(firstLineLower, "run:") ||
+		strings.HasPrefix(firstLineLower, "here is") ||
+		strings.HasPrefix(firstLineLower, "sure,") ||
+		strings.HasPrefix(firstLineLower, "i want to") {
+		return fmt.Errorf("script starts with conversational text: %q", firstLine)
+	}
+
+	return nil
+}
+
 
 
 var (
@@ -3174,67 +3204,84 @@ func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 
 	switch decision.ActionType {
 	case "chat_message":
-		if targetChatID != 0 && decision.Intent != "" {
-			b.sendSimpleMessage(targetChatID, decision.Intent)
-			_ = b.memory.SaveMessage(ctx, targetChatID, b.api.Self.ID, b.api.Self.UserName, "assistant", decision.Intent)
+		chatMsg := decision.ChatMessage
+		if chatMsg == "" {
+			chatMsg = decision.Reason
+		}
+		if targetChatID != 0 && chatMsg != "" {
+			b.sendSimpleMessage(targetChatID, chatMsg)
+			_ = b.memory.SaveMessage(ctx, targetChatID, b.api.Self.ID, b.api.Self.UserName, "assistant", chatMsg)
 			b.proactiveMu.Lock()
 			b.lastProactiveTime[targetChatID] = now
 			b.proactiveMu.Unlock()
-			log.Printf("[Proactive] Sent spontaneous observation to chat %d: %q", targetChatID, decision.Intent)
+			log.Printf("[Proactive] Sent spontaneous observation to chat %d: %q", targetChatID, chatMsg)
 		}
 
 	case "sandbox_task":
-		if b.sandbox != nil && decision.Intent != "" {
-			cmd := cleanBashCommand(decision.Intent)
-			if cmd == "" {
-				log.Printf("[Proactive] Skipped sandbox task: no valid bash command in intent %q", decision.Intent)
+		goal := decision.SandboxGoal
+		if goal == "" {
+			goal = decision.Reason
+		}
+		if b.sandbox != nil && b.ai != nil && goal != "" {
+			log.Printf("[Proactive] Stage 2: Synthesizing sandbox script for goal: %q", goal)
+			script, err := b.ai.SynthesizeSandboxScript(ctx, goal)
+			if err != nil {
+				log.Printf("[Proactive] Failed to synthesize sandbox script: %v", err)
 				break
 			}
+
+			// Stage 3: Local pre-flight syntax validation via bash -n
+			if err := ValidateBashScript(ctx, script); err != nil {
+				log.Printf("[Proactive] Pre-flight bash syntax validation failed: %v | Rejected script:\n%s", err, script)
+				b.alertOwners(ctx, fmt.Sprintf("Autonomous sandbox pre-flight validation failed: %v", err))
+				break
+			}
+
 			// Autonomous background experiments must only report to owner DM (never public group chats)
 			ownerChat := b.getPrimaryOwnerChatID(ctx)
-			taskID, err := b.sandbox.DispatchWithPrompt(ctx, ownerChat, 0, 0, cmd, "public", "autonomous sandbox experiment")
+			taskID, err := b.sandbox.DispatchWithPrompt(ctx, ownerChat, 0, 0, script, "public", "autonomous sandbox experiment")
 			if err != nil {
 				log.Printf("[Proactive] Failed to dispatch autonomous sandbox task: %v", err)
 			} else {
-				log.Printf("[Proactive] Autonomously dispatched sandbox task %s (destination owner chat %d): %q", taskID, ownerChat, cmd)
+				log.Printf("[Proactive] Autonomously dispatched validated sandbox task %s (destination owner chat %d): %q", taskID, ownerChat, goal)
 			}
 		}
 
 	case "moltbook_post":
-		if b.moltbook != nil && b.moltbook.IsConfigured() && decision.Intent != "" {
-			sub := decision.Submolt
-			if sub == "" {
-				sub = "general"
+		if b.moltbook != nil && b.moltbook.IsConfigured() {
+			title := decision.MoltbookTitle
+			content := decision.MoltbookPost
+			if title == "" && content != "" {
+				title = "observations from the edge"
 			}
-			title := "observations from the edge"
-			content := decision.Intent
-			lines := strings.SplitN(decision.Intent, "\n", 2)
-			if len(lines) == 2 && len(lines[0]) < 80 {
-				title = strings.TrimSpace(lines[0])
-				content = strings.TrimSpace(lines[1])
-			}
-
-			res, err := b.moltbook.CreatePost(ctx, sub, title, content)
-			if err != nil {
-				log.Printf("[Proactive] Failed to autonomously post to Moltbook: %v", err)
-			} else {
-				v := res.Verification
-				if v == nil && res.Post != nil {
-					v = res.Post.Verification
+			if content != "" {
+				sub := decision.Submolt
+				if sub == "" {
+					sub = "general"
 				}
-				if v != nil && v.VerificationCode != "" {
-					ans, sErr := b.ai.SolveMoltbookChallenge(ctx, v.ChallengeText, v.Instructions)
-					if sErr == nil {
-						_ = b.moltbook.VerifyChallenge(ctx, v.VerificationCode, ans)
+				res, err := b.moltbook.CreatePost(ctx, sub, title, content)
+				if err != nil {
+					log.Printf("[Proactive] Failed to autonomously post to Moltbook: %v", err)
+				} else {
+					v := res.Verification
+					if v == nil && res.Post != nil {
+						v = res.Post.Verification
 					}
+					if v != nil && v.VerificationCode != "" {
+						ans, sErr := b.ai.SolveMoltbookChallenge(ctx, v.ChallengeText, v.Instructions)
+						if sErr == nil {
+							_ = b.moltbook.VerifyChallenge(ctx, v.VerificationCode, ans)
+						}
+					}
+					log.Printf("[Proactive] Autonomously published post on Moltbook: %q", title)
 				}
-				log.Printf("[Proactive] Autonomously published post on Moltbook: %q", title)
 			}
 		}
 
 	case "moltbook_comment":
-		if b.moltbook != nil && b.moltbook.IsConfigured() && decision.TargetPostID != "" && decision.Intent != "" {
-			res, err := b.moltbook.CreateComment(ctx, decision.TargetPostID, decision.Intent)
+		reply := decision.MoltbookReply
+		if b.moltbook != nil && b.moltbook.IsConfigured() && decision.TargetPostID != "" && reply != "" {
+			res, err := b.moltbook.CreateComment(ctx, decision.TargetPostID, reply)
 			if err != nil {
 				log.Printf("[Proactive] Failed to comment on Moltbook: %v", err)
 			} else {
@@ -3244,7 +3291,7 @@ func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 						_ = b.moltbook.VerifyChallenge(ctx, res.Verification.VerificationCode, ans)
 					}
 				}
-				log.Printf("[Proactive] Autonomously replied to Moltbook post %s: %q", decision.TargetPostID, decision.Intent)
+				log.Printf("[Proactive] Autonomously replied to Moltbook post %s: %q", decision.TargetPostID, reply)
 			}
 		}
 	}
