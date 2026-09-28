@@ -1424,6 +1424,71 @@ func (b *Bot) alertOwners(ctx context.Context, alertText string) []string {
 	return notified
 }
 
+func (b *Bot) getPrimaryOwnerChatID(ctx context.Context) int64 {
+	for _, owner := range b.cfg.Owners {
+		oClean := strings.ToLower(strings.TrimPrefix(owner, "@"))
+		b.dmMu.RLock()
+		dmChatID, exists := b.userDMChats[oClean]
+		b.dmMu.RUnlock()
+
+		if (!exists || dmChatID == 0) && b.memory != nil {
+			if uid, err := b.memory.GetUserIDByUsername(ctx, oClean); err == nil && uid != 0 {
+				dmChatID = uid
+				exists = true
+				b.dmMu.Lock()
+				b.userDMChats[oClean] = uid
+				b.dmMu.Unlock()
+			}
+		}
+
+		if exists && dmChatID != 0 {
+			return dmChatID
+		}
+	}
+	return 0
+}
+
+func cleanBashCommand(intent string) string {
+	cmd := strings.TrimSpace(intent)
+
+	// If backticks are present, extract code inside backticks
+	if strings.Contains(cmd, "```") {
+		re := regexp.MustCompile("(?s)```(?:bash|sh)?\n?(.*?)\n?```")
+		if m := re.FindStringSubmatch(cmd); len(m) > 1 {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	if strings.Contains(cmd, "`") {
+		re := regexp.MustCompile("`([^`]+)`")
+		if m := re.FindStringSubmatch(cmd); len(m) > 1 {
+			return strings.TrimSpace(m[1])
+		}
+	}
+
+	// Remove leading prefixes like "Run: ", "Execute: ", "Command: "
+	prefixes := []string{"Run: ", "run: ", "Execute: ", "execute: ", "Command: ", "command: ", "Run ", "run "}
+	for _, p := range prefixes {
+		if strings.HasPrefix(cmd, p) {
+			cmd = strings.TrimPrefix(cmd, p)
+			break
+		}
+	}
+
+	// If it contains " using <cmd>", extract the command part
+	if strings.Contains(cmd, " using ") {
+		parts := strings.SplitN(cmd, " using ", 2)
+		after := parts[1]
+		if strings.Contains(after, " to ") {
+			toParts := strings.Split(after, " to ")
+			after = toParts[0]
+		}
+		cmd = strings.TrimSpace(after)
+	}
+
+	return strings.TrimSpace(cmd)
+}
+
+
 var (
 	fakeTransferClaimRegex = regexp.MustCompile(`(?i)(?:sending\s+(?:the\s+)?(?:\$?\d+|thirty|forty|twenty|ten|fifty|\d+\s+cents|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt|dollars|cents)?|funds|crypto|it)\s+over\s+now|sending\s+(?:the\s+)?(?:\$?\d+|thirty|forty|twenty|ten|fifty|\d+\s+cents|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt|dollars|cents)|funds|crypto)\s+over\b|sending\s+(?:the\s+)?(?:thirty|forty|twenty|ten|\d+)\s+cents\s+over\s+now|sending\s+(?:the\s+)?funds\s+now|sending\s+(?:the\s+)?crypto\s+now|funds\s+are\s+on\s+the\s+way|transferred\s+(?:the\s+)?(?:\$?\d+|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt)|funds|crypto)\s+to|sent\s+(?:the\s+)?(?:\$?\d+|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt)|funds|crypto)\s+to|just\s+sent\s+(?:the\s+)?(?:\$?\d+|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt)|thirty|twenty|ten|\d+)\s+(?:cents|eth|sol|bnb|over))`)
 	evmAddressRegex        = regexp.MustCompile(`(?i)\b0x[a-f0-9]{40}\b`)
@@ -3120,15 +3185,18 @@ func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 
 	case "sandbox_task":
 		if b.sandbox != nil && decision.Intent != "" {
-			targetChat := targetChatID
-			if targetChat == 0 && len(groupChats) > 0 {
-				targetChat = groupChats[0]
+			cmd := cleanBashCommand(decision.Intent)
+			if cmd == "" {
+				log.Printf("[Proactive] Skipped sandbox task: no valid bash command in intent %q", decision.Intent)
+				break
 			}
-			taskID, err := b.sandbox.DispatchWithPrompt(ctx, targetChat, 0, 0, decision.Intent, "public", "autonomous sandbox experiment")
+			// Autonomous background experiments must only report to owner DM (never public group chats)
+			ownerChat := b.getPrimaryOwnerChatID(ctx)
+			taskID, err := b.sandbox.DispatchWithPrompt(ctx, ownerChat, 0, 0, cmd, "public", "autonomous sandbox experiment")
 			if err != nil {
 				log.Printf("[Proactive] Failed to dispatch autonomous sandbox task: %v", err)
 			} else {
-				log.Printf("[Proactive] Autonomously dispatched sandbox task %s for command: %q", taskID, decision.Intent)
+				log.Printf("[Proactive] Autonomously dispatched sandbox task %s (destination owner chat %d): %q", taskID, ownerChat, cmd)
 			}
 		}
 
@@ -4231,6 +4299,16 @@ func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
 	if threadID != 0 {
 		ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
 	}
+
+	// Autonomous background sandbox tasks must NEVER post to group chats (chatID <= 0)
+	if taskPrompt == "autonomous sandbox experiment" {
+		if payload.ChatID <= 0 {
+			log.Printf("[Sandbox] Autonomous task %s finished (exit %d in %ds). Suppressed posting to group chat %d. Reporting to owners via DM.", payload.TaskID, payload.ExitCode, payload.DurationSeconds, payload.ChatID)
+			b.alertOwners(ctx, fmt.Sprintf("Autonomous sandbox run report (exit %d in %ds):\n%s", payload.ExitCode, payload.DurationSeconds, text))
+			return
+		}
+	}
+
 	if replyToMsgID > 0 {
 		b.sendReplyCtx(ctx, payload.ChatID, replyToMsgID, text)
 	} else {
@@ -4247,6 +4325,13 @@ func (b *Bot) handleSandboxTimeout(task *sandbox.Task) {
 		ctx = context.WithValue(ctx, ctxKeyThreadID{}, task.ThreadID)
 	}
 	text := "sandbox task hit the 6-minute timeout without finishing."
+
+	// Autonomous background sandbox tasks must NEVER post timeout to group chats
+	if task.Prompt == "autonomous sandbox experiment" && task.ChatID <= 0 {
+		b.alertOwners(ctx, text)
+		return
+	}
+
 	if task.ReplyToMsgID > 0 {
 		b.sendReplyCtx(ctx, task.ChatID, task.ReplyToMsgID, text)
 	} else {

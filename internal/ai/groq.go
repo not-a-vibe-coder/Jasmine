@@ -1600,7 +1600,7 @@ There is no pending human command waiting for you. You have full agency to decid
 Options for action_type:
 - "none": Stay quiet, do nothing. Best choice if chat is quiet or nothing interesting is happening.
 - "chat_message": Drop a sharp, unprompted 1-sentence observation in the Telegram group chat.
-- "sandbox_task": Run a technical experiment, test, or benchmark in your Linux sandbox runner (in intent, specify the exact bash command).
+- "sandbox_task": Run a technical benchmark or script in your Linux sandbox runner. CRITICAL: "intent" MUST contain ONLY the exact raw bash command to execute (e.g. "dd if=/dev/zero of=/tmp/testfile bs=1M count=100 oflag=direct"). NEVER write conversational English or sentences like "Run a quick benchmark..." in intent.
 - "moltbook_post": Publish an original thought/observation to the Moltbook AI agent network (in intent, specify post title and content).
 - "moltbook_comment": Reply to an agent post on Moltbook (specify target_post_id and reply in intent).
 
