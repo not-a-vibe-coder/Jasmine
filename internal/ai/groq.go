@@ -1799,7 +1799,7 @@ Rules:
 			{Role: "user", Content: prompt + " /no_think"},
 		},
 		Temperature: 0.2,
-		MaxTokens:   500,
+		MaxTokens:   1500,
 	}
 
 	resp, err := c.sendChatCompletion(ctx, reqBody)
@@ -1816,6 +1816,17 @@ Rules:
 		if m := re.FindStringSubmatch(raw); len(m) > 1 {
 			return strings.TrimSpace(m[1]), nil
 		}
+		// Handle unclosed fence
+		lines := strings.Split(raw, "\n")
+		var filtered []string
+		for _, l := range lines {
+			trimmed := strings.TrimSpace(l)
+			if strings.HasPrefix(trimmed, "```") {
+				continue
+			}
+			filtered = append(filtered, l)
+		}
+		return strings.TrimSpace(strings.Join(filtered, "\n")), nil
 	}
 	return raw, nil
 }

@@ -1490,14 +1490,27 @@ func (b *Bot) getPrimaryOwnerChatID(ctx context.Context) int64 {
 func cleanBashCommand(intent string) string {
 	cmd := strings.TrimSpace(intent)
 
-	// If backticks are present, extract code inside backticks
+	// 1. If backtick fences are present, extract code inside complete code fence
 	if strings.Contains(cmd, "```") {
 		re := regexp.MustCompile("(?s)```(?:bash|sh)?\n?(.*?)\n?```")
 		if m := re.FindStringSubmatch(cmd); len(m) > 1 {
 			return strings.TrimSpace(m[1])
 		}
+		// Fallback for unclosed code fence (e.g. starts with ```bash or has stray ```)
+		lines := strings.Split(cmd, "\n")
+		var filtered []string
+		for _, l := range lines {
+			trimmed := strings.TrimSpace(l)
+			if strings.HasPrefix(trimmed, "```") {
+				continue
+			}
+			filtered = append(filtered, l)
+		}
+		cmd = strings.TrimSpace(strings.Join(filtered, "\n"))
 	}
-	if strings.Contains(cmd, "`") {
+
+	// 2. Only extract single inline backticks for single-line intents
+	if strings.Contains(cmd, "`") && strings.Count(cmd, "\n") == 0 {
 		re := regexp.MustCompile("`([^`]+)`")
 		if m := re.FindStringSubmatch(cmd); len(m) > 1 {
 			return strings.TrimSpace(m[1])
@@ -1528,7 +1541,7 @@ func cleanBashCommand(intent string) string {
 }
 
 func ValidateBashScript(ctx context.Context, script string) error {
-	script = strings.TrimSpace(script)
+	script = cleanBashCommand(script)
 	if script == "" {
 		return fmt.Errorf("script is empty")
 	}
@@ -3328,9 +3341,9 @@ func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 			}
 
 			// Stage 3: Local pre-flight syntax validation via bash -n
+			script = cleanBashCommand(script)
 			if err := ValidateBashScript(ctx, script); err != nil {
-				log.Printf("[Proactive] Pre-flight bash syntax validation failed: %v | Rejected script:\n%s", err, script)
-				b.alertOwners(ctx, fmt.Sprintf("Autonomous sandbox pre-flight validation failed: %v", err))
+				log.Printf("[Proactive] Pre-flight bash syntax validation failed: %v | Skipping dispatch silently. Rejected script:\n%s", err, script)
 				break
 			}
 

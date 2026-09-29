@@ -1345,6 +1345,18 @@ dd if=/dev/zero of=/tmp/test.img bs=1M count=10`
 	if err := ValidateBashScript(ctx, chattyScript); err == nil {
 		t.Errorf("expected conversational script to fail")
 	}
+
+	// 4. Wrapped in complete markdown code fences
+	fencedScript := "```bash\necho \"hello world\"\n```"
+	if err := ValidateBashScript(ctx, fencedScript); err != nil {
+		t.Errorf("expected fenced script to pass, got: %v", err)
+	}
+
+	// 5. Unclosed leading code fence
+	unclosedFence := "```bash\necho \"hello world\"\n"
+	if err := ValidateBashScript(ctx, unclosedFence); err != nil {
+		t.Errorf("expected unclosed fenced script to pass after cleaning, got: %v", err)
+	}
 }
 
 func TestGetSandboxRunsTool(t *testing.T) {
