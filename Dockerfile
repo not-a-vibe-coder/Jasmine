@@ -22,8 +22,8 @@ FROM alpine:3.21
 
 WORKDIR /app
 
-# Install CA certificates for HTTPS / TLS RPCs
-RUN apk --no-cache add ca-certificates tzdata
+# Install CA certificates for HTTPS / TLS RPCs and bash for script validation
+RUN apk --no-cache add ca-certificates tzdata bash
 
 # Copy compiled binary from builder
 COPY --from=builder /app/bin/shipp /app/shipp

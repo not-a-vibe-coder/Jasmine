@@ -1533,15 +1533,7 @@ func ValidateBashScript(ctx context.Context, script string) error {
 		return fmt.Errorf("script is empty")
 	}
 
-	// 1. Run local syntax lint via bash -n
-	cmd := exec.CommandContext(ctx, "bash", "-n", "-c", script)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("bash syntax error: %v (%s)", err, strings.TrimSpace(stderr.String()))
-	}
-
-	// 2. Reject obvious conversational text
+	// 1. Reject obvious conversational text
 	firstLine := strings.TrimSpace(strings.Split(script, "\n")[0])
 	firstLineLower := strings.ToLower(firstLine)
 	if strings.HasPrefix(firstLineLower, "run:") ||
@@ -1549,6 +1541,23 @@ func ValidateBashScript(ctx context.Context, script string) error {
 		strings.HasPrefix(firstLineLower, "sure,") ||
 		strings.HasPrefix(firstLineLower, "i want to") {
 		return fmt.Errorf("script starts with conversational text: %q", firstLine)
+	}
+
+	// 2. Run local syntax lint via bash -n or sh -n if available
+	shellPath, err := exec.LookPath("bash")
+	if err != nil {
+		shellPath, err = exec.LookPath("sh")
+	}
+
+	if err == nil && shellPath != "" {
+		cmd := exec.CommandContext(ctx, shellPath, "-n", "-c", script)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("syntax error via %s: %v (%s)", filepath.Base(shellPath), err, strings.TrimSpace(stderr.String()))
+		}
+	} else {
+		log.Printf("[Bot] Warning: neither bash nor sh found in PATH; skipping local syntax lint")
 	}
 
 	return nil

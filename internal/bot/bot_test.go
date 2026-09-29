@@ -1321,6 +1321,33 @@ func TestEmptyRepoFileCreationTool(t *testing.T) {
 	}
 }
 
+func TestValidateBashScript(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Valid script
+	cleanScript := `#!/usr/bin/env bash
+set -e
+echo "running benchmark"
+dd if=/dev/zero of=/tmp/test.img bs=1M count=10
+rm -f /tmp/test.img`
+	if err := ValidateBashScript(ctx, cleanScript); err != nil {
+		t.Errorf("expected valid script to pass, got: %v", err)
+	}
+
+	// 2. Empty script
+	if err := ValidateBashScript(ctx, "   "); err == nil {
+		t.Errorf("expected empty script to fail")
+	}
+
+	// 3. Conversational opener
+	chattyScript := `Sure, here is the script to run disk benchmarks:
+dd if=/dev/zero of=/tmp/test.img bs=1M count=10`
+	if err := ValidateBashScript(ctx, chattyScript); err == nil {
+		t.Errorf("expected conversational script to fail")
+	}
+}
+
+
 
 
 
