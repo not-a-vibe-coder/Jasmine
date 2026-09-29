@@ -1782,12 +1782,17 @@ Goal: %s
 
 You are writing a self-contained, executable script to run on an Ubuntu Linux runner.
 Environment & Capabilities:
-- Full root access, 4 vCPUs, 16GB RAM, high-speed unrestricted outbound internet.
-- Standard tools are available: bash, curl, jq, python3, git, docker, dig, ping, etc.
-- You can query public blockchain RPCs, scrape APIs, clone repos, analyze data with python, or benchmark systems.
+- Full root privileges via passwordless sudo, 4 vCPUs, 16GB RAM, high-speed unrestricted outbound internet.
+- Standard tools available: bash, curl, jq, python3, pip3, git, docker, dig, nmap, netcat, etc.
+- CRITICAL: If your task requires a tool or package that may not be pre-installed (e.g. tshark, wireshark, ffmpeg, any pip package, any apt package), you MUST self-install it at the start of the script using:
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq <package>
+  or for Python packages:
+    pip3 install -q <package>
+- NEVER exit early with "command not found". You have full root to install whatever the task needs.
 
 Rules:
-- Include proper error handling ('set -euo pipefail' if appropriate).
+- Include proper error handling ('set -euo pipefail' if appropriate, but only when safe).
 - Echo clean, concise summaries to stdout so results can be evaluated clearly.
 - Output ONLY the bash script inside a single `+"```bash"+` code fence.
 - Zero conversational commentary before or after the code block.`, goal)

@@ -4463,7 +4463,11 @@ func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
 	// 1. Always record the run in persistent memory (so Shipp recalls what he ran/found)
 	// 2. High-signal filter: only message owner DM if there is a genuinely noteworthy finding (zero raw terminal dumps, zero backticks).
 	// If mundane or routine: stay completely silent!
-	if taskPrompt == "autonomous sandbox experiment" {
+	isAutonomous := (taskPrompt == "autonomous sandbox experiment") || strings.HasPrefix(payload.TaskID, "auto_")
+	if isAutonomous {
+		if taskCmd == "" {
+			taskCmd = "autonomous background task"
+		}
 		isNoteworthy := false
 		insight := ""
 		if b.ai != nil {
@@ -4524,7 +4528,8 @@ func (b *Bot) handleSandboxTimeout(task *sandbox.Task) {
 	text := "sandbox task hit the 6-minute timeout without finishing."
 
 	// Autonomous background sandbox tasks must NEVER post timeout to group chats or spam DM
-	if task.Prompt == "autonomous sandbox experiment" {
+	isAutonomous := (task.Prompt == "autonomous sandbox experiment") || strings.HasPrefix(task.ID, "auto_")
+	if isAutonomous {
 		log.Printf("[Sandbox] Autonomous background sandbox task %s timed out after 6 minutes. Stored silently.", task.ID)
 		if b.memory != nil {
 			_ = b.memory.SaveSandboxRun(ctx, memory.SandboxRun{

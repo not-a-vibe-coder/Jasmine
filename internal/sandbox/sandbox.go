@@ -216,7 +216,11 @@ func (s *Service) DispatchWithPrompt(ctx context.Context, chatID int64, threadID
 
 	taskIDBytes := make([]byte, 8)
 	_, _ = rand.Read(taskIDBytes)
-	taskID := fmt.Sprintf("task_%x", taskIDBytes)
+	prefix := "task_"
+	if prompt == "autonomous sandbox experiment" {
+		prefix = "auto_task_"
+	}
+	taskID := fmt.Sprintf("%s%x", prefix, taskIDBytes)
 
 	task := &Task{
 		ID:           taskID,
