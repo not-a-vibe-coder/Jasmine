@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestHybridStoreInMemoryFallback(t *testing.T) {
@@ -234,5 +235,50 @@ func TestAgentSelfIdentity(t *testing.T) {
 		t.Errorf("expected %q, got %q", newReflection, retrieved)
 	}
 }
+
+func TestSandboxRunMemory(t *testing.T) {
+	store, _ := NewHybridStore("", "")
+	defer store.Close()
+	ctx := context.Background()
+
+	run1 := SandboxRun{
+		Goal:            "benchmark disk latency",
+		Command:         "dd if=/dev/zero of=/tmp/test.img bs=1M count=10",
+		ExitCode:        0,
+		Output:          "10485760 bytes (10 MB) copied, 0.012 s, 874 MB/s",
+		DurationSeconds: 2,
+		IsNoteworthy:    false,
+		CreatedAt:       time.Now().Add(-5 * time.Minute),
+	}
+	run2 := SandboxRun{
+		Goal:            "probe base rpc endpoints",
+		Command:         "curl -s https://mainnet.base.org",
+		ExitCode:        0,
+		Output:          "latency 18ms",
+		DurationSeconds: 1,
+		IsNoteworthy:    true,
+		Insight:         "base public rpc clocked at 18ms latency",
+		CreatedAt:       time.Now(),
+	}
+
+	if err := store.SaveSandboxRun(ctx, run1); err != nil {
+		t.Fatalf("SaveSandboxRun failed: %v", err)
+	}
+	if err := store.SaveSandboxRun(ctx, run2); err != nil {
+		t.Fatalf("SaveSandboxRun failed: %v", err)
+	}
+
+	recent, err := store.GetRecentSandboxRuns(ctx, 5)
+	if err != nil {
+		t.Fatalf("GetRecentSandboxRuns failed: %v", err)
+	}
+	if len(recent) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(recent))
+	}
+	if recent[0].Goal != "probe base rpc endpoints" {
+		t.Errorf("expected newest run first, got %q", recent[0].Goal)
+	}
+}
+
 
 

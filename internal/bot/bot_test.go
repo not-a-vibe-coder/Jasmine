@@ -1347,6 +1347,39 @@ dd if=/dev/zero of=/tmp/test.img bs=1M count=10`
 	}
 }
 
+func TestGetSandboxRunsTool(t *testing.T) {
+	memStore, _ := memory.NewHybridStore("", "")
+	defer memStore.Close()
+	ctx := context.Background()
+
+	_ = memStore.SaveSandboxRun(ctx, memory.SandboxRun{
+		Goal:            "probe base rpc endpoints",
+		Command:         "curl -s https://mainnet.base.org",
+		ExitCode:        0,
+		Output:          "200 OK",
+		DurationSeconds: 1,
+		IsNoteworthy:    true,
+		Insight:         "base rpc returned 18ms latency",
+		CreatedAt:       time.Now(),
+	})
+
+	b := &Bot{
+		memory: memStore,
+	}
+
+	res := b.executeToolCall(ctx, 12345, "get_sandbox_runs", `{"limit": 5}`, "skipp_dev", true)
+	if !strings.Contains(res, "Found 1 recent sandbox runs") {
+		t.Errorf("expected to find 1 run, got: %s", res)
+	}
+	if !strings.Contains(res, "probe base rpc endpoints") {
+		t.Errorf("expected goal in output, got: %s", res)
+	}
+	if !strings.Contains(res, "base rpc returned 18ms latency") {
+		t.Errorf("expected insight in output, got: %s", res)
+	}
+}
+
+
 
 
 

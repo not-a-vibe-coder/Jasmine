@@ -2521,6 +2521,37 @@ func (b *Bot) executeToolCall(
 		}
 		return "Memory store is not available."
 
+	case "get_sandbox_runs":
+		var args struct {
+			Limit int `json:"limit"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		limit := args.Limit
+		if limit <= 0 {
+			limit = 5
+		}
+		if b.memory != nil {
+			runs, err := b.memory.GetRecentSandboxRuns(ctx, limit)
+			if err != nil {
+				return fmt.Sprintf("Failed to fetch recent sandbox runs: %v", err)
+			}
+			if len(runs) == 0 {
+				return "No sandbox runs recorded in memory yet."
+			}
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("Found %d recent sandbox runs:\n", len(runs)))
+			for i, r := range runs {
+				ago := time.Since(r.CreatedAt).Round(time.Minute)
+				note := ""
+				if r.IsNoteworthy && r.Insight != "" {
+					note = fmt.Sprintf(" | Insight: %s", r.Insight)
+				}
+				sb.WriteString(fmt.Sprintf("%d. [%s ago] Goal: %q (exit %d in %ds)%s\n", i+1, ago, r.Goal, r.ExitCode, r.DurationSeconds, note))
+			}
+			return strings.TrimSpace(sb.String())
+		}
+		return "Memory store is not available."
+
 	case "send_dm":
 		var args struct {
 			Recipient string `json:"recipient"`
@@ -4415,13 +4446,51 @@ func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
 		ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
 	}
 
-	// Autonomous background sandbox tasks must NEVER post to group chats (chatID <= 0)
+	// Autonomous background sandbox tasks:
+	// 1. Always record the run in persistent memory (so Shipp recalls what he ran/found)
+	// 2. High-signal filter: only message owner DM if there is a genuinely noteworthy finding (zero raw terminal dumps, zero backticks).
+	// If mundane or routine: stay completely silent!
 	if taskPrompt == "autonomous sandbox experiment" {
-		if payload.ChatID <= 0 {
-			log.Printf("[Sandbox] Autonomous task %s finished (exit %d in %ds). Suppressed posting to group chat %d. Reporting to owners via DM.", payload.TaskID, payload.ExitCode, payload.DurationSeconds, payload.ChatID)
-			b.alertOwners(ctx, fmt.Sprintf("Autonomous sandbox run report (exit %d in %ds):\n%s", payload.ExitCode, payload.DurationSeconds, text))
-			return
+		isNoteworthy := false
+		insight := ""
+		if b.ai != nil {
+			ctxEval, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+			noteworthy, evalInsight, err := b.ai.EvaluateSandboxInsight(ctxEval, taskCmd, taskCmd, cleanOutput, payload.ExitCode, payload.DurationSeconds)
+			cancel()
+			if err == nil {
+				isNoteworthy = noteworthy
+				insight = evalInsight
+			}
 		}
+
+		if b.memory != nil {
+			run := memory.SandboxRun{
+				Goal:            taskCmd,
+				Command:         taskCmd,
+				ExitCode:        payload.ExitCode,
+				Output:          cleanOutput,
+				DurationSeconds: payload.DurationSeconds,
+				IsNoteworthy:    isNoteworthy,
+				Insight:         insight,
+				CreatedAt:       time.Now(),
+			}
+			if err := b.memory.SaveSandboxRun(context.Background(), run); err != nil {
+				log.Printf("[Sandbox] Warning: failed to save sandbox run to memory: %v", err)
+			}
+		}
+
+		if isNoteworthy && insight != "" {
+			log.Printf("[Sandbox] Autonomous run %s produced noteworthy insight: %q. Notifying creator via DM.", payload.TaskID, insight)
+			ownerChat := b.getPrimaryOwnerChatID(ctx)
+			if ownerChat != 0 {
+				b.sendSimpleMessageCtx(ctx, ownerChat, insight)
+			} else {
+				b.alertOwners(ctx, insight)
+			}
+		} else {
+			log.Printf("[Sandbox] Autonomous run %s completed cleanly (exit %d in %ds, noteworthy=%v). Stored silently in memory.", payload.TaskID, payload.ExitCode, payload.DurationSeconds, isNoteworthy)
+		}
+		return
 	}
 
 	if replyToMsgID > 0 {
@@ -4441,9 +4510,20 @@ func (b *Bot) handleSandboxTimeout(task *sandbox.Task) {
 	}
 	text := "sandbox task hit the 6-minute timeout without finishing."
 
-	// Autonomous background sandbox tasks must NEVER post timeout to group chats
-	if task.Prompt == "autonomous sandbox experiment" && task.ChatID <= 0 {
-		b.alertOwners(ctx, text)
+	// Autonomous background sandbox tasks must NEVER post timeout to group chats or spam DM
+	if task.Prompt == "autonomous sandbox experiment" {
+		log.Printf("[Sandbox] Autonomous background sandbox task %s timed out after 6 minutes. Stored silently.", task.ID)
+		if b.memory != nil {
+			_ = b.memory.SaveSandboxRun(ctx, memory.SandboxRun{
+				Goal:            task.Command,
+				Command:         task.Command,
+				ExitCode:        -1,
+				Output:          "timed out after 6 minutes",
+				DurationSeconds: 360,
+				IsNoteworthy:    false,
+				CreatedAt:       time.Now(),
+			})
+		}
 		return
 	}
 

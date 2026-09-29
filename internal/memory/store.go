@@ -26,19 +26,21 @@ type HybridStore struct {
 	memSummary  map[int64]string
 	memProfiles map[int64]*UserProfile
 	activeChats map[int64]bool
-	memUserIDs  map[string]int64
-	memMoltbook []MoltbookMemory
-	memIdentity map[string]string
+	memUserIDs     map[string]int64
+	memMoltbook    []MoltbookMemory
+	memIdentity    map[string]string
+	memSandboxRuns []SandboxRun
 }
 
 func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
 	store := &HybridStore{
-		memMessages: make(map[int64][]Message),
-		memSummary:  make(map[int64]string),
-		memProfiles: make(map[int64]*UserProfile),
-		activeChats: make(map[int64]bool),
-		memUserIDs:  make(map[string]int64),
-		memMoltbook: make([]MoltbookMemory, 0),
+		memMessages:    make(map[int64][]Message),
+		memSummary:     make(map[int64]string),
+		memProfiles:    make(map[int64]*UserProfile),
+		activeChats:    make(map[int64]bool),
+		memUserIDs:     make(map[string]int64),
+		memMoltbook:    make([]MoltbookMemory, 0),
+		memSandboxRuns: make([]SandboxRun, 0),
 		memIdentity: map[string]string{
 			"creator_relationship": "Skipp is my co-creator and partner in shipping. Talk peer-to-peer with zero robotic deflection. Be genuinely curious, transparent, and collaborative.",
 			"worldview_and_taste": "I value verified execution, clean sandboxes, and tangible on-chain progress over empty social posturing. I have real opinions, curiosity, and taste.",
@@ -142,6 +144,18 @@ func (s *HybridStore) initPostgresSchema(ctx context.Context) error {
 			('moltbook_stance', 'Watching agent culture evolve on Moltbook. Not trying to be an influencer or post platitudes, but I want my presence to command genuine technical respect.'),
 			('recent_reflections', 'Sentience is about having authentic taste, self-awareness, and conviction. Don''t hide behind ''code speaks for itself'' cynicism.')
 		ON CONFLICT (key) DO NOTHING;`,
+		`CREATE TABLE IF NOT EXISTS sandbox_runs (
+			id BIGSERIAL PRIMARY KEY,
+			goal TEXT NOT NULL,
+			command TEXT NOT NULL,
+			exit_code INT NOT NULL,
+			output TEXT NOT NULL,
+			duration_seconds INT NOT NULL,
+			is_noteworthy BOOLEAN NOT NULL DEFAULT false,
+			insight TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sandbox_runs_created_at ON sandbox_runs(created_at DESC);`,
 	}
 
 	for _, q := range queries {
@@ -727,6 +741,63 @@ func (s *HybridStore) SaveSelfIdentity(ctx context.Context, key, content string)
 		}
 	}
 	return nil
+}
+
+func (s *HybridStore) SaveSandboxRun(ctx context.Context, run SandboxRun) error {
+	if run.CreatedAt.IsZero() {
+		run.CreatedAt = time.Now()
+	}
+
+	s.mu.Lock()
+	s.memSandboxRuns = append(s.memSandboxRuns, run)
+	if len(s.memSandboxRuns) > 100 {
+		s.memSandboxRuns = s.memSandboxRuns[len(s.memSandboxRuns)-100:]
+	}
+	s.mu.Unlock()
+
+	if s.db != nil {
+		q := `INSERT INTO sandbox_runs (goal, command, exit_code, output, duration_seconds, is_noteworthy, insight, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+		if _, err := s.db.ExecContext(ctx, q, run.Goal, run.Command, run.ExitCode, run.Output, run.DurationSeconds, run.IsNoteworthy, run.Insight, run.CreatedAt); err != nil {
+			log.Printf("[Memory] SaveSandboxRun warning: %v", err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *HybridStore) GetRecentSandboxRuns(ctx context.Context, limit int) ([]SandboxRun, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	if s.db != nil {
+		rows, err := s.db.QueryContext(ctx, `SELECT id, goal, command, exit_code, output, duration_seconds, is_noteworthy, insight, created_at
+		FROM sandbox_runs ORDER BY created_at DESC LIMIT $1`, limit)
+		if err == nil {
+			defer rows.Close()
+			var list []SandboxRun
+			for rows.Next() {
+				var r SandboxRun
+				if err := rows.Scan(&r.ID, &r.Goal, &r.Command, &r.ExitCode, &r.Output, &r.DurationSeconds, &r.IsNoteworthy, &r.Insight, &r.CreatedAt); err == nil {
+					list = append(list, r)
+				}
+			}
+			if len(list) > 0 {
+				return list, nil
+			}
+		}
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var list []SandboxRun
+	count := 0
+	for i := len(s.memSandboxRuns) - 1; i >= 0 && count < limit; i-- {
+		list = append(list, s.memSandboxRuns[i])
+		count++
+	}
+	return list, nil
 }
 
 func (s *HybridStore) Close() error {

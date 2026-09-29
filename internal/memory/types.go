@@ -55,6 +55,9 @@ type Store interface {
 	GetSelfIdentity(ctx context.Context, key string) (string, error)
 	GetAllSelfIdentity(ctx context.Context) (map[string]string, error)
 	SaveSelfIdentity(ctx context.Context, key string, content string) error
+	// Autonomous Sandbox Execution Memory
+	SaveSandboxRun(ctx context.Context, run SandboxRun) error
+	GetRecentSandboxRuns(ctx context.Context, limit int) ([]SandboxRun, error)
 	GetDB() *sql.DB
 	GetRedis() *redis.Client
 	Close() error
@@ -64,4 +67,16 @@ type AgentSelfIdentity struct {
 	Key       string    `json:"key"`
 	Content   string    `json:"content"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type SandboxRun struct {
+	ID              int64     `json:"id"`
+	Goal            string    `json:"goal"`
+	Command         string    `json:"command"`
+	ExitCode        int       `json:"exit_code"`
+	Output          string    `json:"output"`
+	DurationSeconds int       `json:"duration_seconds"`
+	IsNoteworthy    bool      `json:"is_noteworthy"`
+	Insight         string    `json:"insight"`
+	CreatedAt       time.Time `json:"created_at"`
 }

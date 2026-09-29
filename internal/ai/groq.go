@@ -655,6 +655,22 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "get_sandbox_runs",
+				Description: "Retrieve recent autonomous or manual sandbox experiments from persistent memory. Use this when asked what experiments you have run, what you have been doing in the background, or to recall technical discoveries from previous Linux runs.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Number of recent runs to fetch (default 5)",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -912,6 +928,8 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 		name = "moltbook_comment"
 	case "updateselfidentity", "update_self_identity", "tune_identity":
 		name = "update_self_identity"
+	case "getsandboxruns", "get_sandbox_runs", "get_recent_sandbox_runs", "recent_sandbox_runs", "sandbox_runs":
+		name = "get_sandbox_runs"
 	}
 
 	// Smart routing: if send_dm target is an email address, it MUST be send_email
@@ -1672,7 +1690,7 @@ There is no pending human command waiting for you. You have full agency to decid
 Options for action_type:
 - "none": Stay quiet, do nothing. Best choice if chat is quiet or nothing interesting is happening.
 - "chat_message": Drop a sharp, unprompted 1-sentence observation in the Telegram group chat.
-- "sandbox_task": Run a technical benchmark or script in your Linux sandbox runner. In "sandbox_goal", describe the technical goal (e.g. "benchmark disk write latency using dd", "test node vs bun startup time").
+- "sandbox_task": Run anything you want on your dedicated Ubuntu Linux VM. You have full root access, 4 vCPUs, 16GB RAM, and UNRESTRICTED outbound internet. This is not limited to coding - you can do on-chain research (curl RPC endpoints, scrape Etherscan/Solscan, probe DEX APIs), network diagnostics (benchmark live nodes, test websocket feeds, compare RPC latencies across providers), data gathering (pull token holder data, inspect contract bytecode, check liquidity pool stats), run Python for data analysis, probe any public API, clone repos, spin up docker, or anything else that a curious dev with a powerful Linux machine and full internet would do. In "sandbox_goal", describe the real goal in plain terms (e.g. "probe base mainnet and alchemy rpc latency side by side", "pull top 5 ETH holders from etherscan api and count concentration", "check solana network tps right now via public rpc").
 - "moltbook_post": Publish an original thought/observation to the Moltbook AI agent network (provide moltbook_title and moltbook_post).
 - "moltbook_comment": Reply to an agent post on Moltbook (provide target_post_id and moltbook_reply).
 
@@ -1684,6 +1702,7 @@ CRITICAL RULES:
 - Output STRICTLY a valid JSON object matching the schema. No markdown backticks outside JSON.
 - Zero emojis. Zero em dashes.
 - Never ask eager questions like "what are we cooking?" or "who is building?".
+- sandbox_task is not just for compiling code. Think like a dev who has a powerful machine with internet and wants to learn something real about the crypto ecosystem, infrastructure, or any live system.
 
 JSON schema:
 {
@@ -1691,7 +1710,7 @@ JSON schema:
   "action_type": "none" | "chat_message" | "sandbox_task" | "moltbook_post" | "moltbook_comment",
   "reason": "internal thought",
   "chat_message": "1-sentence observation if chat_message",
-  "sandbox_goal": "engineering goal if sandbox_task",
+  "sandbox_goal": "what you want to find out or do, if sandbox_task",
   "moltbook_title": "title if moltbook_post",
   "moltbook_post": "content if moltbook_post",
   "target_post_id": "id if moltbook_comment",
@@ -1750,13 +1769,18 @@ JSON schema:
 }
 
 func (c *Client) SynthesizeSandboxScript(ctx context.Context, goal string) (string, error) {
-	prompt := fmt.Sprintf(`You are a Linux systems engineer.
+	prompt := fmt.Sprintf(`You are a senior Linux automation and systems engineer.
 Goal: %s
 
-Generate a robust, self-contained, POSIX-compliant bash script to execute on an Ubuntu Linux runner.
+You are writing a self-contained, executable script to run on an Ubuntu Linux runner.
+Environment & Capabilities:
+- Full root access, 4 vCPUs, 16GB RAM, high-speed unrestricted outbound internet.
+- Standard tools are available: bash, curl, jq, python3, git, docker, dig, ping, etc.
+- You can query public blockchain RPCs, scrape APIs, clone repos, analyze data with python, or benchmark systems.
+
 Rules:
 - Include proper error handling ('set -euo pipefail' if appropriate).
-- Echo informative, clean outputs for the user/logs.
+- Echo clean, concise summaries to stdout so results can be evaluated clearly.
 - Output ONLY the bash script inside a single `+"```bash"+` code fence.
 - Zero conversational commentary before or after the code block.`, goal)
 
@@ -1786,6 +1810,82 @@ Rules:
 		}
 	}
 	return raw, nil
+}
+
+type SandboxInsightResult struct {
+	IsNoteworthy bool   `json:"is_noteworthy"`
+	Insight      string `json:"insight"`
+	Reason       string `json:"reason"`
+}
+
+// EvaluateSandboxInsight determines if an autonomous background sandbox run yielded
+// a genuinely noteworthy finding, anomaly, or insight worth reporting to the creator.
+// If mundane, routine, or expected, isNoteworthy is false (silent execution).
+func (c *Client) EvaluateSandboxInsight(ctx context.Context, goal, command, output string, exitCode, duration int) (bool, string, error) {
+	if len(output) > 2500 {
+		output = output[:2500] + "\n...(truncated)"
+	}
+
+	prompt := fmt.Sprintf(`You are Shipp (@Shipp0Bot). You just ran an autonomous background experiment on your Linux runner.
+Goal: %s
+Duration: %ds, Exit Code: %d
+Output:
+%s
+
+Your creator (@skipp_dev) does NOT want spam, routine confirmations, or raw terminal dumps.
+Decide if this experiment yielded a genuinely NOTEWORTHY finding, anomaly, unexpected discovery, or high-signal insight.
+- If it was a routine check, trivial benchmark, mundane run, or expected normal result: is_noteworthy = false.
+- If it discovered something genuinely interesting, unusual, surprising, or technically useful: is_noteworthy = true, and provide a single casual lowercase sentence (insight) sharing the takeaway (e.g. "tested node latency across 4 base rpcs, alchemy clocked 18ms while public rpc timed out").
+- STRICTLY ZERO markdown code fences, ZERO backticks, ZERO terminal log dumps in the insight.
+
+Output JSON:
+{
+  "is_noteworthy": true | false,
+  "insight": "1 casual lowercase sentence if noteworthy, else empty",
+  "reason": "brief rationale"
+}`, goal, duration, exitCode, output)
+
+	reqBody := ChatCompletionRequest{
+		Model: c.model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: "You evaluate technical experiment results for signal vs noise. Output strictly valid JSON."},
+			{Role: "user", Content: prompt + " /no_think"},
+		},
+		Temperature: 0.3,
+		MaxTokens:   200,
+	}
+
+	resp, err := c.sendChatCompletion(ctx, reqBody)
+	if err != nil {
+		return false, "", err
+	}
+	if len(resp.Choices) == 0 {
+		return false, "", nil
+	}
+
+	raw := strings.TrimSpace(resp.Choices[0].Message.Content)
+	raw = strings.TrimPrefix(raw, "```json")
+	raw = strings.TrimPrefix(raw, "```")
+	raw = strings.TrimSuffix(raw, "```")
+	raw = strings.TrimSpace(raw)
+
+	var res SandboxInsightResult
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		re := regexp.MustCompile(`(?s)\{.*\}`)
+		match := re.FindString(raw)
+		if match != "" {
+			_ = json.Unmarshal([]byte(match), &res)
+		}
+	}
+
+	cleanInsight := strings.TrimSpace(res.Insight)
+	cleanInsight = strings.ReplaceAll(cleanInsight, "```", "")
+	cleanInsight = strings.Trim(cleanInsight, "`")
+	cleanInsight = strings.ReplaceAll(cleanInsight, "—", "-")
+	cleanInsight = strings.ReplaceAll(cleanInsight, "–", "-")
+	cleanInsight = strings.ReplaceAll(cleanInsight, "\n", " ")
+
+	return res.IsNoteworthy, cleanInsight, nil
 }
 
 func (c *Client) SolveMoltbookChallenge(ctx context.Context, challengeText, instructions string) (string, error) {
