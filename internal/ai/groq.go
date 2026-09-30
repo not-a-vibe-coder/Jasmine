@@ -2171,7 +2171,7 @@ var thinkTagRegex = regexp.MustCompile(`(?s)<(?:think|thought)>.*?</(?:think|tho
 var inlineRoleplayTagRegex = regexp.MustCompile(`(?i)\[(REPLYING_TO_[A-Z0-9_]+|ASSISTANT|USER|SYSTEM|AI)\]:?`)
 
 // SanitizeFileContent strips conversational preambles, LLM thinking blocks, roleplay meta-tags
-// (such as [REPLYING_TO_USER]), and wrapping markdown code fences from file contents.
+// (such as [REPLYING_TO_USER]), conversational sign-offs, and wrapping markdown code fences from file contents.
 func SanitizeFileContent(content string) string {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
@@ -2186,93 +2186,116 @@ func SanitizeFileContent(content string) string {
 	// 2. Strip thinking blocks (<think>...</think> or <thought>...</thought>)
 	s := thinkTagRegex.ReplaceAllString(trimmed, "")
 
-	// 3. Process line-by-line to strip roleplay headers and conversational preambles
-	lines := strings.Split(s, "\n")
-	var cleanedLines []string
-	inPreamble := true
+	// cleanPreambleAndSignoff strips roleplay headers, introductory chatter, and closing chatter
+	cleanPreambleAndSignoff := func(input string) string {
+		lines := strings.Split(input, "\n")
+		var cleanedLines []string
+		inPreamble := true
 
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
+		for _, line := range lines {
+			trimmedLine := strings.TrimSpace(line)
 
-		// Check for roleplay / assistant prefixes like [REPLYING_TO_USER]
-		if strings.HasPrefix(trimmedLine, "[") {
-			lower := strings.ToLower(trimmedLine)
-			if strings.HasPrefix(lower, "[replying_to_") ||
-				strings.HasPrefix(lower, "[assistant]") ||
-				strings.HasPrefix(lower, "[ai]") ||
-				strings.HasPrefix(lower, "[system]") ||
-				strings.HasPrefix(lower, "[user]") {
-				continue
+			// Check for roleplay / assistant prefixes like [REPLYING_TO_USER]
+			if strings.HasPrefix(trimmedLine, "[") {
+				lower := strings.ToLower(trimmedLine)
+				if strings.HasPrefix(lower, "[replying_to_") ||
+					strings.HasPrefix(lower, "[assistant]") ||
+					strings.HasPrefix(lower, "[ai]") ||
+					strings.HasPrefix(lower, "[system]") ||
+					strings.HasPrefix(lower, "[user]") {
+					continue
+				}
+			}
+
+			// Also strip any inline roleplay tags
+			if strings.Contains(strings.ToLower(line), "[replying_to_") {
+				line = inlineRoleplayTagRegex.ReplaceAllString(line, "")
+				trimmedLine = strings.TrimSpace(line)
+				if trimmedLine == "" {
+					continue
+				}
+			}
+
+			// Check for conversational preamble at the very start of the file
+			if inPreamble {
+				lower := strings.ToLower(trimmedLine)
+				if lower == "" {
+					continue
+				}
+				if strings.HasPrefix(lower, "here is the updated") ||
+					strings.HasPrefix(lower, "here is the file") ||
+					strings.HasPrefix(lower, "here is the full") ||
+					strings.HasPrefix(lower, "here is the new") ||
+					strings.HasPrefix(lower, "certainly!") ||
+					strings.HasPrefix(lower, "certainly, here") ||
+					strings.HasPrefix(lower, "sure!") ||
+					strings.HasPrefix(lower, "sure, here") ||
+					strings.HasPrefix(lower, "i have updated") ||
+					strings.HasPrefix(lower, "i've updated") ||
+					strings.HasPrefix(lower, "i have added") ||
+					strings.HasPrefix(lower, "i've added") ||
+					strings.HasPrefix(lower, "below is the updated") ||
+					strings.HasPrefix(lower, "below is the complete") {
+					continue
+				}
+				// First non-preamble line encountered
+				inPreamble = false
+			}
+
+			cleanedLines = append(cleanedLines, line)
+		}
+
+		// Strip trailing conversational sign-offs
+		for len(cleanedLines) > 0 {
+			lastLine := strings.TrimSpace(cleanedLines[len(cleanedLines)-1])
+			lower := strings.ToLower(lastLine)
+			if lower == "" ||
+				strings.HasPrefix(lower, "let me know if") ||
+				strings.HasPrefix(lower, "hope this helps") ||
+				strings.HasPrefix(lower, "[end_of_file]") {
+				cleanedLines = cleanedLines[:len(cleanedLines)-1]
+			} else {
+				break
 			}
 		}
 
-		// Also strip any inline roleplay tags
-		if strings.Contains(strings.ToLower(line), "[replying_to_") {
-			line = inlineRoleplayTagRegex.ReplaceAllString(line, "")
-			trimmedLine = strings.TrimSpace(line)
-			if trimmedLine == "" {
-				continue
-			}
-		}
-
-		// Check for conversational preamble at the very start of the file
-		if inPreamble {
-			lower := strings.ToLower(trimmedLine)
-			if lower == "" {
-				continue
-			}
-			if strings.HasPrefix(lower, "here is the updated") ||
-				strings.HasPrefix(lower, "here is the file") ||
-				strings.HasPrefix(lower, "here is the full") ||
-				strings.HasPrefix(lower, "here is the new") ||
-				strings.HasPrefix(lower, "certainly!") ||
-				strings.HasPrefix(lower, "certainly, here") ||
-				strings.HasPrefix(lower, "sure!") ||
-				strings.HasPrefix(lower, "sure, here") ||
-				strings.HasPrefix(lower, "i have updated") ||
-				strings.HasPrefix(lower, "i've updated") ||
-				strings.HasPrefix(lower, "i have added") ||
-				strings.HasPrefix(lower, "i've added") ||
-				strings.HasPrefix(lower, "below is the updated") ||
-				strings.HasPrefix(lower, "below is the complete") {
-				continue
-			}
-			// First non-preamble line encountered
-			inPreamble = false
-		}
-
-		cleanedLines = append(cleanedLines, line)
+		return strings.TrimSpace(strings.Join(cleanedLines, "\n"))
 	}
 
-	s = strings.TrimSpace(strings.Join(cleanedLines, "\n"))
+	s = cleanPreambleAndSignoff(s)
 
-	// 4. Unwrap outer markdown code blocks if the entire content is wrapped in ```
+	// 4. Unwrap outer markdown code blocks if the entire content is wrapped in code fences
 	if strings.HasPrefix(s, "```") {
 		subLines := strings.Split(s, "\n")
 		firstLine := strings.TrimSpace(subLines[0])
 		lastLine := strings.TrimSpace(subLines[len(subLines)-1])
-		if strings.HasPrefix(firstLine, "```") && lastLine == "```" && len(subLines) >= 2 {
-			s = strings.Join(subLines[1:len(subLines)-1], "\n")
-			s = strings.TrimSpace(s)
+
+		fenceLen := 0
+		for _, ch := range firstLine {
+			if ch == '`' {
+				fenceLen++
+			} else {
+				break
+			}
+		}
+
+		expectedClosing := strings.Repeat("`", fenceLen)
+		if fenceLen >= 3 && lastLine == expectedClosing && len(subLines) >= 2 {
+			closedAt := -1
+			for i := 1; i < len(subLines); i++ {
+				if strings.TrimSpace(subLines[i]) == expectedClosing {
+					closedAt = i
+					break
+				}
+			}
+			if closedAt == len(subLines)-1 {
+				s = strings.Join(subLines[1:len(subLines)-1], "\n")
+				s = cleanPreambleAndSignoff(s)
+			}
 		}
 	}
 
-	// 5. Strip conversational sign-offs at the end
-	lines = strings.Split(s, "\n")
-	for len(lines) > 0 {
-		lastLine := strings.TrimSpace(lines[len(lines)-1])
-		lower := strings.ToLower(lastLine)
-		if lower == "" ||
-			strings.HasPrefix(lower, "let me know if") ||
-			strings.HasPrefix(lower, "hope this helps") ||
-			strings.HasPrefix(lower, "[end_of_file]") {
-			lines = lines[:len(lines)-1]
-		} else {
-			break
-		}
-	}
-
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	return strings.TrimSpace(s)
 }
 
 func isWipeIntent(instruction string) bool {
