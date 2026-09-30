@@ -1391,6 +1391,65 @@ func TestGetSandboxRunsTool(t *testing.T) {
 	}
 }
 
+func TestStripReplyContext(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{
+			input:    "[Replying to your previous message: \"Opened PR #5 on liegeagents/liegeagentsapp: ... Say 'merge it' whenever you're ready.\"]\nclose this pr",
+			expected: "close this pr",
+		},
+		{
+			input:    "[Replying to @skipp_dev: \"can you merge?\"]\nno, drop the pr",
+			expected: "no, drop the pr",
+		},
+		{
+			input:    "[Replying to: \"quote\"]\nmerge it",
+			expected: "merge it",
+		},
+		{
+			input:    "close this pr",
+			expected: "close this pr",
+		},
+	}
+
+	for _, c := range cases {
+		got := stripReplyContext(c.input)
+		if got != c.expected {
+			t.Errorf("stripReplyContext(%q) = %q; want %q", c.input, got, c.expected)
+		}
+	}
+}
+
+func TestTryInterceptAction(t *testing.T) {
+	b := &Bot{}
+	ctx := context.Background()
+
+	// 1. If github_close_pr was already executed, tryInterceptAction MUST return false
+	prompt := "[Replying to your previous message: \"Opened PR #5 on liegeagents/liegeagentsapp: ... Say 'merge it' whenever you're ready.\"]\nclose this pr"
+	toolsUsed := []string{"github_close_pr"}
+	intercepted := b.tryInterceptAction(ctx, nil, prompt, strings.ToLower(prompt), "skipp_dev", true, nil, "Closed PR #5.", toolsUsed)
+	if intercepted {
+		t.Errorf("expected tryInterceptAction to return false when github_close_pr was already used")
+	}
+
+	// 2. If github_merge_pr was already executed, tryInterceptAction MUST return false
+	toolsUsedMerge := []string{"github_merge_pr"}
+	intercepted = b.tryInterceptAction(ctx, nil, "merge it", "merge it", "skipp_dev", true, nil, "Merged PR #5.", toolsUsedMerge)
+	if intercepted {
+		t.Errorf("expected tryInterceptAction to return false when github_merge_pr was already used")
+	}
+
+	// 3. User says "don't merge", tryInterceptAction MUST NOT intercept as a merge
+	dontMergePrompt := "don't merge the pr"
+	intercepted = b.tryInterceptAction(ctx, nil, dontMergePrompt, strings.ToLower(dontMergePrompt), "skipp_dev", true, nil, "I will not merge it.", nil)
+	if intercepted {
+		t.Errorf("expected tryInterceptAction to return false for negative merge intent 'don't merge'")
+	}
+}
+
+
 
 
 

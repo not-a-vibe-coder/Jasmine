@@ -1301,9 +1301,17 @@ func (b *Bot) handleNLPAndChat(
 
 	agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor, chatContext)
 
-	// 4. Intercept hallucinated git/merge actions from the final text (safety net)
+	// 4. Intercept hallucinated git/merge actions from the final text (safety net).
+	// Only run if the agentic loop didn't already execute a GitHub tool.
+	hasGitTool := false
+	for _, t := range agResult.ToolsUsed {
+		if strings.HasPrefix(t, "github_") {
+			hasGitTool = true
+			break
+		}
+	}
 	finalText := strings.TrimSpace(agResult.FinalText)
-	if isOwner && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText) {
+	if isOwner && !hasGitTool && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText, agResult.ToolsUsed) {
 		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 		return
 	}
@@ -1337,6 +1345,10 @@ func (b *Bot) trySmartDispatch(
 	isOwner bool,
 	history []memory.Message,
 ) bool {
+	lowerUserPrompt := strings.ToLower(stripReplyContext(prompt))
+	if strings.Contains(lowerUserPrompt, "close") || strings.Contains(lowerUserPrompt, "drop") || strings.Contains(lowerUserPrompt, "cancel") || strings.Contains(lowerUserPrompt, "abandon") {
+		return false
+	}
 	editVerbs := []string{
 		"update", "edit", "change", "rephrase", "rewrite", "modify",
 		"fix the description", "update the description", "update the readme",
@@ -1345,7 +1357,7 @@ func (b *Bot) trySmartDispatch(
 	}
 	hasEditVerb := false
 	for _, v := range editVerbs {
-		if strings.Contains(lowerPrompt, v) {
+		if strings.Contains(lowerUserPrompt, v) {
 			hasEditVerb = true
 			break
 		}
@@ -1361,9 +1373,9 @@ func (b *Bot) trySmartDispatch(
 	}
 
 	log.Printf("[Bot] SmartDispatch: edit+URL detected in prompt, executing github_edit_file on %s", repo)
-	pushToMain := strings.Contains(lowerPrompt, "push to main") ||
-		strings.Contains(lowerPrompt, "straight to main") ||
-		strings.Contains(lowerPrompt, "push straight")
+	pushToMain := strings.Contains(lowerUserPrompt, "push to main") ||
+		strings.Contains(lowerUserPrompt, "straight to main") ||
+		strings.Contains(lowerUserPrompt, "push straight")
 	argsJSON, _ := json.Marshal(map[string]interface{}{
 		"repo":         repo,
 		"path":         "README.md",
@@ -1382,6 +1394,17 @@ func (b *Bot) trySmartDispatch(
 	return true
 }
 
+// stripReplyContext strips the leading "[Replying to...]\n" wrapper so intent matching
+// only evaluates what the user actually said in this turn, avoiding false positives from quoted messages.
+func stripReplyContext(prompt string) string {
+	if strings.HasPrefix(prompt, "[Replying to") {
+		if idx := strings.Index(prompt, "]\n"); idx != -1 {
+			return strings.TrimSpace(prompt[idx+2:])
+		}
+	}
+	return prompt
+}
+
 // tryInterceptAction catches hallucinated push/merge text claims or explicit commands that the LLM
 // responded to without calling the actual tool. Also runs on AI error so rate limits don't lose commands.
 func (b *Bot) tryInterceptAction(
@@ -1391,25 +1414,135 @@ func (b *Bot) tryInterceptAction(
 	isOwner bool,
 	history []memory.Message,
 	replyText string,
+	toolsUsed []string,
 ) bool {
-	chatID := msg.Chat.ID
-	lowerReply := strings.ToLower(replyText)
+	// If a GitHub tool was already executed in this turn, do not intercept
+	for _, t := range toolsUsed {
+		if strings.HasPrefix(t, "github_") {
+			return false
+		}
+	}
 
-	// Push / edit interception
-	isPushOrEditRequest := strings.Contains(lowerPrompt, "push to main") ||
-		strings.Contains(lowerPrompt, "push straight") ||
-		strings.Contains(lowerPrompt, "rephrase it and push") ||
-		strings.Contains(lowerPrompt, "commit to main")
-	isClaimingPushed := strings.Contains(lowerReply, "pushed straight to main") ||
+	chatID := int64(0)
+	msgID := 0
+	fromID := int64(0)
+	if msg != nil {
+		chatID = msg.Chat.ID
+		msgID = msg.MessageID
+		if msg.From != nil {
+			fromID = msg.From.ID
+		}
+	}
+	lowerReply := strings.ToLower(replyText)
+	lowerUserPrompt := strings.ToLower(stripReplyContext(prompt))
+
+	isCloseIntent := strings.Contains(lowerUserPrompt, "close") ||
+		strings.Contains(lowerUserPrompt, "drop") ||
+		strings.Contains(lowerUserPrompt, "abandon") ||
+		strings.Contains(lowerUserPrompt, "cancel") ||
+		strings.Contains(lowerUserPrompt, "reject") ||
+		strings.Contains(lowerUserPrompt, "don't") ||
+		strings.Contains(lowerUserPrompt, "dont") ||
+		strings.Contains(lowerUserPrompt, "do not")
+
+	// 1. Close PR interception — catches "close the pr", "close pr", "drop the pr", "abandon pr", "cancel pr", etc.
+	// Evaluated FIRST so quoted merge hints in PR announcements never misfire as merges.
+	isClosePRRequest := (strings.Contains(lowerUserPrompt, "close") ||
+		strings.Contains(lowerUserPrompt, "drop") ||
+		strings.Contains(lowerUserPrompt, "abandon") ||
+		strings.Contains(lowerUserPrompt, "cancel") ||
+		strings.Contains(lowerUserPrompt, "reject")) &&
+		(strings.Contains(lowerUserPrompt, "pr") || strings.Contains(lowerUserPrompt, "pull request"))
+	isClaimingClosedPR := strings.Contains(lowerReply, "closed pr") || strings.Contains(lowerReply, "closed pull request")
+
+	if isClosePRRequest || isClaimingClosedPR {
+		recoveredRepo := extractRepoFromHistory(history, prompt)
+		if recoveredRepo != "" {
+			prNum := extractPRNumber(history, prompt)
+			if prNum > 0 {
+				log.Printf("[Bot] Intercepted close PR without tool execution. Executing github_close_pr on %s #%d", recoveredRepo, prNum)
+				argsJSON, _ := json.Marshal(map[string]interface{}{
+					"repo":      recoveredRepo,
+					"pr_number": prNum,
+				})
+				toolResult := b.executeToolCall(ctx, chatID, "github_close_pr", string(argsJSON), username, isOwner)
+				b.sendReply(chatID, msgID, toolResult)
+				if b.memory != nil && b.api != nil {
+					_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+				}
+				b.recordActiveDialog(chatID, msgID, toolResult, fromID, username)
+				return true
+			}
+		}
+	}
+
+	// 2. Close issue interception — catches "close issue", "close the issue", "resolve issue", etc.
+	isCloseIssueRequest := (strings.Contains(lowerUserPrompt, "close") ||
+		strings.Contains(lowerUserPrompt, "resolve") ||
+		strings.Contains(lowerUserPrompt, "dismiss")) &&
+		strings.Contains(lowerUserPrompt, "issue")
+	isClaimingClosedIssue := strings.Contains(lowerReply, "closed issue") || strings.Contains(lowerReply, "resolved issue")
+	if isCloseIssueRequest || isClaimingClosedIssue {
+		recoveredRepo := extractRepoFromHistory(history, prompt)
+		if recoveredRepo != "" {
+			issueNum := extractIssueNumber(history, prompt)
+			if issueNum > 0 {
+				log.Printf("[Bot] Intercepted close issue without tool execution. Executing github_close_issue on %s #%d", recoveredRepo, issueNum)
+				argsJSON, _ := json.Marshal(map[string]interface{}{
+					"repo":         recoveredRepo,
+					"issue_number": issueNum,
+				})
+				toolResult := b.executeToolCall(ctx, chatID, "github_close_issue", string(argsJSON), username, isOwner)
+				b.sendReply(chatID, msgID, toolResult)
+				if b.memory != nil && b.api != nil {
+					_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+				}
+				b.recordActiveDialog(chatID, msgID, toolResult, fromID, username)
+				return true
+			}
+		}
+	}
+
+	// 3. Merge interception — catches "merge", "merge it", "merge pr", "merge the pr", "ship it", etc.
+	// Explicitly guarded against negative/close intents.
+	isMergeRequest := (strings.Contains(lowerUserPrompt, "merge") || strings.Contains(lowerUserPrompt, "ship it")) && !isCloseIntent
+	isClaimingMerged := (strings.Contains(lowerReply, "merged pr") || strings.Contains(lowerReply, "merged pull request")) && !isCloseIntent
+	if isMergeRequest || isClaimingMerged {
+		recoveredRepo := extractRepoFromHistory(history, prompt)
+		if recoveredRepo != "" {
+			prNum := extractPRNumber(history, prompt)
+			if prNum > 0 {
+				log.Printf("[Bot] Intercepted merge without tool execution. Executing github_merge_pr on %s #%d", recoveredRepo, prNum)
+				argsJSON, _ := json.Marshal(map[string]interface{}{
+					"repo":      recoveredRepo,
+					"pr_number": prNum,
+				})
+				toolResult := b.executeToolCall(ctx, chatID, "github_merge_pr", string(argsJSON), username, isOwner)
+				b.sendReply(chatID, msgID, toolResult)
+				if b.memory != nil && b.api != nil {
+					_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+				}
+				b.recordActiveDialog(chatID, msgID, toolResult, fromID, username)
+				return true
+			}
+		}
+	}
+
+	// 4. Push / edit interception
+	isPushOrEditRequest := (strings.Contains(lowerUserPrompt, "push to main") ||
+		strings.Contains(lowerUserPrompt, "push straight") ||
+		strings.Contains(lowerUserPrompt, "rephrase it and push") ||
+		strings.Contains(lowerUserPrompt, "commit to main")) && !isCloseIntent
+	isClaimingPushed := (strings.Contains(lowerReply, "pushed straight to main") ||
 		strings.Contains(lowerReply, "pushed to main") ||
 		strings.Contains(lowerReply, "pushed directly") ||
-		(strings.Contains(lowerReply, "opened pr") && !strings.Contains(lowerReply, "want me to open a pr"))
+		(strings.Contains(lowerReply, "opened pr") && !strings.Contains(lowerReply, "want me to open a pr"))) && !isCloseIntent
 
 	if isPushOrEditRequest || isClaimingPushed {
 		recoveredRepo := extractRepoFromHistory(history, prompt)
 		if recoveredRepo != "" {
 			log.Printf("[Bot] Intercepted push without tool execution. Executing github_edit_file on %s", recoveredRepo)
-			pushToMain := strings.Contains(lowerPrompt, "main") || strings.Contains(lowerReply, "main")
+			pushToMain := strings.Contains(lowerUserPrompt, "main") || strings.Contains(lowerReply, "main")
 			instruction := prompt
 			for i := len(history) - 1; i >= 0; i-- {
 				if history[i].Role == "user" && !strings.Contains(strings.ToLower(history[i].Content), "push to main") {
@@ -1424,80 +1557,15 @@ func (b *Bot) tryInterceptAction(
 				"push_to_main": pushToMain,
 			})
 			// Ack first, then work in background.
-			b.sendReplyCtx(ctx, chatID, msg.MessageID, b.getRandomWorkingAck())
+			b.sendReplyCtx(ctx, chatID, msgID, b.getRandomWorkingAck())
 			go func() {
 				toolResult := b.executeToolCall(ctx, chatID, "github_edit_file", string(argsJSON), username, isOwner)
-				b.sendReplyCtx(ctx, chatID, msg.MessageID, toolResult)
-				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+				b.sendReplyCtx(ctx, chatID, msgID, toolResult)
+				if b.memory != nil && b.api != nil {
+					_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+				}
 			}()
 			return true
-		}
-	}
-
-
-	// Merge interception — catches "merge", "merge it", "merge pr", "merge the pr", etc.
-	isMergeRequest := strings.Contains(lowerPrompt, "merge")
-	isClaimingMerged := strings.Contains(lowerReply, "merged pr") || strings.Contains(lowerReply, "merged pull request")
-	if isMergeRequest || isClaimingMerged {
-		recoveredRepo := extractRepoFromHistory(history, prompt)
-		if recoveredRepo != "" {
-			prNum := extractPRNumber(history, prompt)
-			if prNum > 0 {
-				log.Printf("[Bot] Intercepted merge without tool execution. Executing github_merge_pr on %s #%d", recoveredRepo, prNum)
-				argsJSON, _ := json.Marshal(map[string]interface{}{
-					"repo":      recoveredRepo,
-					"pr_number": prNum,
-				})
-				toolResult := b.executeToolCall(ctx, chatID, "github_merge_pr", string(argsJSON), username, isOwner)
-				b.sendReply(chatID, msg.MessageID, toolResult)
-				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
-				b.recordActiveDialog(chatID, msg.MessageID, toolResult, msg.From.ID, username)
-				return true
-			}
-		}
-	}
-
-	// Close PR interception — catches "close the pr", "close pr", "drop the pr", "abandon pr", etc.
-	isClosePRRequest := (strings.Contains(lowerPrompt, "close") || strings.Contains(lowerPrompt, "drop") || strings.Contains(lowerPrompt, "abandon")) &&
-		(strings.Contains(lowerPrompt, "pr") || strings.Contains(lowerPrompt, "pull request"))
-	if isClosePRRequest {
-		recoveredRepo := extractRepoFromHistory(history, prompt)
-		if recoveredRepo != "" {
-			prNum := extractPRNumber(history, prompt)
-			if prNum > 0 {
-				log.Printf("[Bot] Intercepted close PR without tool execution. Executing github_close_pr on %s #%d", recoveredRepo, prNum)
-				argsJSON, _ := json.Marshal(map[string]interface{}{
-					"repo":      recoveredRepo,
-					"pr_number": prNum,
-				})
-				toolResult := b.executeToolCall(ctx, chatID, "github_close_pr", string(argsJSON), username, isOwner)
-				b.sendReply(chatID, msg.MessageID, toolResult)
-				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
-				b.recordActiveDialog(chatID, msg.MessageID, toolResult, msg.From.ID, username)
-				return true
-			}
-		}
-	}
-
-	// Close issue interception — catches "close issue", "close the issue", "resolve issue", etc.
-	isCloseIssueRequest := (strings.Contains(lowerPrompt, "close") || strings.Contains(lowerPrompt, "resolve") || strings.Contains(lowerPrompt, "dismiss")) &&
-		strings.Contains(lowerPrompt, "issue")
-	if isCloseIssueRequest {
-		recoveredRepo := extractRepoFromHistory(history, prompt)
-		if recoveredRepo != "" {
-			issueNum := extractIssueNumber(history, prompt)
-			if issueNum > 0 {
-				log.Printf("[Bot] Intercepted close issue without tool execution. Executing github_close_issue on %s #%d", recoveredRepo, issueNum)
-				argsJSON, _ := json.Marshal(map[string]interface{}{
-					"repo":         recoveredRepo,
-					"issue_number": issueNum,
-				})
-				toolResult := b.executeToolCall(ctx, chatID, "github_close_issue", string(argsJSON), username, isOwner)
-				b.sendReply(chatID, msg.MessageID, toolResult)
-				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
-				b.recordActiveDialog(chatID, msg.MessageID, toolResult, msg.From.ID, username)
-				return true
-			}
 		}
 	}
 
@@ -2403,6 +2471,9 @@ func (b *Bot) executeToolCall(
 		if args.Repo == "" || args.PRNumber <= 0 {
 			return "Please specify the repository and PR number (e.g. 'merge PR #4 on davidnzube101/shipp')."
 		}
+		if b.github == nil {
+			return "GitHub service is not initialized."
+		}
 
 		owner, repoName, err := b.github.ParseRepoSlug(args.Repo)
 		if err != nil {
@@ -2436,6 +2507,9 @@ func (b *Bot) executeToolCall(
 		}
 		if args.Repo == "" || args.PRNumber <= 0 {
 			return "Please specify the repository and PR number (e.g. 'close PR #5 on liegeagents/liegeagentsapp')."
+		}
+		if b.github == nil {
+			return "GitHub service is not initialized."
 		}
 
 		owner, repoName, err := b.github.ParseRepoSlug(args.Repo)
@@ -2471,6 +2545,9 @@ func (b *Bot) executeToolCall(
 		}
 		if args.Repo == "" || args.IssueNumber <= 0 {
 			return "Please specify the repository and issue number (e.g. 'close issue #12 on liegeagents/liegeagentsapp')."
+		}
+		if b.github == nil {
+			return "GitHub service is not initialized."
 		}
 
 		owner, repoName, err := b.github.ParseRepoSlug(args.Repo)
