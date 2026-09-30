@@ -2215,6 +2215,17 @@ func SanitizeFileContent(content string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
+func isWipeIntent(instruction string) bool {
+	lower := strings.ToLower(instruction)
+	return strings.Contains(lower, "wipe") ||
+		strings.Contains(lower, "empty") ||
+		strings.Contains(lower, "clear") ||
+		strings.Contains(lower, "delete all") ||
+		strings.Contains(lower, "remove all") ||
+		strings.Contains(lower, "truncate") ||
+		strings.Contains(lower, "reset")
+}
+
 // RefactorFileContent uses Groq to apply user instructions accurately to a file's content.
 // If the target section or text doesn't exist, it flags it cleanly with [TARGET_NOT_FOUND: ...]
 func (c *Client) RefactorFileContent(ctx context.Context, filename string, originalContent string, instruction string) (string, error) {
@@ -2250,7 +2261,16 @@ Rules:
 		return "", err
 	}
 	if len(resp.Choices) > 0 {
-		return SanitizeFileContent(resp.Choices[0].Message.Content), nil
+		cleaned := SanitizeFileContent(resp.Choices[0].Message.Content)
+		if cleaned == "" || (len(cleanOriginal) > 300 && len(cleaned) < len(cleanOriginal)/3 && !isWipeIntent(instruction)) {
+			if c.geminiKey != "" {
+				log.Printf("[AI] Groq RefactorFileContent returned incomplete/empty content (%d bytes vs original %d bytes). Falling back to Gemini Flash...", len(cleaned), len(cleanOriginal))
+				return c.refactorFileGemini(ctx, filename, cleanOriginal, instruction)
+			}
+		}
+		if cleaned != "" {
+			return cleaned, nil
+		}
 	}
 	return "", fmt.Errorf("no refactor response generated")
 }

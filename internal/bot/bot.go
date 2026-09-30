@@ -2159,6 +2159,9 @@ func (b *Bot) executeToolCall(
 				return fmt.Sprintf("Failed to generate content for '%s': %v", filePath, err)
 			}
 			newContent = ai.SanitizeFileContent(newContent)
+			if strings.TrimSpace(newContent) == "" {
+				return fmt.Sprintf("Failed to create '%s': AI produced empty content.", filePath)
+			}
 
 			commitOpts := github.CommitOptions{
 				Message:     fmt.Sprintf("Initialize %s via Shipp", filePath),
@@ -2214,6 +2217,9 @@ func (b *Bot) executeToolCall(
 			return fmt.Sprintf("Failed to generate code changes: %v", err)
 		}
 		refactored = ai.SanitizeFileContent(refactored)
+		if strings.TrimSpace(refactored) == "" {
+			return fmt.Sprintf("Failed to update '%s': AI produced empty content.", filePath)
+		}
 
 		// 4. Check if target section was missing
 		if strings.HasPrefix(refactored, "[TARGET_NOT_FOUND:") {
