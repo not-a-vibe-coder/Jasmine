@@ -45,6 +45,12 @@ func TestSystemPrompt(t *testing.T) {
 	if !strings.Contains(ownerPrompt, "NEVER simulate, pretend, claim, or promise in text that you have sent") {
 		t.Errorf("expected system prompt to ban fake transfer claims")
 	}
+	if !strings.Contains(ownerPrompt, "Social Post Curator") {
+		t.Errorf("expected system prompt to include Social Post Curator")
+	}
+	if !strings.Contains(ownerPrompt, "DEFAULT (Single Tweet)") {
+		t.Errorf("expected system prompt to include DEFAULT (Single Tweet) curation rules")
+	}
 
 	// Test Non-Owner prompt
 	guestPrompt := client.systemPrompt("anon123", false, nil)

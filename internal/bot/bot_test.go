@@ -1449,6 +1449,18 @@ func TestTryInterceptAction(t *testing.T) {
 	}
 }
 
+func TestFormatHelpMessage_SocialCurator(t *testing.T) {
+	b := &Bot{}
+	help := b.formatHelpMessage(true)
+	if !strings.Contains(help, "/curate") {
+		t.Errorf("expected help message to mention /curate")
+	}
+	if !strings.Contains(help, "Draft an X post") {
+		t.Errorf("expected help message to mention drafting an X post")
+	}
+}
+
+
 
 
 

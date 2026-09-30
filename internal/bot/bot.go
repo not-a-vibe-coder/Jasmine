@@ -1173,6 +1173,22 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 		}
 		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("sent direct message to @%s.", targetUser))
 
+	case "/curate", "/draft", "/tweet":
+		topic := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]))
+		if topic == "" && msg.ReplyToMessage != nil {
+			topic = msg.ReplyToMessage.Text
+			if topic == "" {
+				topic = msg.ReplyToMessage.Caption
+			}
+		}
+		if topic == "" {
+			b.sendReply(msg.Chat.ID, msg.MessageID, "Usage: `/curate <topic, repo, or PR>` or reply to a message with `/curate` (say 'write a thread' for a multi-tweet thread).")
+			return
+		}
+		prompt := fmt.Sprintf("Curate a social media post (X/Twitter) about: %s", topic)
+		b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
+		b.handleNLPAndChat(ctx, msg, prompt, username, isOwner)
+
 	default:
 		// Unknown slash command
 	}
@@ -3859,9 +3875,11 @@ func (b *Bot) formatHelpMessage(isOwner bool) string {
 		"• \"Check this token CA: 0x8335...\"\n" +
 		"• \"Summarize what we discussed earlier\"\n" +
 		"• \"Clear memory context\"\n" +
+		"• \"Draft an X post about PR #5\" or \"write a thread about our sandbox runner\"\n" +
 		"• \"Send 0.01 eth to 0x... on base\" (Owner only)\n" +
 		"• \"Email dev@example.com about the release update\" (Owner only)\n\n" +
 		"Slash Commands:\n" +
+		"• `/curate <topic>` or `/draft <topic>` - Curate a high-impact X/Twitter post or thread\n" +
 		"• `/ca <address>` or `/token <address>` - Analyze token metrics (MCap, Vol, LP)\n" +
 		"• `/domain <name>` or `/domains <name>` - Search Vercel domain availability & pricing\n" +
 		"• `/wallet` or `/deposit` - View deposit addresses\n" +
