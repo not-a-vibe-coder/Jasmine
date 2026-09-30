@@ -510,6 +510,8 @@ func (c *Client) refactorFileGemini(
 	currentContent string,
 	instruction string,
 ) (string, error) {
+	cleanCurrent := SanitizeFileContent(currentContent)
+
 	prompt := fmt.Sprintf(`You are an expert software engineer and editor.
 You are modifying the file '%s'.
 Here is the current content of the file:
@@ -520,10 +522,10 @@ Here is the current content of the file:
 User instruction: "%s"
 
 CRITICAL INSTRUCTIONS:
-1. Output ONLY the updated full content of the file.
-2. Do NOT wrap the entire output in markdown backticks unless the file itself is markdown.
-3. Strictly NO conversational preamble, no "Here is the updated file:", no explanations.
-4. Return ONLY the raw file contents ready to be committed directly to git.`, filename, currentContent, instruction)
+1. Output ONLY the updated raw content of the file.
+2. Strictly NO conversational preamble, no greetings, and no meta tags (NEVER include [REPLYING_TO_USER], "Here is the updated file:", or explanations).
+3. Do NOT wrap the entire output in markdown backticks, even if the file itself is markdown.
+4. Return ONLY the raw file contents ready to be committed directly to git. Start immediately with line 1 of the file.`, filename, cleanCurrent, instruction)
 
 	req := geminiChatReq{
 		Contents: []geminiChatContent{
@@ -551,7 +553,7 @@ CRITICAL INSTRUCTIONS:
 	for _, p := range resp.Candidates[0].Content.Parts {
 		sb.WriteString(p.Text)
 	}
-	return cleanCodeBlock(sb.String()), nil
+	return SanitizeFileContent(sb.String()), nil
 }
 
 func (c *Client) generateNewFileGemini(
@@ -564,11 +566,11 @@ Create a brand-new file '%s' from scratch based on this instruction:
 "%s"
 
 CRITICAL INSTRUCTIONS:
-1. Output ONLY the complete, production-ready content for the file.
+1. Output ONLY the complete, production-ready raw content for the file.
 2. If it is a README.md, make it thorough, clean, and well-structured with overview, setup, and key details.
-3. Do NOT wrap the entire output in markdown backticks unless the file itself is markdown.
-4. Strictly NO conversational preamble, no "Here is the file:", no explanations.
-5. Return ONLY the raw file contents ready to be committed directly to git.`, filename, instruction)
+3. Strictly NO conversational preamble, no greetings, and no meta tags (NEVER include [REPLYING_TO_USER], "Here is the file:", or explanations).
+4. Do NOT wrap the entire output in markdown backticks, even if the file itself is markdown.
+5. Return ONLY the raw file contents ready to be committed directly to git. Start immediately with line 1 of the file.`, filename, instruction)
 
 	req := geminiChatReq{
 		Contents: []geminiChatContent{
@@ -596,7 +598,7 @@ CRITICAL INSTRUCTIONS:
 	for _, p := range resp.Candidates[0].Content.Parts {
 		sb.WriteString(p.Text)
 	}
-	return cleanCodeBlock(sb.String()), nil
+	return SanitizeFileContent(sb.String()), nil
 }
 
 func (c *Client) analyzeDocumentGemini(

@@ -2107,8 +2107,119 @@ func (c *Client) AnalyzeDocument(ctx context.Context, senderUsername string, isO
 }
 
 // RefactorFileContent uses Groq to apply user instructions accurately to a file's content.
+var thinkTagRegex = regexp.MustCompile(`(?s)<(?:think|thought)>.*?</(?:think|thought)>`)
+var inlineRoleplayTagRegex = regexp.MustCompile(`(?i)\[(REPLYING_TO_[A-Z0-9_]+|ASSISTANT|USER|SYSTEM|AI)\]:?`)
+
+// SanitizeFileContent strips conversational preambles, LLM thinking blocks, roleplay meta-tags
+// (such as [REPLYING_TO_USER]), and wrapping markdown code fences from file contents.
+func SanitizeFileContent(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+
+	// 1. Preserve explicit TARGET_NOT_FOUND error signals
+	if strings.HasPrefix(trimmed, "[TARGET_NOT_FOUND:") {
+		return trimmed
+	}
+
+	// 2. Strip thinking blocks (<think>...</think> or <thought>...</thought>)
+	s := thinkTagRegex.ReplaceAllString(trimmed, "")
+
+	// 3. Process line-by-line to strip roleplay headers and conversational preambles
+	lines := strings.Split(s, "\n")
+	var cleanedLines []string
+	inPreamble := true
+
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+
+		// Check for roleplay / assistant prefixes like [REPLYING_TO_USER]
+		if strings.HasPrefix(trimmedLine, "[") {
+			lower := strings.ToLower(trimmedLine)
+			if strings.HasPrefix(lower, "[replying_to_") ||
+				strings.HasPrefix(lower, "[assistant]") ||
+				strings.HasPrefix(lower, "[ai]") ||
+				strings.HasPrefix(lower, "[system]") ||
+				strings.HasPrefix(lower, "[user]") {
+				continue
+			}
+		}
+
+		// Also strip any inline roleplay tags
+		if strings.Contains(strings.ToLower(line), "[replying_to_") {
+			line = inlineRoleplayTagRegex.ReplaceAllString(line, "")
+			trimmedLine = strings.TrimSpace(line)
+			if trimmedLine == "" {
+				continue
+			}
+		}
+
+		// Check for conversational preamble at the very start of the file
+		if inPreamble {
+			lower := strings.ToLower(trimmedLine)
+			if lower == "" {
+				continue
+			}
+			if strings.HasPrefix(lower, "here is the updated") ||
+				strings.HasPrefix(lower, "here is the file") ||
+				strings.HasPrefix(lower, "here is the full") ||
+				strings.HasPrefix(lower, "here is the new") ||
+				strings.HasPrefix(lower, "certainly!") ||
+				strings.HasPrefix(lower, "certainly, here") ||
+				strings.HasPrefix(lower, "sure!") ||
+				strings.HasPrefix(lower, "sure, here") ||
+				strings.HasPrefix(lower, "i have updated") ||
+				strings.HasPrefix(lower, "i've updated") ||
+				strings.HasPrefix(lower, "i have added") ||
+				strings.HasPrefix(lower, "i've added") ||
+				strings.HasPrefix(lower, "below is the updated") ||
+				strings.HasPrefix(lower, "below is the complete") {
+				continue
+			}
+			// First non-preamble line encountered
+			inPreamble = false
+		}
+
+		cleanedLines = append(cleanedLines, line)
+	}
+
+	s = strings.TrimSpace(strings.Join(cleanedLines, "\n"))
+
+	// 4. Unwrap outer markdown code blocks if the entire content is wrapped in ```
+	if strings.HasPrefix(s, "```") {
+		subLines := strings.Split(s, "\n")
+		firstLine := strings.TrimSpace(subLines[0])
+		lastLine := strings.TrimSpace(subLines[len(subLines)-1])
+		if strings.HasPrefix(firstLine, "```") && lastLine == "```" && len(subLines) >= 2 {
+			s = strings.Join(subLines[1:len(subLines)-1], "\n")
+			s = strings.TrimSpace(s)
+		}
+	}
+
+	// 5. Strip conversational sign-offs at the end
+	lines = strings.Split(s, "\n")
+	for len(lines) > 0 {
+		lastLine := strings.TrimSpace(lines[len(lines)-1])
+		lower := strings.ToLower(lastLine)
+		if lower == "" ||
+			strings.HasPrefix(lower, "let me know if") ||
+			strings.HasPrefix(lower, "hope this helps") ||
+			strings.HasPrefix(lower, "[end_of_file]") {
+			lines = lines[:len(lines)-1]
+		} else {
+			break
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// RefactorFileContent uses Groq to apply user instructions accurately to a file's content.
 // If the target section or text doesn't exist, it flags it cleanly with [TARGET_NOT_FOUND: ...]
 func (c *Client) RefactorFileContent(ctx context.Context, filename string, originalContent string, instruction string) (string, error) {
+	cleanOriginal := SanitizeFileContent(originalContent)
+
 	systemPrompt := `You are an expert software developer and technical writer.
 You are given a file's existing content and an instruction on how to edit or refactor it.
 Rules:
@@ -2116,9 +2227,9 @@ Rules:
 2. If the user's instruction asks to edit a specific title, header, function, or section that DOES NOT EXIST in the file, DO NOT invent or fabricate it. Instead, start your response with:
 "[TARGET_NOT_FOUND: <clear 1-sentence explanation>]" followed by an overview of the existing sections or key parts found in the file.
 3. Preserve all other unrelated content, markdown formatting, comments, and structure intact.
-4. If successful, output the FULL complete updated file content with NO conversational chit-chat and NO markdown code fences wrapping the entire response (unless the file itself is markdown).`
+4. Output ONLY the raw file contents with NO conversational preamble, NO explanations, NO greetings, and NO meta tags (NEVER include tags like [REPLYING_TO_USER], "Here is the updated file", or "I have updated..."). NEVER wrap the entire response in markdown code blocks (backticks), even if the file is markdown. Start immediately with the first line of the file.`
 
-	prompt := fmt.Sprintf("File: %s\n\nInstruction: %s\n\n--- Current Content ---\n%s", filename, instruction, originalContent)
+	prompt := fmt.Sprintf("File: %s\n\nInstruction: %s\n\n--- Current Content ---\n%s", filename, instruction, cleanOriginal)
 
 	reqBody := ChatCompletionRequest{
 		Model: c.model,
@@ -2134,12 +2245,12 @@ Rules:
 	if err != nil {
 		if c.geminiKey != "" {
 			log.Printf("[AI] Groq RefactorFileContent error (%v). Falling back to Gemini Flash...", err)
-			return c.refactorFileGemini(ctx, filename, originalContent, instruction)
+			return c.refactorFileGemini(ctx, filename, cleanOriginal, instruction)
 		}
 		return "", err
 	}
 	if len(resp.Choices) > 0 {
-		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+		return SanitizeFileContent(resp.Choices[0].Message.Content), nil
 	}
 	return "", fmt.Errorf("no refactor response generated")
 }
@@ -2151,7 +2262,7 @@ You are tasked with generating a brand-new file from scratch based on the user's
 Rules:
 1. Generate complete, comprehensive, production-ready content for the requested file based on the instruction.
 2. If it is a README.md, make it clear, well-structured, professional, with overview, setup/installation, architecture, and key details matching what the user requested.
-3. Output ONLY the file content with NO conversational preamble, no commentary, and NO enclosing code fences wrapping the entire output (unless the file itself is markdown).`
+3. Output ONLY the raw file contents with NO conversational preamble, NO explanations, NO greetings, and NO meta tags (NEVER include tags like [REPLYING_TO_USER], "Here is the file", or "I have created..."). NEVER wrap the entire response in markdown code blocks (backticks), even if the file is markdown. Start immediately with the first line of the file.`
 
 	prompt := fmt.Sprintf("File: %s\n\nInstruction: %s\n\nPlease create the full content for this file.", filename, instruction)
 
@@ -2174,20 +2285,13 @@ Rules:
 		return "", err
 	}
 	if len(resp.Choices) > 0 {
-		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+		return SanitizeFileContent(resp.Choices[0].Message.Content), nil
 	}
 	return "", fmt.Errorf("no file content generated")
 }
 
 func cleanCodeBlock(s string) string {
-	trimmed := strings.TrimSpace(s)
-	if strings.HasPrefix(trimmed, "```") && strings.HasSuffix(trimmed, "```") {
-		lines := strings.Split(trimmed, "\n")
-		if len(lines) >= 2 {
-			return strings.Join(lines[1:len(lines)-1], "\n")
-		}
-	}
-	return s
+	return SanitizeFileContent(s)
 }
 
 // ExtractUserProfile passively analyzes conversation text and returns an updated profile

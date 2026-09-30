@@ -217,9 +217,6 @@ func (b *Bot) lookupMsgThread(chatID int64, msgID int) int {
 			return tid
 		}
 	}
-	if b.chatLastThread != nil {
-		return b.chatLastThread[chatID]
-	}
 	return 0
 }
 
@@ -413,9 +410,12 @@ func (b *Bot) handleMessageWithThread(ctx context.Context, msg *tgbotapi.Message
 	if threadID != 0 {
 		b.recordMsgThread(chatID, msg.MessageID, threadID)
 		ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
-	} else if existingThread := b.lookupMsgThread(chatID, msg.MessageID); existingThread != 0 {
-		threadID = existingThread
-		ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
+	} else if msg.ReplyToMessage != nil {
+		if parentThread := b.lookupMsgThread(chatID, msg.ReplyToMessage.MessageID); parentThread != 0 {
+			threadID = parentThread
+			b.recordMsgThread(chatID, msg.MessageID, threadID)
+			ctx = context.WithValue(ctx, ctxKeyThreadID{}, threadID)
+		}
 	}
 
 	b.handleMessage(ctx, msg)
@@ -2158,6 +2158,7 @@ func (b *Bot) executeToolCall(
 			if err != nil {
 				return fmt.Sprintf("Failed to generate content for '%s': %v", filePath, err)
 			}
+			newContent = ai.SanitizeFileContent(newContent)
 
 			commitOpts := github.CommitOptions{
 				Message:     fmt.Sprintf("Initialize %s via Shipp", filePath),
@@ -2207,10 +2208,12 @@ func (b *Bot) executeToolCall(
 		}
 
 		// 3. AI Refactor
+		currentContent = ai.SanitizeFileContent(currentContent)
 		refactored, err := b.ai.RefactorFileContent(ctx, filePath, currentContent, args.Instruction)
 		if err != nil {
 			return fmt.Sprintf("Failed to generate code changes: %v", err)
 		}
+		refactored = ai.SanitizeFileContent(refactored)
 
 		// 4. Check if target section was missing
 		if strings.HasPrefix(refactored, "[TARGET_NOT_FOUND:") {
@@ -4186,9 +4189,6 @@ func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, 
 	if threadID == 0 && replyToMsgID > 0 {
 		threadID = b.lookupMsgThread(chatID, replyToMsgID)
 	}
-	if threadID == 0 {
-		threadID = b.lookupChatThread(chatID)
-	}
 
 	if threadID != 0 {
 		b.sendViaThreadAPI(ctx, chatID, threadID, replyToMsgID, htmlText)
@@ -4224,9 +4224,6 @@ func (b *Bot) sendSimpleMessageCtx(ctx context.Context, chatID int64, text strin
 	threadID := 0
 	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
 		threadID = v.(int)
-	}
-	if threadID == 0 {
-		threadID = b.lookupChatThread(chatID)
 	}
 
 	if threadID != 0 {
@@ -4283,9 +4280,6 @@ func (b *Bot) sendChatActionCtx(ctx context.Context, chatID int64, action string
 	threadID := 0
 	if v := ctx.Value(ctxKeyThreadID{}); v != nil {
 		threadID = v.(int)
-	}
-	if threadID == 0 {
-		threadID = b.lookupChatThread(chatID)
 	}
 	if threadID != 0 {
 		params := tgbotapi.Params{}

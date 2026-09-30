@@ -1182,9 +1182,9 @@ func TestMessageThreadTracking(t *testing.T) {
 		t.Errorf("lookupChatThread expected 52, got %d", tid)
 	}
 
-	// Unknown message in same chat falls back to chatLastThread
-	if tid := b.lookupMsgThread(12345, 888); tid != 52 {
-		t.Errorf("lookupMsgThread fallback expected 52, got %d", tid)
+	// Unknown message in same chat returns 0 (respecting General / untracked thread)
+	if tid := b.lookupMsgThread(12345, 888); tid != 0 {
+		t.Errorf("lookupMsgThread for unknown message expected 0 (General), got %d", tid)
 	}
 
 	// Different chat returns 0

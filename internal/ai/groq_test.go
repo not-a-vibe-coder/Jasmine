@@ -361,4 +361,55 @@ func TestNormalizeToolCall(t *testing.T) {
 	}
 }
 
+func TestSanitizeFileContent(t *testing.T) {
+	// Case 1: [REPLYING_TO_USER] prefix from Qwen
+	input1 := `[REPLYING_TO_USER] I have updated the README.md file to include the X and Telegram links in the header section, as requested.
+
+# Liege Agents App
+Autonomous agent workforce.
+- Twitter: https://x.com/liegeagents
+- Telegram: https://t.me/liegeagents`
+
+	expected1 := `# Liege Agents App
+Autonomous agent workforce.
+- Twitter: https://x.com/liegeagents
+- Telegram: https://t.me/liegeagents`
+
+	if got := SanitizeFileContent(input1); got != expected1 {
+		t.Errorf("TestSanitizeFileContent Case 1 failed:\nGot:\n%s\nExpected:\n%s", got, expected1)
+	}
+
+	// Case 2: Wrapping markdown code fence with conversational preamble and sign-off
+	input2 := `Here is the updated README.md file:
+` + "```markdown" + `
+# Liege Agents
+Welcome to the repo.
+` + "```" + `
+Let me know if you need anything else!`
+
+	expected2 := `# Liege Agents
+Welcome to the repo.`
+
+	if got := SanitizeFileContent(input2); got != expected2 {
+		t.Errorf("TestSanitizeFileContent Case 2 failed:\nGot:\n%s\nExpected:\n%s", got, expected2)
+	}
+
+	// Case 3: Preserving TARGET_NOT_FOUND signal
+	input3 := `[TARGET_NOT_FOUND: could not find section 'Roadmap'] Current sections are: Intro, Setup`
+	if got := SanitizeFileContent(input3); got != input3 {
+		t.Errorf("TestSanitizeFileContent Case 3 failed:\nGot:\n%s\nExpected:\n%s", got, input3)
+	}
+
+	// Case 4: Stripping <think> reasoning tags
+	input4 := `<think>The user wants me to add links.</think>
+# Project Title
+Content here.`
+	expected4 := `# Project Title
+Content here.`
+	if got := SanitizeFileContent(input4); got != expected4 {
+		t.Errorf("TestSanitizeFileContent Case 4 failed:\nGot:\n%s\nExpected:\n%s", got, expected4)
+	}
+}
+
+
 
