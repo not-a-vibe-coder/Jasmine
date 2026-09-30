@@ -839,6 +839,13 @@ func (b *Bot) isSenderOwner(from *tgbotapi.User) bool {
 }
 
 func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner bool) {
+	username := ""
+	if msg.From != nil {
+		username = msg.From.UserName
+		if username == "" {
+			username = msg.From.FirstName
+		}
+	}
 	parts := strings.Fields(msg.Text)
 	cmd := strings.ToLower(parts[0])
 	// Strip @BotUsername from command if present (e.g. /balance@Shipp0Bot)
