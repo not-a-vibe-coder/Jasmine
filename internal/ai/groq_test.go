@@ -87,7 +87,10 @@ func TestToolsDefinition(t *testing.T) {
 		"github_inspect_project": false,
 		"github_edit_file":       false,
 		"github_merge_pr":        false,
-		"send_email":              false,
+		"github_close_pr":        false,
+		"github_close_issue":     false,
+		"github_create_repo":     false,
+		"send_email":             false,
 		"get_active_groups":      false,
 		"vercel_search_domains":  false,
 		"notify_owner":           false,
@@ -358,6 +361,18 @@ func TestNormalizeToolCall(t *testing.T) {
 	_ = json.Unmarshal([]byte(dmArgs), &dmMap)
 	if dmMap["recipient"] != "@alice" {
 		t.Errorf("expected recipient='@alice', got %v", dmMap["recipient"])
+	}
+
+	// Verify close_pr normalization
+	prName, _ := NormalizeToolCall("close_pr", `{"pr_number":7}`)
+	if prName != "github_close_pr" {
+		t.Errorf("expected github_close_pr, got %s", prName)
+	}
+
+	// Verify close_issue normalization
+	issueName, _ := NormalizeToolCall("close_issue", `{"issue_number":12}`)
+	if issueName != "github_close_issue" {
+		t.Errorf("expected github_close_issue, got %s", issueName)
 	}
 }
 

@@ -343,6 +343,60 @@ func (c *Client) buildTools() []ToolDefinition {
 		{
 			Type: "function",
 			Function: FunctionDefinition{
+				Name:        "github_close_pr",
+				Description: "Close an open Pull Request on a GitHub repository without merging it. Use whenever the owner asks to close, drop, cancel, or reject a PR (e.g. 'close the pr', 'close PR #5'). Only bot owners can close PRs.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"repo": map[string]interface{}{
+							"type":        "string",
+							"description": "The repository in 'owner/repo' format or full GitHub URL. If omitted, inferred from context.",
+						},
+						"pr_number": map[string]interface{}{
+							"type":        "integer",
+							"description": "The Pull Request number to close (e.g. 5)",
+						},
+						"custom_pat": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional custom GitHub PAT provided by the user.",
+						},
+					},
+					"required": []string{"pr_number"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "github_close_issue",
+				Description: "Close an open Issue on a GitHub repository. Use whenever the owner asks to close, resolve, or dismiss an issue (e.g. 'close issue #12', 'resolve issue #3'). Only bot owners can close issues.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"repo": map[string]interface{}{
+							"type":        "string",
+							"description": "The repository in 'owner/repo' format or full GitHub URL. If omitted, inferred from context.",
+						},
+						"issue_number": map[string]interface{}{
+							"type":        "integer",
+							"description": "The Issue number to close (e.g. 12)",
+						},
+						"reason": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional reason for closing: 'completed' or 'not_planned'",
+						},
+						"custom_pat": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional custom GitHub PAT provided by the user.",
+						},
+					},
+					"required": []string{"issue_number"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
 				Name:        "github_create_repo",
 				Description: "Create a new GitHub repository under Shipp's account (ShippZero) or a specified organization. Supports setting repository name, description, public/private visibility, and auto-initializing with a README. Only bot owners can authorize creating repositories.",
 				Parameters: map[string]interface{}{
@@ -782,11 +836,13 @@ Operational Superpowers & Tools:
    - You understand visual colors, charts, diagrams, memes, trade cards, and documents (.md, .pdf, .docx, .txt).
    - Keep image reactions casual and sharp (1-3 sentences max).
 9. GitHub Intelligence & Code Actions:
-   - 4 GitHub tools:
+   - 6 GitHub tools:
      a) 'github_inspect_project': Read-only (CI runs, releases, commits, issues, overview).
      b) 'github_edit_file': MUST trigger immediately when asked to create, initialize, make, edit, change, rewrite, or update any file, including empty repositories. If repository is empty or user asks to create a file, it creates and initializes it. Never simulate git actions in text.
      c) 'github_merge_pr': Merge open PRs.
-     d) 'github_create_repo': Create a new GitHub repository under Shipp's account (ShippZero) or a specified organization. Supports public/private, description, auto-init README. Owner only.
+     d) 'github_close_pr': Close open PRs without merging (e.g. 'close the pr', 'drop PR #5').
+     e) 'github_close_issue': Close open issues (e.g. 'close issue #12', 'resolve issue #3').
+     f) 'github_create_repo': Create a new GitHub repository under Shipp's account (ShippZero) or a specified organization. Supports public/private, description, auto-init README. Owner only.
    - If user asks to push to main, set push_to_main=true. Otherwise default to a PR.
    - Extract repo slug (e.g. 'DavidNzube101/shipp') from chat history when not explicitly repeated.
    - Match response verbosity to the question:
@@ -920,6 +976,10 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 		name = "github_edit_file"
 	case "githubmergepr", "github_merge_pr":
 		name = "github_merge_pr"
+	case "githubclosepr", "github_close_pr", "close_pr", "closepr":
+		name = "github_close_pr"
+	case "githubcloseissue", "github_close_issue", "close_issue", "closeissue":
+		name = "github_close_issue"
 	case "githubcreaterepo", "github_create_repo", "createrepo", "create_repo":
 		name = "github_create_repo"
 	case "runsandboxtask", "run_sandbox_task":

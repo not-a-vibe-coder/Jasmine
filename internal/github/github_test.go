@@ -91,6 +91,24 @@ func TestGitHubMockEndpoints(t *testing.T) {
 			return
 		}
 
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/pulls/7") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"number": 7,
+				"state":  "closed",
+			})
+			return
+		}
+
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/issues/12") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"number": 12,
+				"state":  "closed",
+			})
+			return
+		}
+
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/actions/runs") {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"total_count": 1,
@@ -218,6 +236,24 @@ func TestGitHubMockEndpoints(t *testing.T) {
 	}
 	if !strings.Contains(mergeMsg, "successfully merged") {
 		t.Errorf("unexpected merge message: %s", mergeMsg)
+	}
+
+	// 5b. Test ClosePullRequest
+	closePRMsg, err := svc.ClosePullRequest(ctx, "davidnzube101", "shipp", 7)
+	if err != nil {
+		t.Fatalf("ClosePullRequest failed: %v", err)
+	}
+	if !strings.Contains(closePRMsg, "successfully closed") {
+		t.Errorf("unexpected close PR message: %s", closePRMsg)
+	}
+
+	// 5c. Test CloseIssue
+	closeIssueMsg, err := svc.CloseIssue(ctx, "davidnzube101", "shipp", 12, "completed")
+	if err != nil {
+		t.Fatalf("CloseIssue failed: %v", err)
+	}
+	if !strings.Contains(closeIssueMsg, "successfully closed") {
+		t.Errorf("unexpected close issue message: %s", closeIssueMsg)
 	}
 
 	// 6. Test Workflow Runs

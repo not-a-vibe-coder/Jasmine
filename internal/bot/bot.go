@@ -1395,6 +1395,50 @@ func (b *Bot) tryInterceptAction(
 		}
 	}
 
+	// Close PR interception — catches "close the pr", "close pr", "drop the pr", "abandon pr", etc.
+	isClosePRRequest := (strings.Contains(lowerPrompt, "close") || strings.Contains(lowerPrompt, "drop") || strings.Contains(lowerPrompt, "abandon")) &&
+		(strings.Contains(lowerPrompt, "pr") || strings.Contains(lowerPrompt, "pull request"))
+	if isClosePRRequest {
+		recoveredRepo := extractRepoFromHistory(history, prompt)
+		if recoveredRepo != "" {
+			prNum := extractPRNumber(history, prompt)
+			if prNum > 0 {
+				log.Printf("[Bot] Intercepted close PR without tool execution. Executing github_close_pr on %s #%d", recoveredRepo, prNum)
+				argsJSON, _ := json.Marshal(map[string]interface{}{
+					"repo":      recoveredRepo,
+					"pr_number": prNum,
+				})
+				toolResult := b.executeToolCall(ctx, chatID, "github_close_pr", string(argsJSON), username, isOwner)
+				b.sendReply(chatID, msg.MessageID, toolResult)
+				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+				b.recordActiveDialog(chatID, msg.MessageID, toolResult, msg.From.ID, username)
+				return true
+			}
+		}
+	}
+
+	// Close issue interception — catches "close issue", "close the issue", "resolve issue", etc.
+	isCloseIssueRequest := (strings.Contains(lowerPrompt, "close") || strings.Contains(lowerPrompt, "resolve") || strings.Contains(lowerPrompt, "dismiss")) &&
+		strings.Contains(lowerPrompt, "issue")
+	if isCloseIssueRequest {
+		recoveredRepo := extractRepoFromHistory(history, prompt)
+		if recoveredRepo != "" {
+			issueNum := extractIssueNumber(history, prompt)
+			if issueNum > 0 {
+				log.Printf("[Bot] Intercepted close issue without tool execution. Executing github_close_issue on %s #%d", recoveredRepo, issueNum)
+				argsJSON, _ := json.Marshal(map[string]interface{}{
+					"repo":         recoveredRepo,
+					"issue_number": issueNum,
+				})
+				toolResult := b.executeToolCall(ctx, chatID, "github_close_issue", string(argsJSON), username, isOwner)
+				b.sendReply(chatID, msg.MessageID, toolResult)
+				_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
+				b.recordActiveDialog(chatID, msg.MessageID, toolResult, msg.From.ID, username)
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
@@ -2308,6 +2352,75 @@ func (b *Bot) executeToolCall(
 			return fmt.Sprintf("Merge failed: %v", err)
 		}
 		return fmt.Sprintf("Merged PR #%d on %s/%s.", args.PRNumber, owner, repoName)
+
+	case "github_close_pr":
+		if !isOwner {
+			return "Declined: Closing PRs is reserved for my creators (@skipp_dev)."
+		}
+
+		var args struct {
+			Repo      string `json:"repo"`
+			PRNumber  int    `json:"pr_number"`
+			CustomPAT string `json:"custom_pat"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.Repo == "" {
+			recent, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
+			args.Repo = extractRepoFromHistory(recent, "")
+		}
+		if args.PRNumber <= 0 {
+			recent, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
+			args.PRNumber = extractPRNumber(recent, "")
+		}
+		if args.Repo == "" || args.PRNumber <= 0 {
+			return "Please specify the repository and PR number (e.g. 'close PR #5 on liegeagents/liegeagentsapp')."
+		}
+
+		owner, repoName, err := b.github.ParseRepoSlug(args.Repo)
+		if err != nil {
+			return fmt.Sprintf("Invalid repo format: %v", err)
+		}
+
+		res, err := b.github.ClosePullRequestWithToken(ctx, owner, repoName, args.PRNumber, args.CustomPAT)
+		if err != nil {
+			return fmt.Sprintf("Failed to close PR #%d: %v", args.PRNumber, err)
+		}
+		return res
+
+	case "github_close_issue":
+		if !isOwner {
+			return "Declined: Closing issues is reserved for my creators (@skipp_dev)."
+		}
+
+		var args struct {
+			Repo        string `json:"repo"`
+			IssueNumber int    `json:"issue_number"`
+			Reason      string `json:"reason"`
+			CustomPAT   string `json:"custom_pat"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.Repo == "" {
+			recent, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
+			args.Repo = extractRepoFromHistory(recent, "")
+		}
+		if args.IssueNumber <= 0 {
+			recent, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
+			args.IssueNumber = extractIssueNumber(recent, "")
+		}
+		if args.Repo == "" || args.IssueNumber <= 0 {
+			return "Please specify the repository and issue number (e.g. 'close issue #12 on liegeagents/liegeagentsapp')."
+		}
+
+		owner, repoName, err := b.github.ParseRepoSlug(args.Repo)
+		if err != nil {
+			return fmt.Sprintf("Invalid repo format: %v", err)
+		}
+
+		res, err := b.github.CloseIssueWithToken(ctx, owner, repoName, args.IssueNumber, args.Reason, args.CustomPAT)
+		if err != nil {
+			return fmt.Sprintf("Failed to close issue #%d: %v", args.IssueNumber, err)
+		}
+		return res
 
 	case "github_create_repo":
 		if !isOwner {
@@ -3807,6 +3920,7 @@ var emojiPattern = regexp.MustCompile(`[\x{1F600}-\x{1F64F}\x{1F300}-\x{1F5FF}\x
 var githubURLRegex = regexp.MustCompile(`(?i)github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)`)
 var repoSlugRegex = regexp.MustCompile(`\b([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)\b`)
 var prRegex = regexp.MustCompile(`(?i)(?:pr|pull\s*request)\s*#?(\d+)`)
+var issueRegex = regexp.MustCompile(`(?i)(?:issue)\s*#?(\d+)`)
 var doubleBoldRegex = regexp.MustCompile(`\*\*(.+?)\*\*`)
 var doubleUnderscoreRegex = regexp.MustCompile(`__(.+?)__`)
 var leakedToolCallRegex = regexp.MustCompile(`(?si)<(?:toolcall|tool_call)[^>]*>.*?</(?:toolcall|tool_call)>`)
@@ -4169,6 +4283,22 @@ func extractPRNumber(history []memory.Message, prompt string) int {
 	}
 	for i := len(history) - 1; i >= 0; i-- {
 		if m := prRegex.FindStringSubmatch(history[i].Content); len(m) > 1 {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+func extractIssueNumber(history []memory.Message, prompt string) int {
+	if m := issueRegex.FindStringSubmatch(prompt); len(m) > 1 {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			return n
+		}
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if m := issueRegex.FindStringSubmatch(history[i].Content); len(m) > 1 {
 			if n, err := strconv.Atoi(m[1]); err == nil {
 				return n
 			}

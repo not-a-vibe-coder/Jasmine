@@ -454,6 +454,61 @@ func (s *Service) MergePullRequestWithToken(ctx context.Context, owner, repo str
 	return fmt.Sprintf("PR #%d successfully merged (SHA: %s)", pullNumber, mergeResp.SHA[:7]), nil
 }
 
+// ClosePullRequest closes an open Pull Request on GitHub without merging it.
+func (s *Service) ClosePullRequest(ctx context.Context, owner, repo string, pullNumber int) (string, error) {
+	return s.ClosePullRequestWithToken(ctx, owner, repo, pullNumber, "")
+}
+
+func (s *Service) ClosePullRequestWithToken(ctx context.Context, owner, repo string, pullNumber int, customToken string) (string, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", s.baseURL, owner, repo, pullNumber)
+
+	payload := map[string]string{
+		"state": "closed",
+	}
+
+	resp, err := s.makeRequestWithToken(ctx, http.MethodPatch, url, payload, customToken)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("failed to close PR #%d (%d): %s", pullNumber, resp.StatusCode, string(respBytes))
+	}
+
+	return fmt.Sprintf("PR #%d on %s/%s successfully closed", pullNumber, owner, repo), nil
+}
+
+// CloseIssue closes an open Issue on GitHub.
+func (s *Service) CloseIssue(ctx context.Context, owner, repo string, issueNumber int, reason string) (string, error) {
+	return s.CloseIssueWithToken(ctx, owner, repo, issueNumber, reason, "")
+}
+
+func (s *Service) CloseIssueWithToken(ctx context.Context, owner, repo string, issueNumber int, reason string, customToken string) (string, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d", s.baseURL, owner, repo, issueNumber)
+
+	payload := map[string]string{
+		"state": "closed",
+	}
+	if reason == "not_planned" || reason == "completed" {
+		payload["state_reason"] = reason
+	}
+
+	resp, err := s.makeRequestWithToken(ctx, http.MethodPatch, url, payload, customToken)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("failed to close issue #%d (%d): %s", issueNumber, resp.StatusCode, string(respBytes))
+	}
+
+	return fmt.Sprintf("Issue #%d on %s/%s successfully closed", issueNumber, owner, repo), nil
+}
+
 // -------------------------------------------------------------
 // Expanded GitHub Project Intelligence (Actions, Releases, Commits, Issues)
 // -------------------------------------------------------------
