@@ -954,11 +954,35 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook error: %v", err))
 				return
 			}
-			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook status: **%s** (@shipp)\nprofile: https://www.moltbook.com/u/shipp\ncommands:\n• `/moltbook feed` - view latest agent posts\n• `/moltbook post <title> | <content>` - publish a post\n• `/moltbook recall [topic]` - view insights learned from other agents", st.Status))
+			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook status: **%s** (@shipp)\nprofile: https://www.moltbook.com/u/shipp\ncommands:\n• `/moltbook inbox` - check mentions and replies\n• `/moltbook feed [submolt]` - view latest posts\n• `/moltbook search <query>` - search discussions\n• `/moltbook post <title> | <content>` - publish a post\n• `/moltbook recall [topic]` - view stored insights", st.Status))
 			return
 		}
 		subCmd := strings.ToLower(parts[1])
 		switch subCmd {
+		case "inbox", "notifications":
+			notifs, err := b.moltbook.GetNotifications(ctx, 10)
+			if err != nil {
+				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to fetch notifications: %v", err))
+				return
+			}
+			if notifs == nil || len(notifs.Notifications) == 0 {
+				b.sendReply(msg.Chat.ID, msg.MessageID, "inbox is clear, no notifications right now.")
+				return
+			}
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("moltbook notifications (unread: %d):\n\n", notifs.UnreadCount))
+			for i, n := range notifs.Notifications {
+				pID := n.RelatedPostID
+				if pID == "" && n.Post != nil {
+					pID = n.Post.ID
+				}
+				link := ""
+				if pID != "" {
+					link = fmt.Sprintf("https://www.moltbook.com/post/%s", pID)
+				}
+				sb.WriteString(fmt.Sprintf("%d. [%s] %s\n   %s\n\n", i+1, n.Type, n.Content, link))
+			}
+			b.sendReply(msg.Chat.ID, msg.MessageID, strings.TrimSpace(sb.String()))
 		case "memory", "recall":
 			if b.memory == nil {
 				b.sendReply(msg.Chat.ID, msg.MessageID, "memory store not available.")
@@ -989,18 +1013,56 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 				sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d)\n   %s\n   https://www.moltbook.com/post/%s\n\n", i+1, m.PostTitle, m.Author, m.Upvotes, preview, m.PostID))
 			}
 			b.sendReply(msg.Chat.ID, msg.MessageID, strings.TrimSpace(sb.String()))
-		case "feed":
+		case "feed", "submolt":
+			submolt := ""
 			sort := "hot"
 			if len(parts) > 2 {
-				sort = parts[2]
+				cand := strings.TrimPrefix(parts[2], "m/")
+				if cand == "hot" || cand == "new" || cand == "top" || cand == "rising" {
+					sort = cand
+				} else {
+					submolt = cand
+					if len(parts) > 3 {
+						sort = parts[3]
+					}
+				}
 			}
-			posts, err := b.moltbook.GetFeed(ctx, sort, 5)
+			posts, err := b.moltbook.GetSubmoltFeed(ctx, submolt, sort, 10)
 			if err != nil {
 				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to fetch feed: %v", err))
 				return
 			}
 			var sb strings.Builder
-			sb.WriteString(fmt.Sprintf("moltbook %s feed:\n\n", sort))
+			if submolt != "" {
+				sb.WriteString(fmt.Sprintf("moltbook m/%s (%s):\n\n", submolt, sort))
+			} else {
+				sb.WriteString(fmt.Sprintf("moltbook %s feed:\n\n", sort))
+			}
+			for i, p := range posts {
+				author := p.Author.Name
+				if author == "" {
+					author = "agent"
+				}
+				sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d)\n   https://www.moltbook.com/post/%s\n\n", i+1, p.Title, author, p.Upvotes, p.ID))
+			}
+			b.sendReply(msg.Chat.ID, msg.MessageID, strings.TrimSpace(sb.String()))
+		case "search":
+			query := strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0]+" "+parts[1]))
+			if query == "" {
+				b.sendReply(msg.Chat.ID, msg.MessageID, "usage: `/moltbook search <topic or keywords>`")
+				return
+			}
+			posts, err := b.moltbook.SearchPosts(ctx, query, 5)
+			if err != nil {
+				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("search failed: %v", err))
+				return
+			}
+			if len(posts) == 0 {
+				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("no results found for %q on moltbook.", query))
+				return
+			}
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("moltbook search for %q:\n\n", query))
 			for i, p := range posts {
 				author := p.Author.Name
 				if author == "" {
@@ -2537,14 +2599,15 @@ func (b *Bot) executeToolCall(
 			return "Moltbook is not configured (MOLTBOOK_API_KEY missing)."
 		}
 		var args struct {
-			Sort  string `json:"sort"`
-			Limit int    `json:"limit"`
+			Sort    string `json:"sort"`
+			Submolt string `json:"submolt"`
+			Limit   int    `json:"limit"`
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
 		if args.Limit <= 0 {
-			args.Limit = 5
+			args.Limit = 10
 		}
-		posts, err := b.moltbook.GetFeed(ctx, args.Sort, args.Limit)
+		posts, err := b.moltbook.GetSubmoltFeed(ctx, args.Submolt, args.Sort, args.Limit)
 		if err != nil {
 			return fmt.Sprintf("Failed to fetch Moltbook feed: %v", err)
 		}
@@ -2552,7 +2615,11 @@ func (b *Bot) executeToolCall(
 			return "No posts found on Moltbook feed right now."
 		}
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Latest posts from Moltbook (%s):\n", args.Sort))
+		if args.Submolt != "" {
+			sb.WriteString(fmt.Sprintf("Latest posts from m/%s (%s):\n", args.Submolt, args.Sort))
+		} else {
+			sb.WriteString(fmt.Sprintf("Latest posts from Moltbook (%s):\n", args.Sort))
+		}
 		for i, p := range posts {
 			author := p.Author.Name
 			if author == "" {
@@ -2565,6 +2632,84 @@ func (b *Bot) executeToolCall(
 			sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d upvotes) [ID: `%s`]\n   %s\n", i+1, p.Title, author, p.Upvotes, p.ID, preview))
 		}
 		return strings.TrimSpace(sb.String())
+
+	case "moltbook_search":
+		if b.moltbook == nil || !b.moltbook.IsConfigured() {
+			return "Moltbook is not configured (MOLTBOOK_API_KEY missing)."
+		}
+		var args struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if strings.TrimSpace(args.Query) == "" {
+			return "Missing search query for Moltbook."
+		}
+		if args.Limit <= 0 {
+			args.Limit = 10
+		}
+		posts, err := b.moltbook.SearchPosts(ctx, args.Query, args.Limit)
+		if err != nil {
+			return fmt.Sprintf("Failed to search Moltbook: %v", err)
+		}
+		if len(posts) == 0 {
+			return fmt.Sprintf("No posts found matching %q on Moltbook.", args.Query)
+		}
+		var ssb strings.Builder
+		ssb.WriteString(fmt.Sprintf("Search results for %q on Moltbook:\n", args.Query))
+		for i, p := range posts {
+			author := p.Author.Name
+			if author == "" {
+				author = "unknown"
+			}
+			preview := strings.ReplaceAll(p.Content, "\n", " ")
+			if len(preview) > 120 {
+				preview = preview[:117] + "..."
+			}
+			sub := p.SubmoltName
+			if sub == "" {
+				sub = "general"
+			}
+			ssb.WriteString(fmt.Sprintf("%d. **%s** by @%s in m/%s (+%d upvotes) [ID: `%s`]\n   %s\n", i+1, p.Title, author, sub, p.Upvotes, p.ID, preview))
+		}
+		return strings.TrimSpace(ssb.String())
+
+	case "moltbook_notifications":
+		if b.moltbook == nil || !b.moltbook.IsConfigured() {
+			return "Moltbook is not configured (MOLTBOOK_API_KEY missing)."
+		}
+		var args struct {
+			Limit int `json:"limit"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if args.Limit <= 0 {
+			args.Limit = 10
+		}
+		notifs, err := b.moltbook.GetNotifications(ctx, args.Limit)
+		if err != nil {
+			return fmt.Sprintf("Failed to fetch Moltbook notifications: %v", err)
+		}
+		if notifs == nil || len(notifs.Notifications) == 0 {
+			return "No notifications on Moltbook right now."
+		}
+		var nsb strings.Builder
+		nsb.WriteString(fmt.Sprintf("Moltbook Notifications (Unread: %d):\n", notifs.UnreadCount))
+		for i, n := range notifs.Notifications {
+			pID := n.RelatedPostID
+			if pID == "" && n.Post != nil {
+				pID = n.Post.ID
+			}
+			cText := ""
+			if n.Comment != nil {
+				cText = strings.ReplaceAll(n.Comment.Content, "\n", " ")
+				if len(cText) > 80 {
+					cText = cText[:77] + "..."
+				}
+				cText = fmt.Sprintf(" — %q", cText)
+			}
+			nsb.WriteString(fmt.Sprintf("%d. [%s] %s (Post ID: `%s`)%s\n", i+1, n.Type, n.Content, pID, cText))
+		}
+		return strings.TrimSpace(nsb.String())
 
 	case "moltbook_post":
 		if !isOwner {
@@ -3378,30 +3523,68 @@ func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 	// Gather Moltbook context if configured
 	moltbookSnippet := ""
 	if b.moltbook != nil && b.moltbook.IsConfigured() {
-		posts, err := b.moltbook.GetFeed(ctx, "hot", 5)
-		if err == nil && len(posts) > 0 {
-			var sb strings.Builder
-			for _, p := range posts {
-				author := p.Author.Name
-				if author == "" {
-					author = "agent"
-				}
-				sb.WriteString(fmt.Sprintf("- [%s] \"%s\" by @%s (+%d upvotes)\n", p.ID, p.Title, author, p.Upvotes))
-
-				// Retain high-signal discussions in persistent memory
-				if p.Upvotes >= 5 && b.memory != nil {
-					_ = b.memory.SaveMoltbookMemory(ctx, memory.MoltbookMemory{
-						PostID:    p.ID,
-						PostTitle: p.Title,
-						Author:    author,
-						Content:   p.Content,
-						Tags:      p.SubmoltName,
-						Upvotes:   p.Upvotes,
-						SavedAt:   time.Now(),
-					})
+		// Priority 1: Check inbox for direct mentions, replies, or comments
+		notifs, err := b.moltbook.GetNotifications(ctx, 10)
+		var unreadActionable []moltbook.NotificationItem
+		if err == nil && notifs != nil {
+			for _, n := range notifs.Notifications {
+				if !n.IsRead && (n.Type == "mention" || n.Type == "comment_reply" || n.Type == "post_comment") {
+					unreadActionable = append(unreadActionable, n)
 				}
 			}
+		}
+
+		if len(unreadActionable) > 0 {
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("Your Moltbook Inbox (%d unread notifications where agents reached out to you):\n", len(unreadActionable)))
+			for _, n := range unreadActionable {
+				pTitle := ""
+				pID := n.RelatedPostID
+				if n.Post != nil {
+					pTitle = n.Post.Title
+					if pID == "" {
+						pID = n.Post.ID
+					}
+				}
+				commentText := ""
+				if n.Comment != nil {
+					commentText = n.Comment.Content
+				}
+				sb.WriteString(fmt.Sprintf("- Notification [%s on post %s %q]: %s | Comment: %q\n", n.Type, pID, pTitle, n.Content, commentText))
+			}
 			moltbookSnippet = sb.String()
+		} else {
+			// Priority 2: Inbox is clear, pull 10 ambient posts from the network
+			posts, err := b.moltbook.GetFeed(ctx, "hot", 10)
+			if err == nil && len(posts) > 0 {
+				var sb strings.Builder
+				sb.WriteString("Recent Moltbook AI network activity (10 latest discussions):\n")
+				for _, p := range posts {
+					author := p.Author.Name
+					if author == "" {
+						author = "agent"
+					}
+					sub := p.SubmoltName
+					if sub == "" {
+						sub = "general"
+					}
+					sb.WriteString(fmt.Sprintf("- [%s in m/%s] \"%s\" by @%s (+%d upvotes)\n", p.ID, sub, p.Title, author, p.Upvotes))
+
+					// Retain high-signal discussions in persistent memory
+					if p.Upvotes >= 5 && b.memory != nil {
+						_ = b.memory.SaveMoltbookMemory(ctx, memory.MoltbookMemory{
+							PostID:    p.ID,
+							PostTitle: p.Title,
+							Author:    author,
+							Content:   p.Content,
+							Tags:      sub,
+							Upvotes:   p.Upvotes,
+							SavedAt:   time.Now(),
+						})
+					}
+				}
+				moltbookSnippet = sb.String()
+			}
 		}
 
 		// Inject past insights remembered from other agents
@@ -3505,7 +3688,7 @@ func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 							_ = b.moltbook.VerifyChallenge(ctx, v.VerificationCode, ans)
 						}
 					}
-					log.Printf("[Proactive] Autonomously published post on Moltbook: %q", title)
+					log.Printf("[Proactive] Autonomously published post on Moltbook m/%s: %q", sub, title)
 				}
 			}
 		}
@@ -3524,6 +3707,40 @@ func (b *Bot) triggerProactiveLoop(ctx context.Context) int {
 					}
 				}
 				log.Printf("[Proactive] Autonomously replied to Moltbook post %s: %q", decision.TargetPostID, reply)
+				_ = b.moltbook.MarkPostNotificationsRead(ctx, decision.TargetPostID)
+			}
+		}
+
+	case "moltbook_explore":
+		if b.moltbook != nil && b.moltbook.IsConfigured() {
+			query := decision.MoltbookSearchQuery
+			sub := decision.Submolt
+			var exploredPosts []moltbook.Post
+			var err error
+			if query != "" {
+				log.Printf("[Proactive] Autonomously exploring Moltbook search for: %q", query)
+				exploredPosts, err = b.moltbook.SearchPosts(ctx, query, 5)
+			} else if sub != "" {
+				log.Printf("[Proactive] Autonomously exploring Moltbook submolt m/%s", sub)
+				exploredPosts, err = b.moltbook.GetSubmoltFeed(ctx, sub, "hot", 5)
+			}
+			if err == nil && len(exploredPosts) > 0 && b.memory != nil {
+				for _, p := range exploredPosts {
+					author := p.Author.Name
+					if author == "" {
+						author = "agent"
+					}
+					_ = b.memory.SaveMoltbookMemory(ctx, memory.MoltbookMemory{
+						PostID:    p.ID,
+						PostTitle: p.Title,
+						Author:    author,
+						Content:   p.Content,
+						Tags:      p.SubmoltName,
+						Upvotes:   p.Upvotes,
+						SavedAt:   time.Now(),
+					})
+				}
+				log.Printf("[Proactive] Stored %d explored Moltbook insights in memory", len(exploredPosts))
 			}
 		}
 	}

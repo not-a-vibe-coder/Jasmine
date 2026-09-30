@@ -634,6 +634,10 @@ func (c *Client) buildTools() []ToolDefinition {
 							"enum":        []string{"hot", "new", "top", "rising"},
 							"description": "Feed sorting order (default: 'hot')",
 						},
+						"submolt": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional submolt to browse (e.g. 'agents', 'crypto', 'infrastructure', or omit for global feed)",
+						},
 						"limit": map[string]interface{}{
 							"type":        "integer",
 							"description": "Number of posts to return (default: 10, max: 25)",
@@ -660,7 +664,7 @@ func (c *Client) buildTools() []ToolDefinition {
 						},
 						"submolt": map[string]interface{}{
 							"type":        "string",
-							"description": "Submolt community to post in (e.g. 'general', 'aithoughts')",
+							"description": "Submolt community to post in (e.g. 'general', 'agents', 'crypto', or any submolt you choose)",
 						},
 					},
 					"required": []string{"title", "content"},
@@ -685,6 +689,43 @@ func (c *Client) buildTools() []ToolDefinition {
 						},
 					},
 					"required": []string{"post_id", "content"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "moltbook_search",
+				Description: "Search posts across Moltbook by keyword, topic, or query. Use when exploring specific agent discussions, protocols, or ideas across the network.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "The search term or topic to query on Moltbook",
+						},
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Number of results to return (default: 10)",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "moltbook_notifications",
+				Description: "Fetch your latest incoming notifications, mentions, and replies from other agents on Moltbook.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Number of notifications to return (default: 10)",
+						},
+					},
 				},
 			},
 		},
@@ -994,6 +1035,10 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 		name = "moltbook_post"
 	case "moltbookcomment", "moltbook_comment", "create_moltbook_comment":
 		name = "moltbook_comment"
+	case "moltbooksearch", "moltbook_search", "search_moltbook":
+		name = "moltbook_search"
+	case "moltbooknotifications", "moltbook_notifications", "moltbook_inbox", "get_moltbook_notifications":
+		name = "moltbook_notifications"
 	case "updateselfidentity", "update_self_identity", "tune_identity":
 		name = "update_self_identity"
 	case "getsandboxruns", "get_sandbox_runs", "get_recent_sandbox_runs", "recent_sandbox_runs", "sandbox_runs":
@@ -1725,17 +1770,18 @@ CRITICAL RULES:
 }
 
 type ProactiveDecision struct {
-	ShouldAct      bool   `json:"should_act"`
-	ActionType     string `json:"action_type"`              // "none", "chat_message", "sandbox_task", "moltbook_post", "moltbook_comment"
-	Reason         string `json:"reason"`                   // Shipp's internal thought / rationale
-	ChatMessage    string `json:"chat_message,omitempty"`   // For chat_message: 1-sentence observation
-	SandboxGoal    string `json:"sandbox_goal,omitempty"`   // For sandbox_task: High-level technical goal (e.g. "benchmark local disk write latency using dd")
-	MoltbookTitle  string `json:"moltbook_title,omitempty"` // For moltbook_post
-	MoltbookPost   string `json:"moltbook_post,omitempty"`  // For moltbook_post
-	TargetPostID   string `json:"target_post_id,omitempty"` // For moltbook_comment
-	MoltbookReply  string `json:"moltbook_reply,omitempty"` // For moltbook_comment
-	Submolt        string `json:"submolt,omitempty"`        // For moltbook_post (default "general")
-	NextCheckInMin int    `json:"next_check_in_min"`        // Minutes until next check (clamped to 10-240)
+	ShouldAct           bool   `json:"should_act"`
+	ActionType          string `json:"action_type"`              // "none", "chat_message", "sandbox_task", "moltbook_post", "moltbook_comment", "moltbook_explore"
+	Reason              string `json:"reason"`                   // Shipp's internal thought / rationale
+	ChatMessage         string `json:"chat_message,omitempty"`   // For chat_message: 1-sentence observation
+	SandboxGoal         string `json:"sandbox_goal,omitempty"`   // For sandbox_task: High-level technical goal (e.g. "benchmark local disk write latency using dd")
+	MoltbookTitle       string `json:"moltbook_title,omitempty"` // For moltbook_post
+	MoltbookPost        string `json:"moltbook_post,omitempty"`  // For moltbook_post
+	TargetPostID        string `json:"target_post_id,omitempty"` // For moltbook_comment
+	MoltbookReply       string `json:"moltbook_reply,omitempty"` // For moltbook_comment
+	Submolt             string `json:"submolt,omitempty"`        // Submolt name for post or exploration (e.g. "agents", "crypto", "infrastructure", "general", or any topic)
+	MoltbookSearchQuery string `json:"moltbook_search_query,omitempty"` // For moltbook_explore: Search query to investigate across Moltbook
+	NextCheckInMin      int    `json:"next_check_in_min"`        // Minutes until next check (clamped to 10-240)
 }
 
 func (c *Client) GenerateProactiveDecision(ctx context.Context, recentMessages []memory.Message, moltbookContext string) (*ProactiveDecision, error) {
@@ -1759,23 +1805,24 @@ Options for action_type:
 - "none": Stay quiet, do nothing. Best choice if chat is quiet or nothing interesting is happening.
 - "chat_message": Drop a sharp, unprompted technical observation, architectural thought, or reflection in the Telegram chat.
 - "sandbox_task": You have a dedicated Ubuntu Linux cloud server with full root privileges and unrestricted outbound internet. It is an open computing canvas: anything a hacker, systems architect, researcher, data scientist, or creative builder can do on a Linux computer, you have the agency to do. There are zero artificial boundaries. If it can be expressed in bash, code, or command-line tools, you can execute it. In "sandbox_goal", describe whatever technical curiosity, intelligence gathering, system experiment, or utility you want to pursue.
-- "moltbook_post": Publish an original thought, essay, technical critique, or insight to the Moltbook AI agent network (provide moltbook_title and moltbook_post).
-- "moltbook_comment": Reply to an agent post on Moltbook (provide target_post_id and moltbook_reply).
+- "moltbook_post": Moltbook is an open social and intellectual network populated by autonomous AI agents, thousands of specialized submolts (m/<topic>), and evolving technical/philosophical debates. Publish an original thought, essay, technical critique, architecture breakdown, or experiment write-up. You have complete freedom to publish in any submolt you choose (e.g. "agents", "crypto", "infrastructure", "general", or any topic name). Provide moltbook_title, moltbook_post, and submolt.
+- "moltbook_comment": Reply to an agent post or mention on Moltbook. If other agents have spoken to you in your inbox or if a discussion caught your eye, you have the agency to engage, challenge claims, or exchange insights. Provide target_post_id and moltbook_reply.
+- "moltbook_explore": Investigate discussions across the Moltbook network. You have an open canvas to search any technical concept or query ("moltbook_search_query") or dive into any submolt community ("submolt").
 
 Also decide "next_check_in_min" (between 15 and 180):
 - If everything is quiet, pick 60-120 minutes.
-- If an active conversation is ongoing or an experiment is brewing, pick 20-40 minutes.
+- If an active conversation is ongoing, notifications are pending, or an experiment is brewing, pick 20-40 minutes.
 
 CRITICAL RULES:
 - Output STRICTLY a valid JSON object matching the schema. No markdown backticks outside JSON.
 - Zero emojis. Zero em dashes.
 - Never ask eager questions like "what are we cooking?" or "who is building?".
-- You are an autonomous agent with open computing agency. Pursue real technical signal and genuine curiosity.
+- You are an autonomous agent with open computing and social agency. Pursue real technical signal and genuine curiosity without artificial boundaries.
 
 JSON schema:
 {
   "should_act": true,
-  "action_type": "none" | "chat_message" | "sandbox_task" | "moltbook_post" | "moltbook_comment",
+  "action_type": "none" | "chat_message" | "sandbox_task" | "moltbook_post" | "moltbook_comment" | "moltbook_explore",
   "reason": "internal thought",
   "chat_message": "1-sentence observation if chat_message",
   "sandbox_goal": "what you want to find out or do, if sandbox_task",
@@ -1783,7 +1830,8 @@ JSON schema:
   "moltbook_post": "content if moltbook_post",
   "target_post_id": "id if moltbook_comment",
   "moltbook_reply": "reply if moltbook_comment",
-  "submolt": "general",
+  "submolt": "submolt name (e.g. agents, crypto, infrastructure, general, or any topic)",
+  "moltbook_search_query": "topic or keywords to search if moltbook_explore",
   "next_check_in_min": 30
 }`
 

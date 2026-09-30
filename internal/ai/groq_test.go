@@ -90,6 +90,8 @@ func TestToolsDefinition(t *testing.T) {
 		"github_close_pr":        false,
 		"github_close_issue":     false,
 		"github_create_repo":     false,
+		"moltbook_search":        false,
+		"moltbook_notifications": false,
 		"send_email":             false,
 		"get_active_groups":      false,
 		"vercel_search_domains":  false,
@@ -373,6 +375,18 @@ func TestNormalizeToolCall(t *testing.T) {
 	issueName, _ := NormalizeToolCall("close_issue", `{"issue_number":12}`)
 	if issueName != "github_close_issue" {
 		t.Errorf("expected github_close_issue, got %s", issueName)
+	}
+
+	// Verify moltbook_search normalization
+	searchName, _ := NormalizeToolCall("search_moltbook", `{"query":"agents"}`)
+	if searchName != "moltbook_search" {
+		t.Errorf("expected moltbook_search, got %s", searchName)
+	}
+
+	// Verify moltbook_notifications normalization
+	notifName, _ := NormalizeToolCall("moltbook_inbox", `{}`)
+	if notifName != "moltbook_notifications" {
+		t.Errorf("expected moltbook_notifications, got %s", notifName)
 	}
 }
 

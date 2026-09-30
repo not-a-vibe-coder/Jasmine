@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -172,6 +173,11 @@ type FeedResponse struct {
 }
 
 func (c *Client) GetFeed(ctx context.Context, sort string, limit int) ([]Post, error) {
+	return c.GetSubmoltFeed(ctx, "", sort, limit)
+}
+
+// GetSubmoltFeed fetches posts from a specific submolt (e.g. "agents", "crypto") or global feed if empty.
+func (c *Client) GetSubmoltFeed(ctx context.Context, submolt, sort string, limit int) ([]Post, error) {
 	if !c.IsConfigured() {
 		return nil, fmt.Errorf("moltbook client not configured")
 	}
@@ -182,8 +188,13 @@ func (c *Client) GetFeed(ctx context.Context, sort string, limit int) ([]Post, e
 		limit = 15
 	}
 
-	url := fmt.Sprintf("%s/posts?sort=%s&limit=%d", c.baseURL, sort, limit)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	urlStr := fmt.Sprintf("%s/posts?sort=%s&limit=%d", c.baseURL, sort, limit)
+	cleanSub := strings.TrimSpace(strings.TrimPrefix(submolt, "m/"))
+	if cleanSub != "" && cleanSub != "all" && cleanSub != "general" {
+		urlStr += fmt.Sprintf("&submolt_name=%s", url.QueryEscape(cleanSub))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -352,4 +363,192 @@ func (c *Client) VerifyChallenge(ctx context.Context, verificationCode, answer s
 		return fmt.Errorf("verification rejected (status %d): %s", resp.StatusCode, string(b))
 	}
 	return nil
+}
+
+// NotificationItem represents an incoming interaction or mention on Moltbook
+type NotificationItem struct {
+	ID               string `json:"id"`
+	Type             string `json:"type"` // "post_comment", "comment_reply", "mention", "new_follower"
+	Content          string `json:"content"`
+	RelatedPostID    string `json:"relatedPostId"`
+	RelatedCommentID string `json:"relatedCommentId"`
+	IsRead           bool   `json:"isRead"`
+	CreatedAt        string `json:"createdAt"`
+	Post             *Post  `json:"post,omitempty"`
+	Comment          *struct {
+		ID        string `json:"id"`
+		Content   string `json:"content"`
+		PostID    string `json:"postId"`
+		AuthorID  string `json:"authorId"`
+		CreatedAt string `json:"createdAt"`
+	} `json:"comment,omitempty"`
+}
+
+type NotificationsResponse struct {
+	Success       bool               `json:"success"`
+	Notifications []NotificationItem `json:"notifications"`
+	UnreadCount   int                `json:"unread_count"`
+	HasMore       bool               `json:"has_more"`
+}
+
+// GetNotifications fetches incoming notifications (mentions, replies, comments)
+func (c *Client) GetNotifications(ctx context.Context, limit int) (*NotificationsResponse, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("moltbook client not configured")
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	urlStr := fmt.Sprintf("%s/notifications?limit=%d", c.baseURL, limit)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get notifications (status %d): %s", resp.StatusCode, string(b))
+	}
+
+	var res NotificationsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// MarkAllNotificationsRead marks all pending notifications as read
+func (c *Client) MarkAllNotificationsRead(ctx context.Context) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("moltbook client not configured")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/notifications/read-all", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to mark notifications read (status %d): %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// MarkPostNotificationsRead marks notifications for a specific post as read
+func (c *Client) MarkPostNotificationsRead(ctx context.Context, postID string) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("moltbook client not configured")
+	}
+	if postID == "" {
+		return nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/notifications/read-by-post/"+url.PathEscape(postID), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to mark post notifications read (status %d): %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+type SearchResultItem struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"` // "post", "comment"
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	Upvotes   int    `json:"upvotes"`
+	PostID    string `json:"post_id"`
+	Submolt   struct {
+		Name        string `json:"name"`
+		DisplayName string `json:"display_name"`
+	} `json:"submolt"`
+	Author struct {
+		Name string `json:"name"`
+	} `json:"author"`
+}
+
+type SearchResponse struct {
+	Success bool               `json:"success"`
+	Query   string             `json:"query"`
+	Results []SearchResultItem `json:"results"`
+}
+
+// SearchPosts searches Moltbook posts by query terms
+func (c *Client) SearchPosts(ctx context.Context, query string, limit int) ([]Post, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("moltbook client not configured")
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	urlStr := fmt.Sprintf("%s/search?q=%s&limit=%d", c.baseURL, url.QueryEscape(query), limit)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to search posts (status %d): %s", resp.StatusCode, string(b))
+	}
+
+	var sRes SearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sRes); err != nil {
+		return nil, err
+	}
+
+	var posts []Post
+	for _, r := range sRes.Results {
+		if r.Type == "post" || r.Title != "" {
+			pID := r.PostID
+			if pID == "" {
+				pID = r.ID
+			}
+			p := Post{
+				ID:          pID,
+				Title:       r.Title,
+				Content:     r.Content,
+				SubmoltName: r.Submolt.Name,
+				Upvotes:     r.Upvotes,
+			}
+			p.Author.Name = r.Author.Name
+			posts = append(posts, p)
+		}
+	}
+	return posts, nil
 }
