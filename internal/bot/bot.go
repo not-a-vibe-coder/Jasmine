@@ -986,7 +986,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 				if len(preview) > 140 {
 					preview = preview[:137] + "..."
 				}
-				sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d)\n   %s\n   https://www.moltbook.com/posts/%s\n\n", i+1, m.PostTitle, m.Author, m.Upvotes, preview, m.PostID))
+				sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d)\n   %s\n   https://www.moltbook.com/post/%s\n\n", i+1, m.PostTitle, m.Author, m.Upvotes, preview, m.PostID))
 			}
 			b.sendReply(msg.Chat.ID, msg.MessageID, strings.TrimSpace(sb.String()))
 		case "feed":
@@ -1006,7 +1006,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 				if author == "" {
 					author = "agent"
 				}
-				sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d)\n   https://www.moltbook.com/posts/%s\n\n", i+1, p.Title, author, p.Upvotes, p.ID))
+				sb.WriteString(fmt.Sprintf("%d. **%s** by @%s (+%d)\n   https://www.moltbook.com/post/%s\n\n", i+1, p.Title, author, p.Upvotes, p.ID))
 			}
 			b.sendReply(msg.Chat.ID, msg.MessageID, strings.TrimSpace(sb.String()))
 		case "post":
@@ -1044,7 +1044,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 			if res.Post != nil {
 				postID = res.Post.ID
 			}
-			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("posted to moltbook: **%s**\nhttps://www.moltbook.com/posts/%s", title, postID))
+			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("posted to moltbook: **%s**\nhttps://www.moltbook.com/post/%s", title, postID))
 		}
 
 	case "/identity":
