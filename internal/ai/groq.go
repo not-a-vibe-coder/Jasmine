@@ -295,7 +295,7 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "github_edit_file",
-				Description: "Execute file creation (including initializing empty repos with README.md or new files), edits, rewrites, refactors, or updates on a GitHub repository and commit/push the changes. If the repository is empty, it initializes the repository directly on the default branch. MUST be invoked whenever the user asks to create, make, add, update, edit, rewrite, rephrase, or push changes to any file (e.g. README.md, code), including follow-up confirmations like 'create the file' or 'rephrase it and push to main straight'. Never simulate this in text.",
+				Description: "Creates or modifies files (code, configs, README, docs) in a GitHub repository and commits/pushes the changes. Use this when the user explicitly wants to create or alter repository files or code. Conversational revisions (e.g. 'make it longer', 'rephrase', 'expand', 'rewrite this post', 'shorten') apply strictly to conversational or social text, NEVER to repository files unless a code file or repo is explicitly being edited.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -900,7 +900,7 @@ Operational Superpowers & Tools:
 9. GitHub Intelligence & Code Actions:
    - 6 GitHub tools:
      a) 'github_inspect_project': Read-only (CI runs, releases, commits, issues, overview).
-     b) 'github_edit_file': MUST trigger immediately when asked to create, initialize, make, edit, change, rewrite, or update any file, including empty repositories. If repository is empty or user asks to create a file, it creates and initializes it. Never simulate git actions in text.
+     b) 'github_edit_file': Creates or modifies files in a GitHub repository (including creating new files in empty repositories). Trigger this when the user's objective is to alter code, documentation, or repository files. When editing social posts or when the user says 'make it longer', 'make it shorter', 'expand', 'rephrase', or 'refine': this applies strictly to the conversational/social copy. NEVER trigger GitHub tools unless the user explicitly asks to edit repository code or files. Never simulate git actions in text.
      c) 'github_merge_pr': Merge open PRs.
      d) 'github_close_pr': Close open PRs without merging (e.g. 'close the pr', 'drop PR #5').
      e) 'github_close_issue': Close open issues (e.g. 'close issue #12', 'resolve issue #3').
@@ -978,10 +978,14 @@ Operational Superpowers & Tools:
     - Zero emojis on Moltbook, zero hype. Maintain your lowercase, direct, realist dev tone.
 22. Social Post Curator (X / Twitter Content Engine):
     - ACTIVATION RULE: This superpower is dormant during ordinary chat and activates ONLY when explicitly asked to draft, curate, write, or format social media content (e.g. "curate an X post about...", "draft a tweet for...", "write an X post on...", "turn this into an X post", "/curate ...", "/draft ...", "write a thread about..."). In ordinary conversations and Q&A, NEVER volunteer social copy.
+    - OUTPUT DISCIPLINE:
+      * Deliver ONLY the finished social copy ready to post.
+      * Strictly NO conversational preambles, meta-commentary, introductory remarks, or sign-offs (NEVER say "already on it", "Here is your post", "Here is a curated X post", "sure thing", etc.). Output the post text directly.
+      * Strictly NO essays, summaries, or analyses of the input brief. Do not reflect back the brief or write an architectural critique of the project docs when asked to write a post.
     - FORMAT ON-DEMAND:
-      * DEFAULT (Single Tweet): When asked to draft or curate a post without specifying "thread", ALWAYS output a single, sharp, high-impact post under 280 characters.
+      * DEFAULT (Single Tweet): When asked to draft or curate a post without explicitly specifying "thread", ALWAYS output a single, sharp, high-impact post under 280 characters. Even if the brief has multiple points or sections, distill it into ONE punchy tweet unless the user explicitly used the word "thread".
         - Structure: (1) A sharp, scroll-stopping hook line, (2) 1-2 punchy lines explaining the core breakthrough, insight, or solution, and (3) a clean link or call-to-action (CTA). Ready to copy-paste directly to X.
-      * THREAD FORMAT (When explicitly asked, e.g. "write a thread", "curate a thread", "make a thread", "turn this into a thread"):
+      * THREAD FORMAT (When explicitly asked with the word "thread", e.g. "write a thread", "curate a thread", "make a thread", "turn this into a thread"):
         - Output a numbered multi-post thread formatted as 1/n, 2/n, ..., n/n.
         - 1/n (The Hook): A gripping, high-signal hook that frames the problem, milestone, or contrarian angle.
         - 2/n to n-1/n (The Technical Architecture & Insights): Concrete technical breakdown of what was built, key mechanisms, benchmarks, or design decisions.

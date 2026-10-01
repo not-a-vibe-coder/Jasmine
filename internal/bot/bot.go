@@ -1217,34 +1217,26 @@ func (b *Bot) handleNLPAndChat(
 	summary, _ := b.memory.GetSummary(ctx, chatID)
 	profile, _ := b.memory.GetUserProfile(ctx, chatID)
 
-	lowerPrompt := strings.ToLower(prompt)
+	cleanPrompt := stripReplyContext(prompt)
+	lowerCleanPrompt := strings.ToLower(cleanPrompt)
 
 	// 2a. Pre-AI balance dispatch: fetch ground-truth balances first to prevent hallucination,
 	//     then format naturally through AI or clean natural fallback.
-	if ok, targetChain := isBalanceIntent(prompt); ok {
+	if ok, targetChain := isBalanceIntent(cleanPrompt); ok {
 		b.sendChatAction(chatID, tgbotapi.ChatTyping)
 		toolResult := b.executeToolCall(ctx, chatID, "get_balances", fmt.Sprintf(`{"chain":"%s"}`, targetChain), username, isOwner)
-		followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, prompt, "get_balances", "call_balance", fmt.Sprintf(`{"chain":"%s"}`, targetChain), toolResult, profile)
+		followup, err := b.ai.GenerateToolFollowup(ctx, username, isOwner, cleanPrompt, "get_balances", "call_balance", fmt.Sprintf(`{"chain":"%s"}`, targetChain), toolResult, profile)
 		if err != nil || strings.TrimSpace(followup) == "" || strings.HasPrefix(strings.TrimSpace(followup), "{") {
 			followup = formatEmergencyBalanceFallback(toolResult)
 		}
 		b.sendReply(chatID, msg.MessageID, followup)
 		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", followup)
-		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
+		go b.maybeUpdateUserProfile(context.Background(), chatID, cleanPrompt)
 		return
 	}
 
-	// 2b. Pre-AI dispatch: if the prompt has a GitHub URL + edit verb, skip the LLM and
-	//     call github_edit_file directly to avoid clarification loops.
-	if isOwner {
-		if b.trySmartDispatch(ctx, msg, prompt, lowerPrompt, username, isOwner, history) {
-			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
-			return
-		}
-	}
-
-	// 2c. Direct DM dispatch: if anyone says "dm @user <msg>" or "dm me <msg>", dispatch immediately
-	if ok, targetUser, dmText := parseDMIntent(prompt); ok {
+	// 2b. Direct DM dispatch: if anyone says "dm @user <msg>" or "dm me <msg>", dispatch immediately
+	if ok, targetUser, dmText := parseDMIntent(cleanPrompt); ok {
 		if strings.EqualFold(targetUser, "me") {
 			targetUser = username
 		}
@@ -1256,7 +1248,7 @@ func (b *Bot) handleNLPAndChat(
 		toolResult := b.executeToolCall(ctx, chatID, "send_dm", string(argsJSON), username, isOwner)
 		b.sendReply(chatID, msg.MessageID, toolResult)
 		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
-		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
+		go b.maybeUpdateUserProfile(context.Background(), chatID, cleanPrompt)
 		return
 	}
 
@@ -1267,20 +1259,26 @@ func (b *Bot) handleNLPAndChat(
 		return b.executeToolCall(ctx, chatID, toolName, arguments, username, isOwner)
 	}
 
-	// For long-running async tools (github_edit_file, run_sandbox_task), ack immediately
+	// For long-running async tasks (github_edit_file, run_sandbox_task), ack immediately
 	// and run the agentic loop in a goroutine so the user gets instant feedback.
-	mightBeAsync := strings.Contains(lowerPrompt, "push") ||
-		strings.Contains(lowerPrompt, "edit") ||
-		strings.Contains(lowerPrompt, "update") ||
-		strings.Contains(lowerPrompt, "rewrite") ||
-		strings.Contains(lowerPrompt, "create") ||
-		strings.Contains(lowerPrompt, "make") ||
-		strings.Contains(lowerPrompt, "readme") ||
-		strings.Contains(lowerPrompt, "init") ||
-		strings.Contains(lowerPrompt, "generate") ||
-		strings.Contains(lowerPrompt, "run") ||
-		strings.Contains(lowerPrompt, "execute") ||
-		strings.Contains(lowerPrompt, "sandbox")
+	isSocialIntent := strings.Contains(lowerCleanPrompt, "tweet") ||
+		strings.Contains(lowerCleanPrompt, "post") ||
+		strings.Contains(lowerCleanPrompt, "thread") ||
+		strings.Contains(lowerCleanPrompt, "curate")
+
+	isRepoEditIntent := !isSocialIntent && extractRepoFromHistory(nil, cleanPrompt) != "" &&
+		(strings.Contains(lowerCleanPrompt, "push") ||
+			strings.Contains(lowerCleanPrompt, "edit") ||
+			strings.Contains(lowerCleanPrompt, "update") ||
+			strings.Contains(lowerCleanPrompt, "commit") ||
+			strings.Contains(lowerCleanPrompt, "rewrite") ||
+			strings.Contains(lowerCleanPrompt, "readme") ||
+			strings.Contains(lowerCleanPrompt, "pr") ||
+			strings.Contains(lowerCleanPrompt, "pull request"))
+
+	isSandboxIntent := strings.Contains(lowerCleanPrompt, "sandbox") || strings.Contains(lowerCleanPrompt, "run sandbox")
+
+	mightBeAsync := isSandboxIntent || isRepoEditIntent
 
 	var chatContext string
 	if msg.Chat.IsPrivate() {
@@ -1300,17 +1298,17 @@ func (b *Bot) handleNLPAndChat(
 		}
 	}
 
-	// Quick pre-flight: if prompt explicitly mentions a GitHub URL or sandbox,
+	// Quick pre-flight: if prompt explicitly mentions an async task,
 	// send a working ack before the loop starts so the chat doesn't feel frozen.
-	if isOwner && mightBeAsync && (extractRepoFromHistory(nil, prompt) != "" || strings.Contains(lowerPrompt, "sandbox") || strings.Contains(lowerPrompt, "run sandbox")) {
+	if isOwner && mightBeAsync {
 		b.sendReplyCtx(ctx, chatID, msg.MessageID, b.getRandomWorkingAck())
 		go func() {
 			agResult := b.ai.RunAgenticLoop(ctx, username, isOwner, history, prompt, summary, profile, executor, chatContext)
 			finalText := agResult.FinalText
-			if intercepted, newFinalText := b.tryInterceptSendCrypto(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText, agResult.ToolsUsed); intercepted {
+			if intercepted, newFinalText := b.tryInterceptSendCrypto(ctx, msg, prompt, lowerCleanPrompt, username, isOwner, history, finalText, agResult.ToolsUsed); intercepted {
 				finalText = newFinalText
 			}
-			if ok, xURL, _ := b.tryResolveXLink(prompt, lowerPrompt, history); ok {
+			if ok, xURL, _ := b.tryResolveXLink(prompt, lowerCleanPrompt, history); ok {
 				if !strings.Contains(finalText, "x.com/") && !strings.Contains(finalText, "twitter.com/") {
 					if strings.TrimSpace(finalText) == "" {
 						finalText = xURL
@@ -1343,7 +1341,7 @@ func (b *Bot) handleNLPAndChat(
 		}
 	}
 	finalText := strings.TrimSpace(agResult.FinalText)
-	if isOwner && !hasGitTool && b.tryInterceptAction(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText, agResult.ToolsUsed) {
+	if isOwner && !hasGitTool && b.tryInterceptAction(ctx, msg, prompt, lowerCleanPrompt, username, isOwner, history, finalText, agResult.ToolsUsed) {
 		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
 		return
 	}
@@ -1352,12 +1350,12 @@ func (b *Bot) handleNLPAndChat(
 	b.tryInterceptOwnerAlert(ctx, chatID, prompt, finalText, username, agResult.ToolsUsed)
 
 	// 4c. Intercept hallucinated or unprocessed crypto transfers (safety net)
-	if intercepted, newFinalText := b.tryInterceptSendCrypto(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText, agResult.ToolsUsed); intercepted {
+	if intercepted, newFinalText := b.tryInterceptSendCrypto(ctx, msg, prompt, lowerCleanPrompt, username, isOwner, history, finalText, agResult.ToolsUsed); intercepted {
 		finalText = newFinalText
 	}
 
 	// 4d. Ensure X profile URL is included if the user explicitly asked for an X/Twitter link
-	if ok, xURL, _ := b.tryResolveXLink(prompt, lowerPrompt, history); ok {
+	if ok, xURL, _ := b.tryResolveXLink(prompt, lowerCleanPrompt, history); ok {
 		if !strings.Contains(finalText, "x.com/") && !strings.Contains(finalText, "twitter.com/") {
 			if strings.TrimSpace(finalText) == "" {
 				finalText = xURL
@@ -1376,65 +1374,6 @@ func (b *Bot) handleNLPAndChat(
 	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
 	b.recordActiveDialog(chatID, msg.MessageID, finalText, msg.From.ID, username)
 	go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
-}
-
-
-// trySmartDispatch fires github_edit_file directly when the prompt has a GitHub URL + an edit verb,
-// bypassing the LLM to prevent "I need the repo name" clarification loops.
-func (b *Bot) trySmartDispatch(
-	ctx context.Context,
-	msg *tgbotapi.Message,
-	prompt, lowerPrompt, username string,
-	isOwner bool,
-	history []memory.Message,
-) bool {
-	lowerUserPrompt := strings.ToLower(stripReplyContext(prompt))
-	if strings.Contains(lowerUserPrompt, "close") || strings.Contains(lowerUserPrompt, "drop") || strings.Contains(lowerUserPrompt, "cancel") || strings.Contains(lowerUserPrompt, "abandon") {
-		return false
-	}
-	editVerbs := []string{
-		"update", "edit", "change", "rephrase", "rewrite", "modify",
-		"fix the description", "update the description", "update the readme",
-		"make a readme", "create a readme", "create", "make", "init", "initialize",
-		"add", "write", "readme",
-	}
-	hasEditVerb := false
-	for _, v := range editVerbs {
-		if strings.Contains(lowerUserPrompt, v) {
-			hasEditVerb = true
-			break
-		}
-	}
-	if !hasEditVerb {
-		return false
-	}
-
-	// Only fire when the GitHub URL is in THIS prompt (not just history), so we're confident
-	repo := extractRepoFromHistory(nil, prompt)
-	if repo == "" {
-		return false
-	}
-
-	log.Printf("[Bot] SmartDispatch: edit+URL detected in prompt, executing github_edit_file on %s", repo)
-	pushToMain := strings.Contains(lowerUserPrompt, "push to main") ||
-		strings.Contains(lowerUserPrompt, "straight to main") ||
-		strings.Contains(lowerUserPrompt, "push straight")
-	argsJSON, _ := json.Marshal(map[string]interface{}{
-		"repo":         repo,
-		"path":         "README.md",
-		"instruction":  prompt,
-		"push_to_main": pushToMain,
-	})
-
-	// Ack immediately, then do the work in background and follow up when done in the same thread.
-	b.sendReplyCtx(ctx, msg.Chat.ID, msg.MessageID, b.getRandomWorkingAck())
-	go func() {
-		toolResult := b.executeToolCall(ctx, msg.Chat.ID, "github_edit_file", string(argsJSON), username, isOwner)
-		b.sendReplyCtx(ctx, msg.Chat.ID, msg.MessageID, toolResult)
-		_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", toolResult)
-		b.recordActiveDialog(msg.Chat.ID, msg.MessageID, toolResult, msg.From.ID, username)
-	}()
-	return true
 }
 
 // stripReplyContext strips the leading "[Replying to...]\n" wrapper so intent matching
@@ -1478,6 +1417,15 @@ func (b *Bot) tryInterceptAction(
 	}
 	lowerReply := strings.ToLower(replyText)
 	lowerUserPrompt := strings.ToLower(stripReplyContext(prompt))
+
+	// Do NOT intercept git actions if the user's prompt is a social media curation, drafting, or revision request!
+	isSocialIntent := strings.Contains(lowerUserPrompt, "tweet") ||
+		strings.Contains(lowerUserPrompt, "post") ||
+		strings.Contains(lowerUserPrompt, "thread") ||
+		strings.Contains(lowerUserPrompt, "curate")
+	if isSocialIntent {
+		return false
+	}
 
 	isCloseIntent := strings.Contains(lowerUserPrompt, "close") ||
 		strings.Contains(lowerUserPrompt, "drop") ||
@@ -1799,6 +1747,16 @@ var (
 	fakeTransferClaimRegex = regexp.MustCompile(`(?i)(?:sending\s+(?:the\s+)?(?:\$?\d+|thirty|forty|twenty|ten|fifty|\d+\s+cents|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt|dollars|cents)?|funds|crypto|it)\s+over\s+now|sending\s+(?:the\s+)?(?:\$?\d+|thirty|forty|twenty|ten|fifty|\d+\s+cents|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt|dollars|cents)|funds|crypto)\s+over\b|sending\s+(?:the\s+)?(?:thirty|forty|twenty|ten|\d+)\s+cents\s+over\s+now|sending\s+(?:the\s+)?funds\s+now|sending\s+(?:the\s+)?crypto\s+now|funds\s+are\s+on\s+the\s+way|transferred\s+(?:the\s+)?(?:\$?\d+|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt)|funds|crypto)\s+to|sent\s+(?:the\s+)?(?:\$?\d+|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt)|funds|crypto)\s+to|just\s+sent\s+(?:the\s+)?(?:\$?\d+|[\d\.]+\s*(?:eth|sol|bnb|usdc|usdt)|thirty|twenty|ten|\d+)\s+(?:cents|eth|sol|bnb|over))`)
 	evmAddressRegex        = regexp.MustCompile(`(?i)\b0x[a-f0-9]{40}\b`)
 	solanaAddressRegex     = regexp.MustCompile(`\b[1-9A-HJ-NP-Za-km-z]{32,44}\b`)
+
+	chainSolanaRegex    = regexp.MustCompile(`(?i)\b(?:sol|solana)\b`)
+	chainBaseRegex      = regexp.MustCompile(`(?i)\b(?:base)\b`)
+	chainRobinhoodRegex = regexp.MustCompile(`(?i)\b(?:robinhood|rh)\b`)
+	chainArbitrumRegex  = regexp.MustCompile(`(?i)\b(?:arbitrum|arb)\b`)
+	chainBnbRegex       = regexp.MustCompile(`(?i)\b(?:bnb|bsc)\b`)
+	chainEthRegex       = regexp.MustCompile(`(?i)\b(?:eth|ethereum)\b`)
+
+	nonFinancialKeywordRegex = regexp.MustCompile(`(?i)\b(?:link|url|repo|github|code|pr|pull\s*request|issue|message|dm|email|mail|photo|image|picture|screenshot|file|doc|document|pdf|tweet|post|handle|x\s+handle|twitter|details)\b`)
+	financialKeywordRegex    = regexp.MustCompile(`(?i)\b(?:crypto|funds?|tokens?|coins?|sol|solana|eth|ethereum|base|robinhood|arbitrum|bnb|bsc|usdc|usdt|dollars?|cents?|\$|bags?|cash)\b`)
 )
 
 func extractSendAmount(text string) float64 {
@@ -1824,47 +1782,35 @@ func extractSendAmount(text string) float64 {
 // isCryptoSendRequest checks whether the user is explicitly commanding Shipp to transfer crypto/funds.
 // It explicitly excludes requests asking to send non-financial items (links, URLs, repos, photos, messages, etc.).
 func isCryptoSendRequest(prompt, lowerPrompt string) bool {
+	clean := stripReplyContext(prompt)
+	lowerClean := strings.ToLower(clean)
+
 	// If the prompt mentions sending non-financial content, it's not a crypto transfer
-	nonFinancialKeywords := []string{
-		"link", "url", "repo", "github", "code", "pr", "pull request",
-		"issue", "message", "dm", "email", "mail", "photo", "image",
-		"picture", "screenshot", "file", "doc", "document", "pdf",
-		"tweet", "post", "handle", "x handle", "twitter", "details",
-	}
-	for _, kw := range nonFinancialKeywords {
-		if strings.Contains(lowerPrompt, kw) {
-			return false
-		}
+	if nonFinancialKeywordRegex.MatchString(lowerClean) {
+		return false
 	}
 
-	if strings.HasPrefix(lowerPrompt, "/send") {
+	if strings.HasPrefix(lowerClean, "/send") {
 		return true
 	}
-	if strings.Contains(lowerPrompt, "send crypto") || strings.Contains(lowerPrompt, "send funds") {
+	if strings.Contains(lowerClean, "send crypto") || strings.Contains(lowerClean, "send funds") {
 		return true
 	}
 
-	hasSendVerb := strings.HasPrefix(lowerPrompt, "send ") ||
-		strings.Contains(lowerPrompt, "send me ") ||
-		strings.HasPrefix(lowerPrompt, "transfer ") ||
-		strings.Contains(lowerPrompt, "transfer me ")
+	hasSendVerb := strings.HasPrefix(lowerClean, "send ") ||
+		strings.Contains(lowerClean, "send me ") ||
+		strings.HasPrefix(lowerClean, "transfer ") ||
+		strings.Contains(lowerClean, "transfer me ")
 	if !hasSendVerb {
 		return false
 	}
 
 	// Must explicitly reference money, currency, tokens, chains, or amounts
-	financialKeywords := []string{
-		"crypto", "fund", "funds", "token", "tokens", "coin", "coins",
-		"sol", "solana", "eth", "ethereum", "base", "robinhood", "arbitrum", "bnb", "bsc",
-		"usdc", "usdt", "dollar", "dollars", "cent", "cents", "$", "bag", "bags", "cash",
-	}
-	for _, kw := range financialKeywords {
-		if strings.Contains(lowerPrompt, kw) {
-			return true
-		}
+	if financialKeywordRegex.MatchString(lowerClean) {
+		return true
 	}
 
-	if evmAddressRegex.MatchString(prompt) || solanaAddressRegex.MatchString(prompt) || extractSendAmount(prompt) > 0 {
+	if evmAddressRegex.MatchString(clean) || solanaAddressRegex.MatchString(clean) || extractSendAmount(clean) > 0 {
 		return true
 	}
 
@@ -2032,21 +1978,17 @@ func (b *Bot) tryInterceptSendCrypto(
 	if isSol {
 		chain = "solana"
 	} else {
-		chains := []string{"robinhood", "rh", "base", "arbitrum", "arb", "ethereum", "eth", "bnb", "bsc"}
-		for _, c := range chains {
-			if strings.Contains(lowerPrompt, c) {
-				chain = c
-				break
-			}
-		}
-		if chain == "rh" {
+		if chainRobinhoodRegex.MatchString(lowerPrompt) {
 			chain = "robinhood"
-		} else if chain == "arb" {
+		} else if chainArbitrumRegex.MatchString(lowerPrompt) {
 			chain = "arbitrum"
-		} else if chain == "bsc" {
+		} else if chainBnbRegex.MatchString(lowerPrompt) {
 			chain = "bnb"
-		}
-		if chain == "" {
+		} else if chainEthRegex.MatchString(lowerPrompt) {
+			chain = "ethereum"
+		} else if chainBaseRegex.MatchString(lowerPrompt) {
+			chain = "base"
+		} else {
 			chain = "base"
 		}
 	}
@@ -4723,14 +4665,28 @@ func stripLeadingMention(text string, recipientUsername string) string {
 }
 
 func extractRepoFromHistory(history []memory.Message, currentPrompt string) string {
-	// 1. Check current prompt for full github URL
-	if m := githubURLRegex.FindStringSubmatch(currentPrompt); len(m) > 1 {
+	cleanPrompt := stripReplyContext(currentPrompt)
+
+	// 1. Check current clean prompt for full github URL
+	if m := githubURLRegex.FindStringSubmatch(cleanPrompt); len(m) > 1 {
 		return strings.TrimSuffix(m[1], ".git")
+	}
+
+	// 1b. Fallback: check current clean prompt for repo slug pattern (e.g. 'liegeagents/liegeagentsapp')
+	if m := repoSlugRegex.FindStringSubmatch(cleanPrompt); len(m) > 1 {
+		candidate := m[1]
+		lower := strings.ToLower(candidate)
+		if !strings.Contains(lower, "text/") &&
+			!strings.Contains(lower, "application/") &&
+			!strings.Contains(lower, "and/or") &&
+			!strings.Contains(lower, "w/") {
+			return candidate
+		}
 	}
 
 	// 2. Check recent messages in reverse order
 	for i := len(history) - 1; i >= 0; i-- {
-		msg := history[i].Content
+		msg := stripReplyContext(history[i].Content)
 		if m := githubURLRegex.FindStringSubmatch(msg); len(m) > 1 {
 			return strings.TrimSuffix(m[1], ".git")
 		}
@@ -4741,7 +4697,7 @@ func extractRepoFromHistory(history []memory.Message, currentPrompt string) stri
 		if history[i].Role != "user" {
 			continue
 		}
-		msg := history[i].Content
+		msg := stripReplyContext(history[i].Content)
 		if m := repoSlugRegex.FindStringSubmatch(msg); len(m) > 1 {
 			candidate := m[1]
 			lower := strings.ToLower(candidate)
@@ -4757,13 +4713,15 @@ func extractRepoFromHistory(history []memory.Message, currentPrompt string) stri
 }
 
 func extractPRNumber(history []memory.Message, prompt string) int {
-	if m := prRegex.FindStringSubmatch(prompt); len(m) > 1 {
+	cleanPrompt := stripReplyContext(prompt)
+	if m := prRegex.FindStringSubmatch(cleanPrompt); len(m) > 1 {
 		if n, err := strconv.Atoi(m[1]); err == nil {
 			return n
 		}
 	}
 	for i := len(history) - 1; i >= 0; i-- {
-		if m := prRegex.FindStringSubmatch(history[i].Content); len(m) > 1 {
+		msg := stripReplyContext(history[i].Content)
+		if m := prRegex.FindStringSubmatch(msg); len(m) > 1 {
 			if n, err := strconv.Atoi(m[1]); err == nil {
 				return n
 			}
@@ -4773,13 +4731,15 @@ func extractPRNumber(history []memory.Message, prompt string) int {
 }
 
 func extractIssueNumber(history []memory.Message, prompt string) int {
-	if m := issueRegex.FindStringSubmatch(prompt); len(m) > 1 {
+	cleanPrompt := stripReplyContext(prompt)
+	if m := issueRegex.FindStringSubmatch(cleanPrompt); len(m) > 1 {
 		if n, err := strconv.Atoi(m[1]); err == nil {
 			return n
 		}
 	}
 	for i := len(history) - 1; i >= 0; i-- {
-		if m := issueRegex.FindStringSubmatch(history[i].Content); len(m) > 1 {
+		msg := stripReplyContext(history[i].Content)
+		if m := issueRegex.FindStringSubmatch(msg); len(m) > 1 {
 			if n, err := strconv.Atoi(m[1]); err == nil {
 				return n
 			}
@@ -5164,7 +5124,8 @@ func (b *Bot) handleSandboxTimeout(task *sandbox.Task) {
 }
 
 func isBalanceIntent(prompt string) (bool, string) {
-	lower := strings.ToLower(prompt)
+	clean := stripReplyContext(prompt)
+	lower := strings.ToLower(clean)
 
 	// Exclude non-balance concepts early
 	if strings.Contains(lower, "balance sheet") || strings.Contains(lower, "tree") || strings.Contains(lower, "cooking") {
@@ -5180,7 +5141,7 @@ func isBalanceIntent(prompt string) (bool, string) {
 
 	if !hasBalanceWord && strings.Contains(lower, "how much") {
 		if strings.Contains(lower, "have") || strings.Contains(lower, "got") ||
-			strings.Contains(lower, "sol") || strings.Contains(lower, "eth") || strings.Contains(lower, "bnb") || strings.Contains(lower, "crypto") {
+			chainSolanaRegex.MatchString(lower) || chainEthRegex.MatchString(lower) || chainBnbRegex.MatchString(lower) || strings.Contains(lower, "crypto") {
 			hasBalanceWord = true
 		}
 	}
@@ -5190,22 +5151,22 @@ func isBalanceIntent(prompt string) (bool, string) {
 	}
 
 	// Detect specific chain
-	if strings.Contains(lower, "sol") || strings.Contains(lower, "solana") {
+	if chainSolanaRegex.MatchString(lower) {
 		return true, "solana"
 	}
-	if strings.Contains(lower, "base") {
+	if chainBaseRegex.MatchString(lower) {
 		return true, "base"
 	}
-	if strings.Contains(lower, "robinhood") || strings.Contains(lower, "rh") {
+	if chainRobinhoodRegex.MatchString(lower) {
 		return true, "robinhood"
 	}
-	if strings.Contains(lower, "arbitrum") || strings.Contains(lower, "arb") {
+	if chainArbitrumRegex.MatchString(lower) {
 		return true, "arbitrum"
 	}
-	if strings.Contains(lower, "bnb") || strings.Contains(lower, "bsc") {
+	if chainBnbRegex.MatchString(lower) {
 		return true, "bnb"
 	}
-	if strings.Contains(lower, "eth") || strings.Contains(lower, "ethereum") {
+	if chainEthRegex.MatchString(lower) {
 		return true, "ethereum"
 	}
 

@@ -196,6 +196,12 @@ func TestIsBalanceIntent(t *testing.T) {
 		{"how do i balance a binary tree", false, ""},
 		{"show me the balance sheet", false, ""},
 		{"what are we cooking today?", false, ""},
+		{`[Replying to: "Inspect balances\nLiege solves this..."]` + "\nas a single tweet", false, ""},
+		{"what's your sol balance", true, "solana"},
+		{"how does this solution work?", false, ""},
+		{"what whether we should do this", false, ""},
+		{"what is your rhythm", false, ""},
+		{"what is in the harbor", false, ""},
 	}
 
 	for _, tt := range tests {
@@ -1459,6 +1465,20 @@ func TestTryInterceptAction(t *testing.T) {
 	if intercepted {
 		t.Errorf("expected tryInterceptAction to return false for negative merge intent 'don't merge'")
 	}
+
+	// 4. Social post request replying to a message with a GitHub URL must NOT trigger git push/edit interception
+	socialPrompt := "[Replying to: \"https://github.com/LiegeAgents/LiegeAgentsApp/commit/123\"]\nmake a bit long please"
+	intercepted = b.tryInterceptAction(ctx, nil, socialPrompt, strings.ToLower(socialPrompt), "skipp_dev", true, nil, "Liege CLI packages cross-platform binaries...", nil)
+	if intercepted {
+		t.Errorf("expected tryInterceptAction to return false for conversational/social revision")
+	}
+
+	// 5. Social post generation that mentions 'opened pr' in text must NOT trigger git push/edit interception
+	tweetPrompt := "curate an x post for our project"
+	intercepted = b.tryInterceptAction(ctx, nil, tweetPrompt, strings.ToLower(tweetPrompt), "skipp_dev", true, nil, "we opened PR for the new CLI installer", nil)
+	if intercepted {
+		t.Errorf("expected tryInterceptAction to return false for social curation mentioning 'opened PR'")
+	}
 }
 
 func TestFormatHelpMessage_SocialCurator(t *testing.T) {
@@ -1588,6 +1608,35 @@ func TestExecuteToolCall_ReadWebPage(t *testing.T) {
 	}
 	if !strings.Contains(res, "Platform for AI agent labor") {
 		t.Errorf("expected content in tool result, got: %s", res)
+	}
+}
+
+func TestSocialReplyDoesNotExtractRepo(t *testing.T) {
+	rawPrompt := "[Replying to: \"https://github.com/LiegeAgents/LiegeAgentsApp/commit/2f2405bd473ce7bf79f2fd3f91807cb4a052ffcf\"]\nmake a bit long please"
+	clean := stripReplyContext(rawPrompt)
+	repo := extractRepoFromHistory(nil, clean)
+	if repo != "" {
+		t.Errorf("expected empty repo from clean prompt %q, got: %s", clean, repo)
+	}
+}
+
+func TestIsCryptoSendRequest_NoFalsePositives(t *testing.T) {
+	cases := []struct {
+		prompt string
+		want   bool
+	}{
+		{"send the link whether it works or not", false},
+		{"send something to the group", false},
+		{"send the x link to @VeiloraRH", false},
+		{"send decentralized docs", false},
+		{"send 10 sol to 4Nd1mBQtrMJVYVfKf2PJy9NZWsEpSpP3gQ9r19L3y8tT", true},
+		{"send 0.05 eth to 0x71C7656EC7ab88b098defB751B7401B5f6d8976F", true},
+	}
+	for _, tc := range cases {
+		got := isCryptoSendRequest(tc.prompt, strings.ToLower(tc.prompt))
+		if got != tc.want {
+			t.Errorf("isCryptoSendRequest(%q) = %v; want %v", tc.prompt, got, tc.want)
+		}
 	}
 }
 
