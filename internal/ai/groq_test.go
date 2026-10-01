@@ -81,6 +81,9 @@ func TestSystemPrompt(t *testing.T) {
 	if !strings.Contains(dmPrompt, "Chat Type & Environment:") || !strings.Contains(dmPrompt, "DIRECT 1-ON-1 PRIVATE CHAT") {
 		t.Errorf("expected chat environment context to be injected into system prompt")
 	}
+	if !strings.Contains(ownerPrompt, "delete_message") {
+		t.Errorf("expected system prompt to include delete_message agency")
+	}
 }
 
 func TestToolsDefinition(t *testing.T) {
@@ -108,6 +111,7 @@ func TestToolsDefinition(t *testing.T) {
 		"get_active_groups":      false,
 		"vercel_search_domains":  false,
 		"notify_owner":           false,
+		"delete_message":         false,
 	}
 
 	for _, tool := range tools {
@@ -399,6 +403,17 @@ func TestNormalizeToolCall(t *testing.T) {
 	notifName, _ := NormalizeToolCall("moltbook_inbox", `{}`)
 	if notifName != "moltbook_notifications" {
 		t.Errorf("expected moltbook_notifications, got %s", notifName)
+	}
+
+	// Verify delete_message normalization and messageId alias mapping
+	delName, delArgs := NormalizeToolCall("deletemessage", `{"messageId":4820}`)
+	if delName != "delete_message" {
+		t.Errorf("expected delete_message, got %s", delName)
+	}
+	var delMap map[string]interface{}
+	_ = json.Unmarshal([]byte(delArgs), &delMap)
+	if delMap["message_id"] != float64(4820) {
+		t.Errorf("expected message_id=4820, got %v", delMap["message_id"])
 	}
 }
 

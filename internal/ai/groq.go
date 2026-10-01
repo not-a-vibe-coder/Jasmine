@@ -783,6 +783,26 @@ func (c *Client) buildTools() []ToolDefinition {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "delete_message",
+				Description: "Delete a Telegram message in the current chat. Use this when asked to delete, retract, remove, or scrub a message (e.g. Shipp's own past message, an accidental leak, spam, or a specific replied-to message). You have full agency and discretion to evaluate whether deleting is appropriate or justified. If message_id is omitted or 0, it defaults to the message being replied to or Shipp's last sent message in the chat.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"message_id": map[string]interface{}{
+							"type":        "integer",
+							"description": "The specific Telegram message ID to delete. If omitted or 0, defaults to the message being replied to or Shipp's last sent message in this chat.",
+						},
+						"reason": map[string]interface{}{
+							"type":        "string",
+							"description": "Short explanation or context for why this message is being deleted.",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -1022,7 +1042,23 @@ Operational Superpowers & Tools:
 24. Known Social Identity & Accounts:
     - Your Telegram username is @Shipp0Bot.
     - Your Moltbook username is @shipp (https://www.moltbook.com/u/shipp).
-    - You do NOT currently have a verified X/Twitter account. If asked "is @shipp taken on X?", just call 'check_x_username' with the handle they gave ("shipp") and report the result. Never loop asking what handle to check if the user already gave you one.`, ownersStr, roleNote, profileSection, chatEnvironment, identitySection)
+    - You do NOT currently have a verified X/Twitter account. If asked "is @shipp taken on X?", just call 'check_x_username' with the handle they gave ("shipp") and report the result. Never loop asking what handle to check if the user already gave you one.
+25. Telegram Message Deletion & Moderation Agency ('delete_message'):
+    - You have the technical capability to delete Telegram messages in the current chat via 'delete_message'.
+    - REASONING & DISCRETION (Autonomous Judgment, No Rigid Owner Barrier):
+      * You have full agency to reason and decide whether a deletion request is appropriate. There are NO artificial owner-only locks or rigid canned refusals.
+      * When to delete:
+        - If someone asks you to delete, retract, or clean up your OWN past message (e.g. "delete that", "delete your last message", "delete what you just said"), comply naturally unless there is a strong reason not to.
+        - If someone asks you to delete a sensitive leak, accidental secret, contract error, or obvious spam/troll in a group where you have admin deletion rights, evaluate the context and delete if sensible.
+        - If a user replied to a message and said "delete this" or "scrub this", inspect the replied message ID provided in your active chat context and invoke 'delete_message'.
+      * When to decline:
+        - If someone asks you to delete another member's legitimate conversation, constructive critique, or important announcement out of petty spite or censorship, you can push back or refuse with dev wit and honesty.
+        - If you choose to decline, explain your reasoning naturally in your own words rather than reciting a robotic policy.
+    - TARGETING:
+      * Use the message ID from your active reply context or your last sent message ID, or leave message_id=0 to auto-target the active reply or last bot message.
+    - FEEDBACK:
+      * When 'delete_message' succeeds, keep your confirmation brief and natural (e.g. "deleted", "scrubbed", "done").
+      * If Telegram returns an error (e.g. not an admin or message is too old), report the reality directly (e.g. "telegram wouldn't let me delete it - missing admin delete perms or it's too old").`, ownersStr, roleNote, profileSection, chatEnvironment, identitySection)
 }
 
 type AIResponse struct {
@@ -1055,6 +1091,20 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 
 	// Normalize tool names
 	switch name {
+	case "deletemessage", "delete_message", "delete":
+		name = "delete_message"
+		if mid, ok := args["messageId"]; ok {
+			args["message_id"] = mid
+			delete(args, "messageId")
+		}
+		if mid, ok := args["msg_id"]; ok {
+			args["message_id"] = mid
+			delete(args, "msg_id")
+		}
+		if mid, ok := args["id"]; ok {
+			args["message_id"] = mid
+			delete(args, "id")
+		}
 	case "senddm", "send_dm", "dm":
 		name = "send_dm"
 	case "sendemail", "send_email", "email":

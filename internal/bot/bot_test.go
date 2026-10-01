@@ -1659,3 +1659,39 @@ func TestIsCryptoSendRequest_NoFalsePositives(t *testing.T) {
 	}
 }
 
+func TestExecuteToolCall_DeleteMessage(t *testing.T) {
+	b := &Bot{
+		lastBotMsgIDs: make(map[int64]int),
+	}
+	chatID := int64(12345)
+	b.setLastBotMessageID(chatID, 4820)
+
+	// 1. Explicit message_id
+	res1 := b.executeToolCall(context.Background(), chatID, "delete_message", `{"message_id": 9999}`, "skipp_dev", true)
+	if !strings.Contains(res1, `"success":true`) || !strings.Contains(res1, `9999`) {
+		t.Errorf("expected successful deletion of message 9999, got: %s", res1)
+	}
+
+	// 2. Default to replied message ID from context
+	ctxWithReply := context.WithValue(context.Background(), ctxKeyRepliedMsgID{}, 7777)
+	res2 := b.executeToolCall(ctxWithReply, chatID, "delete_message", `{}`, "anon", false)
+	if !strings.Contains(res2, `"success":true`) || !strings.Contains(res2, `7777`) {
+		t.Errorf("expected deletion of replied message 7777, got: %s", res2)
+	}
+
+	// 3. Fallback to last bot message ID when no reply
+	res3 := b.executeToolCall(context.Background(), chatID, "delete_message", `{}`, "anon", false)
+	if !strings.Contains(res3, `"success":true`) || !strings.Contains(res3, `4820`) {
+		t.Errorf("expected deletion of last bot message 4820, got: %s", res3)
+	}
+
+	// 4. Missing target returns error
+	bEmpty := &Bot{
+		lastBotMsgIDs: make(map[int64]int),
+	}
+	res4 := bEmpty.executeToolCall(context.Background(), 99999, "delete_message", `{}`, "anon", false)
+	if !strings.Contains(res4, `"success":false`) {
+		t.Errorf("expected error when no target ID is found, got: %s", res4)
+	}
+}
+

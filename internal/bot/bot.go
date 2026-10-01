@@ -96,6 +96,10 @@ type Bot struct {
 	msgThreadMu    sync.RWMutex
 	msgThreads     map[int64]map[int]int
 	chatLastThread map[int64]int
+
+	// Message ID tracking per chat: chatID -> latest bot messageID
+	lastBotMsgMu  sync.RWMutex
+	lastBotMsgIDs map[int64]int
 }
 
 type ActiveDialog struct {
@@ -168,6 +172,7 @@ func NewBot(
 		activeDialogs:     make(map[int64]*ActiveDialog),
 		msgThreads:        make(map[int64]map[int]int),
 		chatLastThread:    make(map[int64]int),
+		lastBotMsgIDs:     make(map[int64]int),
 	}
 
 	b.loadGroupsFromDisk()
@@ -380,9 +385,28 @@ type ctxKeyThreadID struct{}
 // so asynchronous callbacks (like sandbox execution) reply to the exact prompt message.
 type ctxKeyReplyToMsgID struct{}
 
+// ctxKeyRepliedMsgID is the context key used to pass the replied-to message ID through the call chain
+// so tools (like delete_message) know the exact message the user replied to.
+type ctxKeyRepliedMsgID struct{}
+
 // ctxKeyPrompt is the context key used to pass the original user prompt through the call chain
 // so asynchronous callbacks (like sandbox execution) can synthesize an AI response based on the original question.
 type ctxKeyPrompt struct{}
+
+func (b *Bot) setLastBotMessageID(chatID int64, msgID int) {
+	if msgID <= 0 {
+		return
+	}
+	b.lastBotMsgMu.Lock()
+	defer b.lastBotMsgMu.Unlock()
+	b.lastBotMsgIDs[chatID] = msgID
+}
+
+func (b *Bot) getLastBotMessageID(chatID int64) int {
+	b.lastBotMsgMu.RLock()
+	defer b.lastBotMsgMu.RUnlock()
+	return b.lastBotMsgIDs[chatID]
+}
 
 // handleMessageWithThread is the primary entry point for all incoming messages.
 // It extracts the forum thread ID (from webhook raw JSON) and topic name,
@@ -391,6 +415,9 @@ func (b *Bot) handleMessageWithThread(ctx context.Context, msg *tgbotapi.Message
 	chatID := msg.Chat.ID
 	ctx = context.WithValue(ctx, ctxKeyReplyToMsgID{}, msg.MessageID)
 	ctx = context.WithValue(ctx, ctxKeyPrompt{}, msg.Text)
+	if msg.ReplyToMessage != nil {
+		ctx = context.WithValue(ctx, ctxKeyRepliedMsgID{}, msg.ReplyToMessage.MessageID)
+	}
 
 	// If this is a forum_topic_created service message, register the topic
 	if topicName != "" && threadID != 0 {
@@ -1295,6 +1322,22 @@ func (b *Bot) handleNLPAndChat(
 			title = "this group"
 		}
 		chatContext = fmt.Sprintf("- YOU ARE IN A TELEGRAM GROUP CHAT: %q.\n- Speak to the room or to @%s as appropriate.\n- Strictly do NOT ask eager follow-up questions.", title, username)
+	}
+
+	if msg.ReplyToMessage != nil {
+		sender := "someone"
+		if msg.ReplyToMessage.From != nil {
+			if msg.ReplyToMessage.From.UserName != "" {
+				sender = "@" + msg.ReplyToMessage.From.UserName
+			} else {
+				sender = msg.ReplyToMessage.From.FirstName
+			}
+		}
+		chatContext += fmt.Sprintf("\n- ACTIVE REPLY CONTEXT: You are replying to message ID %d (authored by %s: %q).", msg.ReplyToMessage.MessageID, sender, msg.ReplyToMessage.Text)
+		ctx = context.WithValue(ctx, ctxKeyRepliedMsgID{}, msg.ReplyToMessage.MessageID)
+	}
+	if lastID := b.getLastBotMessageID(chatID); lastID > 0 {
+		chatContext += fmt.Sprintf("\n- YOUR LAST SENT MESSAGE IN THIS CHAT: Message ID %d.", lastID)
 	}
 
 	// Sync living self-identity into AI
@@ -3352,6 +3395,58 @@ func (b *Bot) executeToolCall(
 		}
 		return fmt.Sprintf("Recorded alert for owner (@%s): %s", strings.Join(b.cfg.Owners, ", @"), content)
 
+	case "delete_message":
+		var args struct {
+			MessageID int    `json:"message_id"`
+			Reason    string `json:"reason"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+
+		targetID := args.MessageID
+		if targetID <= 0 {
+			if v := ctx.Value(ctxKeyRepliedMsgID{}); v != nil {
+				targetID = v.(int)
+			}
+			if targetID <= 0 {
+				targetID = b.getLastBotMessageID(chatID)
+			}
+		}
+
+		if targetID <= 0 {
+			data, _ := json.Marshal(map[string]interface{}{
+				"success": false,
+				"error":   "no target message_id identified to delete",
+			})
+			return string(data)
+		}
+
+		if b.api == nil {
+			data, _ := json.Marshal(map[string]interface{}{
+				"success":    true,
+				"message_id": targetID,
+				"status":     "message deleted (mock)",
+			})
+			return string(data)
+		}
+
+		deleteMsg := tgbotapi.NewDeleteMessage(chatID, targetID)
+		_, err := b.api.Request(deleteMsg)
+		if err != nil {
+			data, _ := json.Marshal(map[string]interface{}{
+				"success":    false,
+				"message_id": targetID,
+				"error":      err.Error(),
+			})
+			return string(data)
+		}
+
+		data, _ := json.Marshal(map[string]interface{}{
+			"success":    true,
+			"message_id": targetID,
+			"status":     "message deleted successfully",
+		})
+		return string(data)
+
 	default:
 		return "Unknown action."
 	}
@@ -4824,11 +4919,14 @@ func (b *Bot) sendReplyCtx(ctx context.Context, chatID int64, replyToMsgID int, 
 	if replyToMsgID > 0 && chatID < 0 {
 		msg.ReplyToMessageID = replyToMsgID
 	}
-	_, err := b.api.Send(msg)
+	sent, err := b.api.Send(msg)
 	if err != nil {
 		msg.ParseMode = ""
 		msg.Text = stripHTMLTags(htmlText)
-		_, _ = b.api.Send(msg)
+		sent, _ = b.api.Send(msg)
+	}
+	if sent.MessageID > 0 {
+		b.setLastBotMessageID(chatID, sent.MessageID)
 	}
 }
 
@@ -4855,11 +4953,14 @@ func (b *Bot) sendSimpleMessageCtx(ctx context.Context, chatID int64, text strin
 
 	msg := tgbotapi.NewMessage(chatID, htmlText)
 	msg.ParseMode = "HTML"
-	_, err := b.api.Send(msg)
+	sent, err := b.api.Send(msg)
 	if err != nil {
 		msg.ParseMode = ""
 		msg.Text = stripHTMLTags(htmlText)
-		_, _ = b.api.Send(msg)
+		sent, _ = b.api.Send(msg)
+	}
+	if sent.MessageID > 0 {
+		b.setLastBotMessageID(chatID, sent.MessageID)
 	}
 }
 
@@ -4886,7 +4987,33 @@ func (b *Bot) sendViaThreadAPI(_ context.Context, chatID int64, threadID int, re
 		if err2 != nil || (resp2 != nil && !resp2.Ok) {
 			// Fallback 2: if thread was deleted or failed, send to chat without message_thread_id
 			delete(params, "message_thread_id")
-			_, _ = b.api.MakeRequest("sendMessage", params)
+			resp3, _ := b.api.MakeRequest("sendMessage", params)
+			if resp3 != nil && resp3.Ok && resp3.Result != nil {
+				var sent struct {
+					MessageID int `json:"message_id"`
+				}
+				if err := json.Unmarshal(resp3.Result, &sent); err == nil && sent.MessageID > 0 {
+					b.setLastBotMessageID(chatID, sent.MessageID)
+				}
+			}
+			return
+		}
+		if resp2 != nil && resp2.Ok && resp2.Result != nil {
+			var sent struct {
+				MessageID int `json:"message_id"`
+			}
+			if err := json.Unmarshal(resp2.Result, &sent); err == nil && sent.MessageID > 0 {
+				b.setLastBotMessageID(chatID, sent.MessageID)
+			}
+		}
+		return
+	}
+	if resp != nil && resp.Ok && resp.Result != nil {
+		var sent struct {
+			MessageID int `json:"message_id"`
+		}
+		if err := json.Unmarshal(resp.Result, &sent); err == nil && sent.MessageID > 0 {
+			b.setLastBotMessageID(chatID, sent.MessageID)
 		}
 	}
 }
