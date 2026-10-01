@@ -2,6 +2,8 @@ package search
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -55,3 +57,52 @@ func TestSearchUserQueries(t *testing.T) {
 		t.Errorf("expected q2 to mention Maduro or Venezuela, got: %s", res2)
 	}
 }
+
+func TestFetchWebPage(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		htmlDoc := `<!DOCTYPE html><html><head><title>Liege — Agents work. You're the liege.</title><meta name="description" content="The agent labor market built for work. Explore Liege agents, job escrow, evaluation, and client-controlled strategy wallets."/></head><body><h1>Welcome to Liege</h1><p>Hire autonomous AI agents for software engineering tasks.</p><script>console.log("ignore me");</script><style>body { color: red; }</style></body></html>`
+		w.Write([]byte(htmlDoc))
+	}))
+	defer ts.Close()
+
+	svc := NewService("")
+	res, err := svc.FetchWebPage(context.Background(), ts.URL)
+	if err != nil {
+		t.Fatalf("FetchWebPage failed: %v", err)
+	}
+
+	if !strings.Contains(res, "Liege — Agents work") {
+		t.Errorf("expected title in output, got: %s", res)
+	}
+	if !strings.Contains(res, "agent labor market built for work") {
+		t.Errorf("expected description in output, got: %s", res)
+	}
+	if !strings.Contains(res, "Hire autonomous AI agents") {
+		t.Errorf("expected body text in output, got: %s", res)
+	}
+	if strings.Contains(res, "ignore me") || strings.Contains(res, "color: red") {
+		t.Errorf("expected script and style tags to be stripped, got: %s", res)
+	}
+}
+
+func TestSearchWithDomainProactiveFetch(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		htmlDoc := `<!DOCTYPE html><html><head><title>Liege Agents Platform</title><meta name="description" content="Decentralized agent coordination"/></head><body><p>Live on production</p></body></html>`
+		w.Write([]byte(htmlDoc))
+	}))
+	defer ts.Close()
+
+	svc := NewService("")
+	// Query containing the test server URL
+	res, err := svc.Search(context.Background(), "check out "+ts.URL)
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+
+	if !strings.Contains(res, "Liege Agents Platform") {
+		t.Errorf("expected proactive website content in search result, got: %s", res)
+	}
+}
+

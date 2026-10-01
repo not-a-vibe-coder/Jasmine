@@ -2284,6 +2284,24 @@ func (b *Bot) executeToolCall(
 		}
 		return res
 
+	case "read_web_page":
+		var args struct {
+			URL string `json:"url"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		u := strings.TrimSpace(args.URL)
+		if u == "" {
+			return "No URL or domain provided to read."
+		}
+		if b.search == nil {
+			return "Web reader service is currently offline."
+		}
+		res, err := b.search.FetchWebPage(ctx, u)
+		if err != nil {
+			return fmt.Sprintf("Failed to read webpage: %v", err)
+		}
+		return res
+
 	case "analyze_token":
 		var args struct {
 			Address string `json:"address"`

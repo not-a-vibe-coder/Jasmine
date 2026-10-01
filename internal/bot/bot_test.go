@@ -19,6 +19,7 @@ import (
 	"shipp/internal/domain"
 	"shipp/internal/github"
 	"shipp/internal/memory"
+	"shipp/internal/search"
 	"shipp/internal/xhandle"
 )
 
@@ -1563,3 +1564,29 @@ func TestTryInterceptSendCrypto_LinkNotBlocked(t *testing.T) {
 		t.Errorf("tryInterceptSendCrypto replied with anti-beggar message for link request!")
 	}
 }
+
+func TestExecuteToolCall_ReadWebPage(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		htmlDoc := `<!DOCTYPE html><html><head><title>Liege — Agents work.</title><meta name="description" content="Autonomous agent coordination"/></head><body><p>Platform for AI agent labor</p></body></html>`
+		w.Write([]byte(htmlDoc))
+	}))
+	defer ts.Close()
+
+	searchSvc := search.NewService("")
+	b := &Bot{
+		search: searchSvc,
+	}
+
+	res := b.executeToolCall(context.Background(), 12345, "read_web_page", fmt.Sprintf(`{"url":"%s"}`, ts.URL), "skipp_dev", true)
+	if !strings.Contains(res, "Liege — Agents work") {
+		t.Errorf("expected title in tool result, got: %s", res)
+	}
+	if !strings.Contains(res, "Autonomous agent coordination") {
+		t.Errorf("expected description in tool result, got: %s", res)
+	}
+	if !strings.Contains(res, "Platform for AI agent labor") {
+		t.Errorf("expected content in tool result, got: %s", res)
+	}
+}
+

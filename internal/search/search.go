@@ -76,11 +76,132 @@ type tavilyResponse struct {
 	} `json:"results"`
 }
 
-var htmlTagRegex = regexp.MustCompile(`<[^>]*>`)
+var (
+	htmlTagRegex     = regexp.MustCompile(`<[^>]*>`)
+	urlOrDomainRegex = regexp.MustCompile(`(?i)\b(?:https?://)?(?:[a-zA-Z0-9-]+\.)+(?:com|org|net|io|xyz|app|dev|co|ai|me|cc|sh|so|gg|tech|network|finance|fun|link|site|online|store|world)\b(?:/[^\s]*)?`)
+	titleTagRegex    = regexp.MustCompile(`(?i)<title[^>]*>([^<]+)</title>`)
+	metaDescRegex    = regexp.MustCompile(`(?i)<meta\s+[^>]*name=["']description["'][^>]*content=["']([^"']+)["']|<meta\s+[^>]*content=["']([^"']+)["'][^>]*name=["']description["']`)
+	ogTitleRegex     = regexp.MustCompile(`(?i)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']|<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:title["']`)
+	ogDescRegex      = regexp.MustCompile(`(?i)<meta\s+[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']|<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:description["']`)
+	scriptTagRegex   = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
+	styleTagRegex    = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+	svgTagRegex      = regexp.MustCompile(`(?is)<svg[^>]*>.*?</svg>`)
+	headTagRegex     = regexp.MustCompile(`(?is)<head[^>]*>.*?</head>`)
+	whitespaceRegex  = regexp.MustCompile(`\s+`)
+)
 
 func stripHTML(s string) string {
 	clean := htmlTagRegex.ReplaceAllString(s, "")
 	return strings.TrimSpace(html.UnescapeString(clean))
+}
+
+// FetchWebPage fetches and extracts structured metadata, title, description, and visible text from any URL or domain.
+func (s *Service) FetchWebPage(ctx context.Context, rawURL string) (string, error) {
+	targetURL := strings.TrimSpace(rawURL)
+	if targetURL == "" {
+		return "Please provide a valid URL or domain.", nil
+	}
+	if !strings.HasPrefix(strings.ToLower(targetURL), "http://") && !strings.HasPrefix(strings.ToLower(targetURL), "https://") {
+		targetURL = "https://" + targetURL
+	}
+
+	parsed, err := url.Parse(targetURL)
+	if err != nil || parsed.Host == "" {
+		return fmt.Sprintf("Invalid URL or domain format: %s", rawURL), nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return fmt.Sprintf("Failed to build request for %s: %v", targetURL, err), nil
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Sprintf("Failed to fetch webpage %s: %v", targetURL, err), nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return fmt.Sprintf("Webpage %s returned HTTP status %d (%s)", targetURL, resp.StatusCode, resp.Status), nil
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return fmt.Sprintf("Error reading content from %s: %v", targetURL, err), nil
+	}
+	htmlStr := string(bodyBytes)
+
+	// Extract title
+	pageTitle := ""
+	if m := titleTagRegex.FindStringSubmatch(htmlStr); len(m) > 1 {
+		pageTitle = stripHTML(m[1])
+	}
+
+	// Extract description
+	pageDesc := ""
+	if m := metaDescRegex.FindStringSubmatch(htmlStr); len(m) > 0 {
+		for _, v := range m[1:] {
+			if v != "" {
+				pageDesc = stripHTML(v)
+				break
+			}
+		}
+	}
+	if pageDesc == "" {
+		if m := ogDescRegex.FindStringSubmatch(htmlStr); len(m) > 0 {
+			for _, v := range m[1:] {
+				if v != "" {
+					pageDesc = stripHTML(v)
+					break
+				}
+			}
+		}
+	}
+
+	if pageTitle == "" {
+		if m := ogTitleRegex.FindStringSubmatch(htmlStr); len(m) > 0 {
+			for _, v := range m[1:] {
+				if v != "" {
+					pageTitle = stripHTML(v)
+					break
+				}
+			}
+		}
+	}
+
+	// Clean body text
+	bodyOnly := headTagRegex.ReplaceAllString(htmlStr, "")
+	bodyOnly = scriptTagRegex.ReplaceAllString(bodyOnly, "")
+	bodyOnly = styleTagRegex.ReplaceAllString(bodyOnly, "")
+	bodyOnly = svgTagRegex.ReplaceAllString(bodyOnly, "")
+	cleanText := stripHTML(bodyOnly)
+	cleanText = whitespaceRegex.ReplaceAllString(cleanText, " ")
+	cleanText = strings.TrimSpace(cleanText)
+
+	if len(cleanText) > 2500 {
+		cleanText = cleanText[:2500] + "..."
+	}
+
+	var sb strings.Builder
+	finalURL := targetURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+	sb.WriteString(fmt.Sprintf("[Webpage: %s]\n", finalURL))
+	if pageTitle != "" {
+		sb.WriteString(fmt.Sprintf("Title: %s\n", pageTitle))
+	}
+	if pageDesc != "" {
+		sb.WriteString(fmt.Sprintf("Description: %s\n", pageDesc))
+	}
+	if cleanText != "" {
+		sb.WriteString(fmt.Sprintf("\nContent Summary / Text:\n%s\n", cleanText))
+	}
+
+	return strings.TrimSpace(sb.String()), nil
 }
 
 // Search coordinates multi-source real-time search across Google News, Wikipedia full-text, and Tavily
@@ -100,13 +221,21 @@ func (s *Service) Search(ctx context.Context, query string) (string, error) {
 
 	var sections []string
 
-	// 2. Query Google News RSS for real-time news & current events
+	// 2. Proactive domain/URL fetch: if query contains a domain or URL, fetch live website content!
+	if domainMatch := urlOrDomainRegex.FindString(cleanQuery); domainMatch != "" {
+		pageContent, err := s.FetchWebPage(ctx, domainMatch)
+		if err == nil && pageContent != "" && !strings.Contains(pageContent, "returned HTTP status 4") {
+			sections = append(sections, fmt.Sprintf("[Live Website Content]\n%s", pageContent))
+		}
+	}
+
+	// 3. Query Google News RSS for real-time news & current events
 	newsResults, err := s.searchGoogleNews(ctx, cleanQuery)
 	if err == nil && newsResults != "" {
 		sections = append(sections, fmt.Sprintf("[Recent News & Real-Time Intel]\n%s", newsResults))
 	}
 
-	// 3. Query Wikipedia full-text search for factual/historical context
+	// 4. Query Wikipedia full-text search for factual/historical context
 	wikiResults, err := s.searchWikipediaFullText(ctx, cleanQuery)
 	if err == nil && wikiResults != "" {
 		sections = append(sections, fmt.Sprintf("[Background & Encyclopedia Context]\n%s", wikiResults))
