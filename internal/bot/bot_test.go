@@ -1166,6 +1166,10 @@ func TestIsDocReadQuery(t *testing.T) {
 		{"explain what's in the markdown", true},
 		{"what is the price of solana?", false},
 		{"hello shipp", false},
+		{"shipp, based on this brief, make a single post social media post and attach this link: https://www.liegeagents.com/docs at the end\nAdded two documentation pages:\n- /docs/mcp: explains MCP connection setup...", false},
+		{"explain docker", false},
+		{"check the docs at https://example.com/docs", false},
+		{"curate a post for the new docs", false},
 	}
 
 	for _, tt := range tests {
@@ -1173,6 +1177,21 @@ func TestIsDocReadQuery(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isDocReadQuery(%q) = %v; want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestIsSupportedDoc(t *testing.T) {
+	if isSupportedDoc("Screen Recording 2026-10-01 at 05.16.00.mov") {
+		t.Errorf("expected .mov to not be supported")
+	}
+	if isSupportedDoc("video.mp4") {
+		t.Errorf("expected .mp4 to not be supported")
+	}
+	if !isSupportedDoc("whitepaper.pdf") {
+		t.Errorf("expected .pdf to be supported")
+	}
+	if !isSupportedDoc("README.md") {
+		t.Errorf("expected .md to be supported")
 	}
 }
 

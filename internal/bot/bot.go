@@ -553,19 +553,25 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 	// Document inspection: reply-to document or query about recent document
 	if msg.ReplyToMessage != nil && msg.ReplyToMessage.Document != nil {
-		b.processDocument(ctx, chatID, msg.MessageID, senderID, username, isOwner, msg.ReplyToMessage.Document, cleanPrompt)
-		return
+		doc := msg.ReplyToMessage.Document
+		if isSupportedDoc(doc.FileName) {
+			b.processDocument(ctx, chatID, msg.MessageID, senderID, username, isOwner, doc, cleanPrompt)
+			return
+		}
 	}
 
 	lowerPrompt := strings.ToLower(cleanPrompt)
 	if isDocReadQuery(lowerPrompt) {
-		b.recentDocMu.RLock()
+		b.recentDocMu.Lock()
 		recentDoc, hasRecent := b.recentDocs[chatID]
-		b.recentDocMu.RUnlock()
-		if hasRecent && recentDoc != nil && time.Since(recentDoc.ReceivedAt) < 30*time.Minute {
-			b.processDocument(ctx, chatID, msg.MessageID, senderID, username, isOwner, recentDoc.Document, cleanPrompt)
+		if hasRecent && recentDoc != nil && isSupportedDoc(recentDoc.Document.FileName) && (recentDoc.SenderID == senderID || msg.Chat.IsPrivate()) && time.Since(recentDoc.ReceivedAt) < 3*time.Minute {
+			doc := recentDoc.Document
+			delete(b.recentDocs, chatID)
+			b.recentDocMu.Unlock()
+			b.processDocument(ctx, chatID, msg.MessageID, senderID, username, isOwner, doc, cleanPrompt)
 			return
 		}
+		b.recentDocMu.Unlock()
 	}
 
 	// Direct Token CA detection (fast path when primarily a CA paste)
@@ -4169,15 +4175,17 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 		return
 	}
 
-	// Always cache received document so follow-up queries like "can you read this doc" work reliably
-	b.recentDocMu.Lock()
-	b.recentDocs[chatID] = &RecentDocInfo{
-		Document:   doc,
-		ReceivedAt: time.Now(),
-		SenderID:   senderID,
-		Username:   username,
+	// Cache received document ONLY if it's a supported document type, so follow-up queries like "can you read this doc" work reliably
+	if isSupportedDoc(doc.FileName) {
+		b.recentDocMu.Lock()
+		b.recentDocs[chatID] = &RecentDocInfo{
+			Document:   doc,
+			ReceivedAt: time.Now(),
+			SenderID:   senderID,
+			Username:   username,
+		}
+		b.recentDocMu.Unlock()
 	}
-	b.recentDocMu.Unlock()
 
 	cleanCaption := b.cleanPrompt(msg.Caption)
 	mime := strings.ToLower(doc.MimeType)
@@ -4223,6 +4231,15 @@ func (b *Bot) handleDocumentMessage(ctx context.Context, msg *tgbotapi.Message) 
 		return
 	}
 
+	if !isSupportedDoc(doc.FileName) {
+		// If unaddressed in a group chat, don't spam errors for arbitrary file uploads (like videos or archives)
+		if !isPrivate && !b.isAddressedToBot(msg) && cleanCaption == "" {
+			return
+		}
+		b.sendReply(chatID, msg.MessageID, fmt.Sprintf("I support document analysis for `.md`, `.pdf`, and `.docx` (or `.txt`/`.json`). `%s` isn't supported yet.", doc.FileName))
+		return
+	}
+
 	b.processDocument(ctx, chatID, msg.MessageID, senderID, username, isOwner, doc, cleanCaption)
 }
 
@@ -4240,9 +4257,7 @@ func (b *Bot) processDocument(
 		return
 	}
 
-	ext := strings.ToLower(filepath.Ext(doc.FileName))
-	// Document types: .md, .pdf, .docx, .txt, .csv, .json, .log
-	if ext != ".md" && ext != ".pdf" && ext != ".docx" && ext != ".txt" && ext != ".csv" && ext != ".json" && ext != ".log" {
+	if !isSupportedDoc(doc.FileName) {
 		b.sendReply(chatID, replyToMsgID, fmt.Sprintf("I support document analysis for `.md`, `.pdf`, and `.docx` (or `.txt`/`.json`). `%s` isn't supported yet.", doc.FileName))
 		return
 	}
@@ -4298,10 +4313,40 @@ func (b *Bot) processDocument(
 	b.recordActiveDialog(chatID, replyToMsgID, analysis, senderID, username)
 }
 
+func isSupportedDoc(fileName string) bool {
+	ext := strings.ToLower(filepath.Ext(fileName))
+	return ext == ".md" || ext == ".pdf" || ext == ".docx" || ext == ".txt" || ext == ".csv" || ext == ".json" || ext == ".log"
+}
+
+var (
+	docNounRegex    = regexp.MustCompile(`(?i)\b(?:doc|document|pdf|file|prd|markdown|whitepaper)\b`)
+	docVerbRegex    = regexp.MustCompile(`(?i)\b(?:read|summarize|analyze|review|inspect|what(?:'s|\s+is)?\s+in)\b`)
+	docExplainRegex = regexp.MustCompile(`(?i)\bexplain\s+(?:what(?:'s|\s+is)\s+in|the\s+content|the\s+doc|this\s+doc|the\s+document|this\s+document|the\s+file|this\s+file|the\s+markdown|this\s+markdown)\b`)
+)
+
 func isDocReadQuery(lower string) bool {
-	hasVerb := strings.Contains(lower, "read") || strings.Contains(lower, "check") || strings.Contains(lower, "summarize") || strings.Contains(lower, "analyze") || strings.Contains(lower, "what does") || strings.Contains(lower, "what is in") || strings.Contains(lower, "what's in") || strings.Contains(lower, "whats in") || strings.Contains(lower, "explain") || strings.Contains(lower, "break down")
-	hasDocNoun := strings.Contains(lower, "doc") || strings.Contains(lower, "file") || strings.Contains(lower, "pdf") || strings.Contains(lower, "document") || strings.Contains(lower, "prd") || strings.Contains(lower, "markdown")
-	return hasVerb && hasDocNoun
+	// Exclude social media drafting/curation requests
+	if strings.Contains(lower, "tweet") || strings.Contains(lower, "post") || strings.Contains(lower, "curate") || strings.Contains(lower, "thread") {
+		return false
+	}
+
+	// Exclude web URLs and domains
+	if strings.Contains(lower, "http://") || strings.Contains(lower, "https://") || strings.Contains(lower, "www.") {
+		return false
+	}
+
+	// Exclude code repository/commit operations
+	if strings.Contains(lower, "commit ") || strings.Contains(lower, "pull request") || strings.Contains(lower, "push to") {
+		return false
+	}
+
+	hasDocNoun := docNounRegex.MatchString(lower)
+	if !hasDocNoun {
+		return false
+	}
+
+	hasVerb := docVerbRegex.MatchString(lower) || docExplainRegex.MatchString(lower) || strings.Contains(lower, "check this doc") || strings.Contains(lower, "check this file")
+	return hasVerb
 }
 
 var profileTriggerWords = []string{
