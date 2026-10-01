@@ -390,7 +390,7 @@ func (s *Service) FormatResponse(results []HandleResult) string {
 			if reasonStr == "" {
 				reasonStr = "Unavailable"
 			}
-			unavailableList = append(unavailableList, fmt.Sprintf("• <b>%s</b> - %s", display, reasonStr))
+			unavailableList = append(unavailableList, fmt.Sprintf("• <b>%s</b> - %s (https://x.com/%s)", display, reasonStr, r.Username))
 		}
 	}
 

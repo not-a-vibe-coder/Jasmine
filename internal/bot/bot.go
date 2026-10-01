@@ -1260,6 +1260,17 @@ func (b *Bot) handleNLPAndChat(
 		return
 	}
 
+	// 2d. X Profile Link dispatch: if the user asks for the link/URL to an X handle or brand
+	//     (e.g. "send me a link to the x handle created for Veilora", "Send the veilora x link", "what's the x link for veilora"),
+	//     resolve the handle from recent history (or brand name) and reply with the clean URL directly.
+	if ok, xURL, _ := b.tryResolveXLink(prompt, lowerPrompt, history); ok {
+		b.sendReply(chatID, msg.MessageID, xURL)
+		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", xURL)
+		b.recordActiveDialog(chatID, msg.MessageID, xURL, msg.From.ID, username)
+		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
+		return
+	}
+
 	// 3. Run the agentic loop (ReAct: reason, act, observe, repeat)
 	//    The loop calls the AI, executes any tool calls, feeds results back, and loops
 	//    until the AI returns a plain-text final reply or the 5-iteration cap is hit.
@@ -1801,6 +1812,123 @@ func extractSendAmount(text string) float64 {
 	return 0
 }
 
+// isCryptoSendRequest checks whether the user is explicitly commanding Shipp to transfer crypto/funds.
+// It explicitly excludes requests asking to send non-financial items (links, URLs, repos, photos, messages, etc.).
+func isCryptoSendRequest(prompt, lowerPrompt string) bool {
+	// If the prompt mentions sending non-financial content, it's not a crypto transfer
+	nonFinancialKeywords := []string{
+		"link", "url", "repo", "github", "code", "pr", "pull request",
+		"issue", "message", "dm", "email", "mail", "photo", "image",
+		"picture", "screenshot", "file", "doc", "document", "pdf",
+		"tweet", "post", "handle", "x handle", "twitter", "details",
+	}
+	for _, kw := range nonFinancialKeywords {
+		if strings.Contains(lowerPrompt, kw) {
+			return false
+		}
+	}
+
+	if strings.HasPrefix(lowerPrompt, "/send") {
+		return true
+	}
+	if strings.Contains(lowerPrompt, "send crypto") || strings.Contains(lowerPrompt, "send funds") {
+		return true
+	}
+
+	hasSendVerb := strings.HasPrefix(lowerPrompt, "send ") ||
+		strings.Contains(lowerPrompt, "send me ") ||
+		strings.HasPrefix(lowerPrompt, "transfer ") ||
+		strings.Contains(lowerPrompt, "transfer me ")
+	if !hasSendVerb {
+		return false
+	}
+
+	// Must explicitly reference money, currency, tokens, chains, or amounts
+	financialKeywords := []string{
+		"crypto", "fund", "funds", "token", "tokens", "coin", "coins",
+		"sol", "solana", "eth", "ethereum", "base", "robinhood", "arbitrum", "bnb", "bsc",
+		"usdc", "usdt", "dollar", "dollars", "cent", "cents", "$", "bag", "bags", "cash",
+	}
+	for _, kw := range financialKeywords {
+		if strings.Contains(lowerPrompt, kw) {
+			return true
+		}
+	}
+
+	if evmAddressRegex.MatchString(prompt) || solanaAddressRegex.MatchString(prompt) || extractSendAmount(prompt) > 0 {
+		return true
+	}
+
+	return false
+}
+
+var (
+	xLinkIntentRegex    = regexp.MustCompile(`(?i)(?:send|drop|give|what(?:'s|\s+is)?|share|get|show)\s+(?:me\s+)?(?:the\s+|a\s+)?(?:link|url)\s+(?:to\s+)?(?:the\s+)?(?:x|twitter)?\s*(?:handle|account|profile|page)?|(?:send|drop|give|what(?:'s|\s+is)?|share|get|show)\s+(?:me\s+)?(?:the\s+|a\s+)?(?:x|twitter)\s+(?:link|url|handle\s+link|account\s+link)|(?:link|url)\s+(?:to|for)\s+(?:the\s+)?(?:x|twitter)\s+(?:handle|account|profile)|(?:x|twitter)\s+link`)
+	xHandleMentionRegex = regexp.MustCompile(`(?i)(?:https?://(?:www\.)?(?:x|twitter)\.com/|@)([a-zA-Z0-9_]{1,15})\b`)
+)
+
+func (b *Bot) tryResolveXLink(prompt, lowerPrompt string, history []memory.Message) (bool, string, string) {
+	clean := stripReplyContext(prompt)
+	lowerClean := strings.ToLower(clean)
+
+	if !xLinkIntentRegex.MatchString(lowerClean) &&
+		!strings.Contains(lowerClean, "x link") &&
+		!strings.Contains(lowerClean, "twitter link") &&
+		!strings.Contains(lowerClean, "link to the x") &&
+		!strings.Contains(lowerClean, "link to the twitter") {
+		return false, "", ""
+	}
+
+	// 1. Direct handle in the current prompt (e.g. "send the link to @VeiloraRH")
+	if m := xHandleMentionRegex.FindStringSubmatch(clean); len(m) > 1 {
+		handle := m[1]
+		if !strings.EqualFold(handle, "shipp0bot") && !strings.EqualFold(handle, "shipp") {
+			return true, fmt.Sprintf("https://x.com/%s", handle), handle
+		}
+	}
+
+	// 2. Extract brand/subject hint from prompt (e.g. "veilora" from "Send the veilora x link")
+	brand := domain.ExtractDomainBase(clean)
+	if brand == "" {
+		words := strings.Fields(lowerClean)
+		stopWords := map[string]bool{
+			"send": true, "me": true, "a": true, "the": true, "link": true, "url": true,
+			"to": true, "for": true, "x": true, "twitter": true, "handle": true, "account": true,
+			"profile": true, "created": true, "what": true, "is": true, "whats": true,
+		}
+		for _, w := range words {
+			w = strings.Trim(w, ",.:;!?()'\"[]{}@")
+			if len(w) >= 3 && !stopWords[w] {
+				brand = w
+				break
+			}
+		}
+	}
+
+	// 3. Search history (from most recent) for handles matching the brand
+	if brand != "" {
+		for i := len(history) - 1; i >= 0; i-- {
+			matches := xHandleMentionRegex.FindAllStringSubmatch(history[i].Content, -1)
+			for _, m := range matches {
+				if len(m) > 1 {
+					h := m[1]
+					lowerH := strings.ToLower(h)
+					if strings.Contains(lowerH, brand) || strings.Contains(brand, lowerH) {
+						return true, fmt.Sprintf("https://x.com/%s", h), h
+					}
+				}
+			}
+		}
+
+		// If no handle in history contains brand, but brand itself is valid, default to https://x.com/<brand>
+		if len(brand) <= 15 {
+			return true, fmt.Sprintf("https://x.com/%s", brand), brand
+		}
+	}
+
+	return false, "", ""
+}
+
 // tryInterceptSendCrypto catches hallucinated crypto transfer claims or unprocessed transfer requests
 // when send_crypto was never actually executed.
 func (b *Bot) tryInterceptSendCrypto(
@@ -1819,11 +1947,7 @@ func (b *Bot) tryInterceptSendCrypto(
 	}
 
 	isClaim := fakeTransferClaimRegex.MatchString(replyText)
-	isExplicitSend := strings.HasPrefix(lowerPrompt, "/send") ||
-		strings.HasPrefix(lowerPrompt, "send ") ||
-		strings.Contains(lowerPrompt, "send me ") ||
-		strings.Contains(lowerPrompt, "send crypto") ||
-		strings.HasPrefix(lowerPrompt, "transfer ")
+	isExplicitSend := isCryptoSendRequest(prompt, lowerPrompt)
 
 	if !isClaim && !isExplicitSend {
 		return false, replyText

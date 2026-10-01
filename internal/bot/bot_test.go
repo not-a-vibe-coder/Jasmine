@@ -1460,10 +1460,92 @@ func TestFormatHelpMessage_SocialCurator(t *testing.T) {
 	}
 }
 
+func TestIsCryptoSendRequest(t *testing.T) {
+	tests := []struct {
+		prompt   string
+		expected bool
+	}{
+		{"send me a link to the x handle created for Veilora", false},
+		{"Send the veilora x link", false},
+		{"send me the github repo link", false},
+		{"send me the url for the app", false},
+		{"send me a dm on telegram", false},
+		{"send me the photo", false},
+		{"send me an email with the details", false},
+		{"send 0.5 sol to HzxdDjSZPw9JCbrknZ3dUru5SwnuTQrJFqZN7gPKHfXr", true},
+		{"send me 10 usdc", true},
+		{"send crypto to 0x0a2e799d0b57217a1066a4CDD132F01215E132b8", true},
+		{"transfer 5 sol", true},
+		{"/send 1 sol to HzxdDjSZPw9JCbrknZ3dUru5SwnuTQrJFqZN7gPKHfXr", true},
+		{"send me 50 dollars", true},
+		{"just chilling here", false},
+	}
 
+	for _, tt := range tests {
+		got := isCryptoSendRequest(tt.prompt, strings.ToLower(tt.prompt))
+		if got != tt.expected {
+			t.Errorf("isCryptoSendRequest(%q) = %v; want %v", tt.prompt, got, tt.expected)
+		}
+	}
+}
 
+func TestTryResolveXLink(t *testing.T) {
+	b := &Bot{}
 
+	historyWithVeilora := []memory.Message{
+		{Role: "user", Content: "Claim the x handle for Veilora"},
+		{Role: "assistant", Content: "ready sir @VeiloraRH (https://x.com/VeiloraRH) is reserved and configured."},
+	}
 
+	// 1. Issac's prompt resolving VeiloraRH from history
+	p1 := "send me a link to the x handle created for Veilora"
+	ok1, url1, h1 := b.tryResolveXLink(p1, strings.ToLower(p1), historyWithVeilora)
+	if !ok1 || url1 != "https://x.com/VeiloraRH" || h1 != "VeiloraRH" {
+		t.Errorf("tryResolveXLink p1 = (%v, %q, %q); want (true, 'https://x.com/VeiloraRH', 'VeiloraRH')", ok1, url1, h1)
+	}
 
+	// 2. Skipp's prompt resolving VeiloraRH from history
+	p2 := "Send the veilora x link"
+	ok2, url2, h2 := b.tryResolveXLink(p2, strings.ToLower(p2), historyWithVeilora)
+	if !ok2 || url2 != "https://x.com/VeiloraRH" || h2 != "VeiloraRH" {
+		t.Errorf("tryResolveXLink p2 = (%v, %q, %q); want (true, 'https://x.com/VeiloraRH', 'VeiloraRH')", ok2, url2, h2)
+	}
 
+	// 3. Direct mention in prompt
+	p3 := "send me the x link for @myproject"
+	ok3, url3, h3 := b.tryResolveXLink(p3, strings.ToLower(p3), nil)
+	if !ok3 || url3 != "https://x.com/myproject" || h3 != "myproject" {
+		t.Errorf("tryResolveXLink p3 = (%v, %q, %q); want (true, 'https://x.com/myproject', 'myproject')", ok3, url3, h3)
+	}
 
+	// 4. Non-x link request
+	p4 := "what's the weather in Lagos today?"
+	ok4, _, _ := b.tryResolveXLink(p4, strings.ToLower(p4), historyWithVeilora)
+	if ok4 {
+		t.Errorf("tryResolveXLink p4 should return false, got true")
+	}
+}
+
+func TestTryInterceptSendCrypto_LinkNotBlocked(t *testing.T) {
+	b := &Bot{
+		cfg: &config.Config{Owners: []string{"skipp_dev"}},
+	}
+
+	// Non-owner asking for a link: must NOT be intercepted by anti-beggar crypto shield
+	prompt := "send me a link to the x handle created for Veilora"
+	intercepted, reply := b.tryInterceptSendCrypto(
+		prompt,
+		strings.ToLower(prompt),
+		"issac_brownson",
+		false,
+		"Here is your link: https://x.com/VeiloraRH",
+		nil,
+	)
+
+	if intercepted {
+		t.Errorf("tryInterceptSendCrypto intercepted non-crypto link request! reply: %s", reply)
+	}
+	if strings.Contains(reply, "runway is tight") || strings.Contains(reply, "hold my own keys") {
+		t.Errorf("tryInterceptSendCrypto replied with anti-beggar message for link request!")
+	}
+}
