@@ -1260,17 +1260,6 @@ func (b *Bot) handleNLPAndChat(
 		return
 	}
 
-	// 2d. X Profile Link dispatch: if the user asks for the link/URL to an X handle or brand
-	//     (e.g. "send me a link to the x handle created for Veilora", "Send the veilora x link", "what's the x link for veilora"),
-	//     resolve the handle from recent history (or brand name) and reply with the clean URL directly.
-	if ok, xURL, _ := b.tryResolveXLink(prompt, lowerPrompt, history); ok {
-		b.sendReply(chatID, msg.MessageID, xURL)
-		_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", xURL)
-		b.recordActiveDialog(chatID, msg.MessageID, xURL, msg.From.ID, username)
-		go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
-		return
-	}
-
 	// 3. Run the agentic loop (ReAct: reason, act, observe, repeat)
 	//    The loop calls the AI, executes any tool calls, feeds results back, and loops
 	//    until the AI returns a plain-text final reply or the 5-iteration cap is hit.
@@ -1321,6 +1310,15 @@ func (b *Bot) handleNLPAndChat(
 			if intercepted, newFinalText := b.tryInterceptSendCrypto(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText, agResult.ToolsUsed); intercepted {
 				finalText = newFinalText
 			}
+			if ok, xURL, _ := b.tryResolveXLink(prompt, lowerPrompt, history); ok {
+				if !strings.Contains(finalText, "x.com/") && !strings.Contains(finalText, "twitter.com/") {
+					if strings.TrimSpace(finalText) == "" {
+						finalText = xURL
+					} else {
+						finalText = strings.TrimSpace(finalText) + "\n" + xURL
+					}
+				}
+			}
 			if strings.TrimSpace(finalText) == "" {
 				finalText = b.getRandomEmptyAck()
 			}
@@ -1356,6 +1354,17 @@ func (b *Bot) handleNLPAndChat(
 	// 4c. Intercept hallucinated or unprocessed crypto transfers (safety net)
 	if intercepted, newFinalText := b.tryInterceptSendCrypto(ctx, msg, prompt, lowerPrompt, username, isOwner, history, finalText, agResult.ToolsUsed); intercepted {
 		finalText = newFinalText
+	}
+
+	// 4d. Ensure X profile URL is included if the user explicitly asked for an X/Twitter link
+	if ok, xURL, _ := b.tryResolveXLink(prompt, lowerPrompt, history); ok {
+		if !strings.Contains(finalText, "x.com/") && !strings.Contains(finalText, "twitter.com/") {
+			if strings.TrimSpace(finalText) == "" {
+				finalText = xURL
+			} else {
+				finalText = strings.TrimSpace(finalText) + "\n" + xURL
+			}
+		}
 	}
 
 	if finalText == "" {
@@ -1955,6 +1964,11 @@ func (b *Bot) tryInterceptSendCrypto(
 
 	// 1. Non-owners are never allowed to execute crypto transfers or receive fake confirmations
 	if !isOwner {
+		// If the AI did not hallucinate a fake confirmation/claim, allow Shipp's generated reply to stand!
+		if !isClaim {
+			return false, replyText
+		}
+
 		prefix := ""
 		claimIdx := fakeTransferClaimRegex.FindStringIndex(replyText)
 		if len(claimIdx) > 0 && claimIdx[0] > 0 {
@@ -1994,9 +2008,12 @@ func (b *Bot) tryInterceptSendCrypto(
 		isSol = true
 	}
 
-	// If NO address was provided, funds cannot be sent.
-	// Reject the fake claim and ask for the recipient wallet address.
+	// If NO address was provided:
+	// Only intercept if the AI hallucinated a fake confirmation claim; otherwise let the AI's natural question/reply stand.
 	if toAddr == "" {
+		if !isClaim {
+			return false, replyText
+		}
 		prefix := ""
 		claimIdx := fakeTransferClaimRegex.FindStringIndex(replyText)
 		if len(claimIdx) > 0 && claimIdx[0] > 0 {
@@ -2036,6 +2053,9 @@ func (b *Bot) tryInterceptSendCrypto(
 
 	amount := extractSendAmount(prompt)
 	if amount <= 0 {
+		if !isClaim {
+			return false, replyText
+		}
 		return true, fmt.Sprintf("specify the amount of %s you want sent to %s", strings.ToUpper(chain), toAddr)
 	}
 

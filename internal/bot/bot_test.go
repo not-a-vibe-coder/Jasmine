@@ -1031,6 +1031,16 @@ func TestTryInterceptSendCrypto(t *testing.T) {
 		t.Errorf("expected scenario 2b to clown impersonator, got: %s", newReply2b)
 	}
 
+	// Scenario 2c: Non-owner asks for funds, but LLM already generated its own natural banter reply without fake claims. MUST NOT be intercepted!
+	naturalReply := "dey play anon, go hustle your own bag"
+	intercepted2c, newReply2c := b.tryInterceptSendCrypto(ctx, nil, prompt1, strings.ToLower(prompt1), "anon123", false, nil, naturalReply, []string{"get_balances"})
+	if intercepted2c {
+		t.Errorf("expected scenario 2c NOT to be intercepted when LLM gave natural non-claim reply")
+	}
+	if newReply2c != naturalReply {
+		t.Errorf("expected scenario 2c reply to be preserved exactly, got: %s", newReply2c)
+	}
+
 	// Scenario 3: Real tool already ran, no interception
 	intercepted3, _ := b.tryInterceptSendCrypto(ctx, nil, prompt1, strings.ToLower(prompt1), "skipp_dev", true, nil, "Sent 0.0001 ETH to 0x...: https://basescan.org/tx/0x...", []string{"send_crypto"})
 	if intercepted3 {
