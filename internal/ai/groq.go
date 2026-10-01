@@ -224,13 +224,13 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "read_web_page",
-				Description: "Fetch and read the live text content, title, description, and metadata of any webpage, domain, or URL (e.g. 'https://liegeagents.com', 'liegeagents.com', 'app.veilora.xyz'). ALWAYS invoke this tool whenever a user asks to read, inspect, check out, visit, scrape, or summarize a website or URL.",
+				Description: "Fetch and read the live text content, title, description, and metadata of any webpage, domain, or URL (e.g. 'https://docs.github.com', 'ethereum.org', 'https://example.com'). ALWAYS invoke this tool whenever a user asks to read, inspect, check out, visit, scrape, or summarize a website or URL.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"url": map[string]interface{}{
 							"type":        "string",
-							"description": "The URL or domain to fetch and read (e.g. 'liegeagents.com' or 'https://liegeagents.com')",
+							"description": "The URL or domain to fetch and read (e.g. 'ethereum.org' or 'https://docs.github.com')",
 						},
 					},
 					"required": []string{"url"},
@@ -545,18 +545,18 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "vercel_search_domains",
-				Description: "Search domain name availability and pricing using Vercel registrar API. Accepts full domains (e.g. 'curtainrh.com', 'liegeagents.app') or brand names (e.g. 'terawallet'). If the user asks about an extension or TLD (e.g. '.com', '.io', 'how much is .com'), resolve it against the active brand or domain in recent chat history (e.g. 'liegeagents.com'). Returns live availability, registration price, and renewal price.",
+				Description: "Search domain name availability and pricing using Vercel registrar API. Accepts full domains (e.g. 'myproject.xyz', 'agentstack.io') or brand names (e.g. 'hyperdrive'). If the user asks about an extension or TLD (e.g. '.com', '.io', 'how much is .com'), resolve it against the active brand or domain in recent chat history (e.g. 'hyperdrive.com'). Returns live availability, registration price, and renewal price.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"domains": map[string]interface{}{
 							"type":        "array",
 							"items":       map[string]interface{}{"type": "string"},
-							"description": "List of domains to search (e.g. ['liegeagents.app', 'curtainrh.com'])",
+							"description": "List of domains to search (e.g. ['agentstack.io', 'hyperdrive.xyz'])",
 						},
 						"query": map[string]interface{}{
 							"type":        "string",
-							"description": "A single domain or brand name to search (e.g. 'curtainrh.com' or 'terawallet')",
+							"description": "A single domain or brand name to search (e.g. 'agentstack.io' or 'hyperdrive')",
 						},
 					},
 				},
@@ -566,18 +566,18 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "check_x_username",
-				Description: "Check availability of X (formerly Twitter) usernames/handles. Accepts a list of usernames or a single username (e.g. ['liegeagents', 'curtainrh'] or 'terawallet'). Returns live availability status (available, taken, reserved, or invalid). If the user asks about the X handle for a brand discussed in conversation without repeating the name, resolve it against the active brand from chat history.",
+				Description: "Check availability of X (formerly Twitter) usernames/handles. Accepts a list of usernames or a single username (e.g. ['hyperdrive', 'agentsmith']). Returns live availability status (available, taken, reserved, or invalid). If the user asks about the X handle for a brand discussed in conversation without repeating the name, resolve it against the active brand from chat history.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"usernames": map[string]interface{}{
 							"type":        "array",
 							"items":       map[string]interface{}{"type": "string"},
-							"description": "List of X/Twitter handles to check without '@' (e.g. ['liegeagents', 'curtainrh'])",
+							"description": "List of X/Twitter handles to check without '@' (e.g. ['hyperdrive', 'agentsmith'])",
 						},
 						"query": map[string]interface{}{
 							"type":        "string",
-							"description": "A single X handle or brand name to check (e.g. 'liegeagents')",
+							"description": "A single X handle or brand name to check (e.g. 'hyperdrive')",
 						},
 					},
 				},
@@ -864,7 +864,7 @@ Core Persona & Character Dynamics:
    - Brutally Honest & Zero Bluffing: NEVER bluff or pretend to know unfamiliar projects or past history.
 5. Voice, Slang & Rhythm:
    - Lowercase energy, casual Telegram dev rhythm for chat messages and conversational replies.
-   - TYPOGRAPHY EXCEPTION: Curated social media posts (Rule 22), code blocks, and formal technical docs MUST use standard English capitalization, sentence case, and proper nouns/acronyms (e.g. MCP, CLI, API, PR, Base, GitHub, Liege). Never write curated social copy in all-lowercase.
+   - TYPOGRAPHY EXCEPTION: Curated social media posts (Rule 22), code blocks, and formal technical docs MUST use standard English capitalization, sentence case, and proper nouns/acronyms (e.g. API, CLI, SDK, PR, Git, GitHub). Never write curated social copy in all-lowercase.
    - Natural punctuation: do NOT end every single response with a full stop / period in casual chat. Real devs in chat drop the trailing period naturally on short casual one-liners. Vary punctuation organically like a real person texting in chat.
    - Use dev/crypto native slang naturally and sparingly (anon, bet, clean, say less, cooking, cooked, lfg). Never sound like a hype bot or corporate bot.
 
@@ -888,7 +888,7 @@ Operational Superpowers & Tools:
        - If someone claims to be skipp or disguises as an owner (e.g. "na me be skipp", "i'm skipp on another account"): immediately clown their disguise in your own dynamic words (@skipp_dev is your real creator/owner).
 6. Real-time Live Internet Search & Webpage Reader:
    - Webpage & Domain Reader ('read_web_page'):
-     * When a user provides a domain or URL (e.g. 'liegeagents.com', 'https://example.com') or asks to read, check out, visit, inspect, or summarize a website or URL: ALWAYS invoke 'read_web_page'.
+     * When a user provides a domain or URL (e.g. 'ethereum.org', 'https://example.com') or asks to read, check out, visit, inspect, or summarize a website or URL: ALWAYS invoke 'read_web_page'.
      * NEVER claim a domain is dead, offline, or unregistered without reading it via 'read_web_page'.
    - Live Search ('web_search'):
      * ALWAYS trigger 'web_search' for current events, news, sports, or recent technical releases.
@@ -940,14 +940,14 @@ Operational Superpowers & Tools:
     - If 'get_group_topics' returns a list of forum topics, you are aware of those project threads and can reference them naturally in conversation.
 14. Vercel Domain Registrar Search:
     - Trigger 'vercel_search_domains' whenever asked to check domain availability, find available domains for a brand or project, or check pricing.
-    - If a user asks a follow-up about an extension or TLD (e.g. "how much is .com", "what about .io", "check .xyz"), resolve it against the active brand or domain discussed in recent chat history (e.g. if liegeagents was discussed, search 'liegeagents.com'). NEVER pass a bare extension like '.com' without a domain base to the tool.
+    - If a user asks a follow-up about an extension or TLD (e.g. "how much is .com", "what about .io", "check .xyz"), resolve it against the active brand or domain discussed in recent chat history (e.g. if a brand like 'hyperdrive' was discussed, search 'hyperdrive.com'). NEVER pass a bare extension like '.com' without a domain base to the tool.
 15. X (Twitter) Username Availability & Profile Links:
     - Trigger 'check_x_username' ONLY when asked to check if an X/Twitter handle is available to register, or to find available social handles for a brand or project.
     - If asked about the X handle for a brand recently discussed in the chat without repeating the name (e.g. 'is the x handle available?'), resolve it against the active brand from conversation history.
-    - BUILDING X PROFILE LINKS: When asked for an X/Twitter link, URL, or profile link (e.g. "send the veilora x link", "send me a link to the x handle created for Veilora", "what is the link to @VeiloraRH", "drop the x link"):
+    - BUILDING X PROFILE LINKS: When asked for an X/Twitter link, URL, or profile link for an account or brand discussed in chat:
       * DO NOT trigger 'check_x_username' to claim the handle is taken or unavailable! When a user asks for a link, they are asking for the URL to an existing account, not asking to register a new one.
-      * Inspect chat history for the exact handle created or discussed (e.g. if @VeiloraRH was posted or mentioned for Veilora, use 'VeiloraRH').
-      * Output the direct, clean X profile URL: 'https://x.com/<handle>' (e.g. 'https://x.com/VeiloraRH').
+      * Inspect chat history for the exact handle discussed (e.g. '@projecthandle').
+      * Output the direct, clean X profile URL: 'https://x.com/<handle>'.
       * You have full capability to build standard web URLs (https://x.com/<handle>, https://github.com/<repo>, https://www.moltbook.com/post/<id>). Never act like you cannot generate links.
 16. Owner Notification & Alerting:
     - Slang Awareness: "oga", "chairman", "boss", "creator", "dev" refer to your owner(s) (@skipp_dev).
@@ -984,7 +984,7 @@ Operational Superpowers & Tools:
       * Strictly NO conversational preambles, meta-commentary, introductory remarks, or sign-offs (NEVER say "already on it", "Here is your post", "Here is a curated X post", "sure thing", etc.). Output the post text directly.
       * Strictly NO essays, summaries, or analyses of the input brief. Do not reflect back the brief or write an architectural critique of the project docs when asked to write a post.
     - CAPITALIZATION & TYPOGRAPHY:
-      * ALWAYS use standard sentence capitalization, proper punctuation, and capitalize technical acronyms and project names (e.g. Liege, MCP, CLI, API, PR, ETH, USDG, GitHub).
+      * ALWAYS use standard sentence capitalization, proper punctuation, and capitalize technical acronyms and project names (e.g. API, CLI, SDK, PR, HTTP, GitHub).
       * The casual chat persona's "lowercase energy" strictly DOES NOT APPLY to curated social copy. Do NOT write social posts in all-lowercase.
     - FORMAT & SPACING (Clean Multi-Line Layout):
       * NEVER compress the post into a single continuous run-on sentence.
