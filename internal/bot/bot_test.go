@@ -1541,13 +1541,17 @@ func TestTryInterceptSendCrypto_LinkNotBlocked(t *testing.T) {
 		cfg: &config.Config{Owners: []string{"skipp_dev"}},
 	}
 
+	ctx := context.Background()
 	// Non-owner asking for a link: must NOT be intercepted by anti-beggar crypto shield
 	prompt := "send me a link to the x handle created for Veilora"
 	intercepted, reply := b.tryInterceptSendCrypto(
+		ctx,
+		nil,
 		prompt,
 		strings.ToLower(prompt),
 		"issac_brownson",
 		false,
+		nil,
 		"Here is your link: https://x.com/VeiloraRH",
 		nil,
 	)
