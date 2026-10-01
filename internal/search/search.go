@@ -78,7 +78,7 @@ type tavilyResponse struct {
 
 var (
 	htmlTagRegex     = regexp.MustCompile(`<[^>]*>`)
-	urlOrDomainRegex = regexp.MustCompile(`(?i)\b(?:https?://)?(?:[a-zA-Z0-9-]+\.)+(?:com|org|net|io|xyz|app|dev|co|ai|me|cc|sh|so|gg|tech|network|finance|fun|link|site|online|store|world)\b(?:/[^\s]*)?`)
+	urlOrDomainRegex = regexp.MustCompile(`(?i)(?:https?://[^\s]+|\b(?:[a-zA-Z0-9-]+\.)+(?:com|org|net|io|xyz|app|dev|co|ai|me|cc|sh|so|gg|tech|network|finance|fun|link|site|online|store|world)\b(?:/[^\s]*)?)`)
 	titleTagRegex    = regexp.MustCompile(`(?i)<title[^>]*>([^<]+)</title>`)
 	metaDescRegex    = regexp.MustCompile(`(?i)<meta\s+[^>]*name=["']description["'][^>]*content=["']([^"']+)["']|<meta\s+[^>]*content=["']([^"']+)["'][^>]*name=["']description["']`)
 	ogTitleRegex     = regexp.MustCompile(`(?i)<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']|<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:title["']`)
