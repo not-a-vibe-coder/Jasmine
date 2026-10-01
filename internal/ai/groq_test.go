@@ -51,6 +51,12 @@ func TestSystemPrompt(t *testing.T) {
 	if !strings.Contains(ownerPrompt, "DEFAULT (Single Tweet)") {
 		t.Errorf("expected system prompt to include DEFAULT (Single Tweet) curation rules")
 	}
+	if !strings.Contains(ownerPrompt, "CAPITALIZATION & TYPOGRAPHY") {
+		t.Errorf("expected system prompt to include CAPITALIZATION & TYPOGRAPHY")
+	}
+	if !strings.Contains(ownerPrompt, "Clean Multi-Line Layout") {
+		t.Errorf("expected system prompt to enforce Clean Multi-Line Layout")
+	}
 
 	// Test Non-Owner prompt
 	guestPrompt := client.systemPrompt("anon123", false, nil)
