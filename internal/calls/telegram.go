@@ -103,6 +103,7 @@ func (m *Manager) TelegramEventHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch ev.Type {
 	case "answered":
+		log.Printf("[Calls] %s answered", s.ID)
 		s.mu.Lock()
 		s.answered = true
 		s.mu.Unlock()
@@ -146,9 +147,11 @@ func (m *Manager) TelegramEventHandler(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		heard, err := m.brain.Transcribe(ctx, wav, "speech.wav", "audio/wav")
 		if err != nil || len(heard) < 2 {
+			log.Printf("[Calls] %s couldn't transcribe %d bytes of speech: %v", s.ID, len(wav), err)
 			writeJSON(w, callerReply{}) // couldn't make it out; keep listening
 			return
 		}
+		log.Printf("[Calls] %s heard %d chars", s.ID, len(heard))
 		s.mu.Lock()
 		s.silences = 0
 		s.mu.Unlock()

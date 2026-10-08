@@ -51,7 +51,10 @@ JASMINE_URL = os.environ.get("JASMINE_URL", f"http://127.0.0.1:{os.environ.get('
 
 QUALITY = AudioQuality.HIGH  # what we receive: 48 kHz stereo s16le
 RATE, CHANNELS = QUALITY.value
-SPEECH_RMS = float(os.environ.get("CALLER_SPEECH_RMS", "0.02"))  # 0..1 loudness that counts as talking
+# Loudness (0..1 RMS) that counts as talking: a few times the line's background noise,
+# but never below SPEECH_FLOOR. Telegram's echo cancelling makes levels vary a lot by phone.
+SPEECH_FLOOR = float(os.environ.get("CALLER_SPEECH_RMS", "0.006"))
+NOISE_MULTIPLIER = 3.0
 END_OF_PHRASE = 1.1  # seconds of quiet that end a phrase
 MIN_PHRASE = 0.4  # ignore coughs and clicks
 MAX_PHRASE = 25.0
@@ -76,6 +79,10 @@ class Call:
         self.busy = False  # waiting on the bot for a reply
         self.hangup_after_clip = False
         self.ended = False
+        self.noise = 0.003  # running estimate of background level
+        self.frames_seen = 0
+        self.peak = 0.0
+        self.last_report = time.monotonic()
 
     @property
     def speaking(self) -> bool:
@@ -177,8 +184,9 @@ async def dial(call_id: str, user: str, audio_path: str) -> None:
         await post_event(call, "answered")
         try:
             await calls.record(chat_id, RecordStream(True, QUALITY))
+            log.info("call %s: listening", call_id)
         except Exception as e:
-            log.warning("could not listen on %s: %s", call_id, e)
+            log.exception("could not listen on %s: %s", call_id, e)
 
     asyncio.create_task(run())
 
@@ -214,12 +222,27 @@ def to_wav(pcm: bytes) -> bytes:
 @calls.on_update(filters.stream_frame(Direction.INCOMING, Device.MICROPHONE))
 async def on_audio(_, update: StreamFrames):
     call = active.get(update.chat_id)
-    if call is None or call.ended or call.speaking or call.busy:
+    if call is None or call.ended:
+        return
+    now = time.monotonic()
+    if call.frames_seen == 0:
+        log.info("call %s: first incoming audio (%d bytes per frame)", call.call_id, len(update.frames[0].frame) if update.frames else 0)
+    call.frames_seen += len(update.frames)
+    if now - call.last_report > 5:
+        log.info("call %s: hearing audio, peak level %.4f, noise %.4f, threshold %.4f, speaking=%s busy=%s",
+                 call.call_id, call.peak, call.noise, max(SPEECH_FLOOR, call.noise * NOISE_MULTIPLIER), call.speaking, call.busy)
+        call.peak, call.last_report = 0.0, now
+    if call.speaking or call.busy:
         return
     for frame in update.frames:
         pcm = frame.frame
         seconds = len(pcm) / (2 * CHANNELS * RATE)
-        loud = rms(pcm) >= SPEECH_RMS
+        level = rms(pcm)
+        call.peak = max(call.peak, level)
+        threshold = max(SPEECH_FLOOR, call.noise * NOISE_MULTIPLIER)
+        loud = level >= threshold
+        if not loud and not call.buffer:
+            call.noise = call.noise * 0.98 + level * 0.02  # learn the background between phrases
         if loud:
             call.buffer += pcm
             call.voiced += seconds
@@ -232,6 +255,7 @@ async def on_audio(_, update: StreamFrames):
         if phrase_done:
             pcm_phrase, voiced = bytes(call.buffer), call.voiced
             call.buffer, call.voiced, call.quiet = bytearray(), 0.0, 0.0
+            log.info("call %s: phrase ended (%.1fs of speech)%s", call.call_id, voiced, "" if voiced >= MIN_PHRASE else ", too short, ignored")
             if voiced >= MIN_PHRASE:
                 call.busy = True
                 asyncio.create_task(send_phrase(call, pcm_phrase))
@@ -240,7 +264,10 @@ async def on_audio(_, update: StreamFrames):
 
 async def send_phrase(call: Call, pcm: bytes) -> None:
     try:
+        started = time.monotonic()
         reply = await post_event(call, "speech", audio=base64.b64encode(to_wav(pcm)).decode())
+        log.info("call %s: reply ready in %.1fs (audio=%s, hangup=%s)", call.call_id, time.monotonic() - started,
+                 bool(reply.get("audio_path")), reply.get("hangup"))
         await say(call, reply)
     finally:
         call.busy = False

@@ -2679,6 +2679,7 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 
 	basePenalties := [2]float64{reqBody.FrequencyPenalty, reqBody.PresencePenalty}
 	baseMessages := reqBody.Messages
+	baseMaxTokens := reqBody.MaxTokens
 	attempts := c.chatAttempts()
 	if len(attempts) == 0 {
 		return nil, fmt.Errorf("no chat providers configured (set GROQ_API_KEY or a fallback provider key)")
@@ -2691,9 +2692,15 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 		reqBody.FrequencyPenalty, reqBody.PresencePenalty = basePenalties[0], basePenalties[1]
 		reqBody.Messages = baseMessages
 		applyReasoningControls(&reqBody, at)
+		reqBody.MaxTokens = baseMaxTokens
 		if at.provider == "gemini" {
 			// Gemini's OpenAI-compatible API rejects penalty fields.
 			reqBody.FrequencyPenalty, reqBody.PresencePenalty = 0, 0
+			// Models that still think count those tokens against max_tokens; a small cap
+			// can be used up before any answer is written, leaving an empty reply.
+			if reqBody.ReasoningEffort != "none" && reqBody.MaxTokens > 0 && reqBody.MaxTokens < 2048 {
+				reqBody.MaxTokens = 2048
+			}
 		} else {
 			reqBody.Messages = withoutExtraContent(baseMessages)
 		}
@@ -2787,7 +2794,7 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 			chatResp.Choices[0].Message.Content = cleaned
 			choice := chatResp.Choices[0]
 			if strings.TrimSpace(choice.Message.Content) == "" && len(choice.Message.ToolCalls) == 0 {
-				log.Printf("[AI] %s model %s returned empty response choice. Cascading to next model...", at.provider, at.model)
+				log.Printf("[AI] %s model %s returned an empty reply (finish_reason=%q). Cascading to next model...", at.provider, at.model, choice.FinishReason)
 				lastErr = fmt.Errorf("%s model %s returned empty response", at.provider, at.model)
 				break
 			}

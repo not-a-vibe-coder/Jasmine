@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -207,7 +208,12 @@ func (b *Bot) executeCallTool(ctx context.Context, chatID int64, toolName, argum
 	s.ThreadID, _ = ctx.Value(ctxKeyThreadID{}).(int)
 	s.ReplyTo = replyTarget(ctx)
 	if !self {
-		s.UserID, s.Username, s.Name, s.Requester = 0, target, target, username
+		// "call skipp" -> @skipp_dev: match the name against people she has seen.
+		resolved, id := b.resolvePerson(ctx, chatID, target)
+		if resolved != "" {
+			target = resolved
+		}
+		s.UserID, s.Username, s.Name, s.Requester = id, target, target, username
 	}
 
 	via := strings.ToLower(args.Via)
@@ -263,4 +269,47 @@ func phoneCountry() string {
 		return strings.TrimPrefix(c, "+")
 	}
 	return "234"
+}
+
+var personKeyRe = regexp.MustCompile(`[^a-z0-9]`)
+
+// resolvePerson turns a name someone typed ("skipp", "@Skipp_Dev") into the exact
+// username of someone Jasmine has talked to, preferring people in the current chat.
+func (b *Bot) resolvePerson(ctx context.Context, chatID int64, name string) (string, int64) {
+	want := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "@"))
+	if want == "" || b.memory == nil {
+		return "", 0
+	}
+	if id, err := b.memory.GetUserIDByUsername(ctx, want); err == nil && id != 0 {
+		return want, id
+	}
+	key := personKeyRe.ReplaceAllString(want, "")
+	if key == "" {
+		return "", 0
+	}
+	if db := b.memory.GetDB(); db != nil {
+		var uname string
+		var id int64
+		err := db.QueryRowContext(ctx, `
+			SELECT sender_username, MAX(sender_id)
+			FROM chat_messages
+			WHERE role = 'user' AND COALESCE(sender_username, '') <> ''
+			  AND regexp_replace(LOWER(sender_username), '[^a-z0-9]', '', 'g') LIKE '%' || $1 || '%'
+			GROUP BY sender_username
+			ORDER BY MAX(CASE WHEN chat_id = $2 THEN 1 ELSE 0 END) DESC, COUNT(*) DESC
+			LIMIT 1`, key, chatID).Scan(&uname, &id)
+		if err == nil {
+			return strings.ToLower(uname), id
+		}
+		return "", 0
+	}
+	history, _ := b.memory.GetRecentMessages(ctx, chatID, 200)
+	for i := len(history) - 1; i >= 0; i-- {
+		sender := strings.ToLower(history[i].Sender)
+		if history[i].Role == "user" && sender != "" && strings.Contains(personKeyRe.ReplaceAllString(sender, ""), key) {
+			id, _ := b.memory.GetUserIDByUsername(ctx, sender)
+			return sender, id
+		}
+	}
+	return "", 0
 }

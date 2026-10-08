@@ -185,7 +185,7 @@ func LoadConfig() (*Config, error) {
 	// Parse owners
 	ownersRaw := os.Getenv("OWNERS_USERNAME")
 	if ownersRaw == "" {
-		ownersRaw = "@jackdotsol_"
+		ownersRaw = "@jackdotsol"
 	}
 	parts := strings.Split(ownersRaw, ",")
 	for _, p := range parts {
