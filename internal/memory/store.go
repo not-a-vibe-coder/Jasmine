@@ -32,6 +32,40 @@ type HybridStore struct {
 	memSandboxRuns []SandboxRun
 }
 
+// openPostgres connects and pings. lib/pq defaults to sslmode=require; private-network
+// databases (e.g. Render's internal URL) may not offer SSL, so retry once without it
+// when the server says so and the URL didn't pin an sslmode.
+func openPostgres(ctx context.Context, dbURL string) (*sql.DB, error) {
+	db, err := pingPostgres(ctx, dbURL)
+	if err != nil && strings.Contains(err.Error(), "SSL is not enabled on the server") && !strings.Contains(dbURL, "sslmode=") {
+		log.Printf("[Memory] Postgres server has no SSL; retrying with sslmode=disable")
+		return pingPostgres(ctx, withSSLModeDisabled(dbURL))
+	}
+	return db, err
+}
+
+func pingPostgres(ctx context.Context, dbURL string) (*sql.DB, error) {
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func withSSLModeDisabled(dbURL string) string {
+	if strings.Contains(dbURL, "?") {
+		return dbURL + "&sslmode=disable"
+	}
+	return dbURL + "?sslmode=disable"
+}
+
 func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
 	store := &HybridStore{
 		memMessages:    make(map[int64][]Message),
@@ -51,26 +85,17 @@ func NewHybridStore(dbURL, redisURL string) (*HybridStore, error) {
 
 	// 1. Initialize Postgres if available
 	if dbURL != "" {
-		db, err := sql.Open("postgres", dbURL)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		db, err := openPostgres(ctx, dbURL)
 		if err != nil {
-			log.Printf("[Memory] Postgres open warning: %v (falling back to memory)", err)
+			log.Printf("[Memory] Postgres unavailable: %v (falling back to memory)", err)
 		} else {
-			db.SetMaxOpenConns(10)
-			db.SetMaxIdleConns(5)
-			db.SetConnMaxLifetime(5 * time.Minute)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			if err := db.PingContext(ctx); err != nil {
-				log.Printf("[Memory] Postgres ping warning: %v", err)
+			store.db = db
+			if err := store.initPostgresSchema(ctx); err != nil {
+				log.Printf("[Memory] Postgres schema init warning: %v", err)
 			} else {
-				store.db = db
-				if err := store.initPostgresSchema(ctx); err != nil {
-					log.Printf("[Memory] Postgres schema init warning: %v", err)
-				} else {
-					log.Printf("[Memory] Postgres database connected and schema initialized")
-				}
+				log.Printf("[Memory] Postgres database connected and schema initialized")
 			}
 		}
 	}

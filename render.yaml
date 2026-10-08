@@ -13,6 +13,7 @@ services:
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:
+      # Optional extras (add later in the dashboard): GEMINI_API_KEY, REDIS_URL, MISTRAL_API_KEY, HF_TOKEN.
       # WEBHOOK_URL and SANDBOX_CALLBACK_URL are derived from RENDER_EXTERNAL_URL automatically.
       - key: OWNERS_USERNAME
         value: "@jackdotsol_"
@@ -38,8 +39,6 @@ services:
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
-      - key: GEMINI_API_KEY
-        sync: false
       - key: GITHUB_PAT
         sync: false
       - key: SVM_WALLET_PRIVATE_KEY
@@ -47,6 +46,16 @@ services:
       - key: EVM_WALLET_PRIVATE_KEY
         sync: false
       - key: DATABASE_URL
-        sync: false
-      - key: REDIS_URL
-        sync: false
+        fromDatabase:
+          name: jasmine-db
+          property: connectionString
+
+databases:
+  # Free Render Postgres keeps short-term chat history, summaries and profiles across
+  # restarts (long-term memory lives on Walrus). Free databases expire 30 days after
+  # creation; upgrade the plan or point DATABASE_URL elsewhere to keep it longer.
+  - name: jasmine-db
+    plan: free
+    region: frankfurt
+    databaseName: jasmine
+    user: jasmine

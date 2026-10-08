@@ -282,3 +282,12 @@ func TestSandboxRunMemory(t *testing.T) {
 
 
 
+
+func TestWithSSLModeDisabled(t *testing.T) {
+	if got := withSSLModeDisabled("postgresql://u:p@host/db"); got != "postgresql://u:p@host/db?sslmode=disable" {
+		t.Errorf("got %q", got)
+	}
+	if got := withSSLModeDisabled("postgresql://u:p@host/db?connect_timeout=5"); got != "postgresql://u:p@host/db?connect_timeout=5&sslmode=disable" {
+		t.Errorf("got %q", got)
+	}
+}
