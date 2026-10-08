@@ -19,6 +19,7 @@ import (
 	"shipp/internal/imagegen"
 	"shipp/internal/memory"
 	"shipp/internal/moltbook"
+	"shipp/internal/reminders"
 	"shipp/internal/price"
 	"shipp/internal/sandbox"
 	"shipp/internal/search"
@@ -158,6 +159,16 @@ func main() {
 
 	// 12. Voice notes: Groq Whisper in; Groq Orpheus (if enabled) or Edge neural voices out
 	tgBot.SetVoice(voice.NewService(cfg.GroqAPIKey, cfg.GeminiAPIKey, cfg.VoiceName, cfg.OrpheusVoice))
+
+	if tz := os.Getenv("DEFAULT_TIMEZONE"); tz != "" {
+		reminders.DefaultZone = tz
+	}
+	if remStore, err := reminders.New(context.Background(), memStore.GetDB()); err != nil {
+		log.Printf("[Main] Reminders unavailable: %v", err)
+	} else {
+		tgBot.SetReminders(remStore)
+		log.Printf("[Main] Reminders enabled (default timezone %s)", reminders.DefaultZone)
+	}
 	if cfg.PollinationsAPIKey != "" {
 		log.Printf("[Main] Image generation: Pollinations %s", strings.Join(imageModels, " -> "))
 	} else {

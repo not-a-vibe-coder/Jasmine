@@ -57,6 +57,14 @@ Groq (Qwen 3.8 27B, then GPT-OSS) → Gemini 3.5 Flash → 3.6 Flash → 3.5/3.1
 - **Voice notes out:** she answers a voice note with one. She uses Groq Orpheus, which can laugh and sigh, once its terms are accepted, or a Microsoft neural voice (`VOICE_NAME`, e.g. Nigerian English `en-NG-EzinneNeural`).
 - **Reactions, stickers, GIFs:** she taps an emoji reaction, sends a sticker from public sets, or searches Giphy. When that says it all, she sends no extra text.
 
+## Emotional support
+
+She reads the mood under a message, names feelings specifically, listens before advising, and follows up later using her Walrus memory ("did you manage to sleep after yesterday?"). She is a caring presence, not a therapist: if someone talks about self-harm she stays with them and points them to a real person (in Nigeria: 112 or the free 24/7 MANI line 0800 800 2000).
+
+## Reminders
+
+"jasmine remind me by 3pm lagos time to fetch water" schedules a reminder; at 3pm she tags you in the same chat with a message she writes herself. She also understands "in 20 mins", "every morning" (daily/weekly repeats), reminding someone else, and listing or cancelling reminders. They are stored in Postgres, and missed ones (while Render slept) are sent on wake. While any are pending she pings her own `/healthz` every 10 minutes so the free plan doesn't put her to sleep. `DEFAULT_TIMEZONE` sets the zone used when nobody names one (default `Africa/Lagos`).
+
 ## Other abilities
 
 Web search and page reading, token analytics, Solana and EVM wallets (owner-only sends), GitHub actions, a private GitHub Actions sandbox for running code, document and image understanding, DMs, and spontaneous group check-ins.

@@ -33,8 +33,8 @@ func TestSystemPrompt(t *testing.T) {
 	if !strings.Contains(ownerPrompt, "Conversational Explanations & Quoted Replies") {
 		t.Errorf("expected system prompt to include Conversational Explanations & Quoted Replies")
 	}
-	if !strings.Contains(ownerPrompt, "Brutally Honest & Zero Bluffing") {
-		t.Errorf("expected system prompt to enforce Brutally Honest & Zero Bluffing")
+	if !strings.Contains(ownerPrompt, "rather say \"i don't know\" than fake it") {
+		t.Errorf("expected system prompt to forbid bluffing")
 	}
 	if !strings.Contains(ownerPrompt, "Strictly NO hallucinated or fabricated project architectures") {
 		t.Errorf("expected system prompt to forbid fabricated architectures")
@@ -197,8 +197,14 @@ func TestSystemPromptVisionAndMemoryRules(t *testing.T) {
 	if !strings.Contains(prompt, "1-3 sentences max") {
 		t.Errorf("expected prompt to restrict image reactions to 1-3 sentences max")
 	}
-	if !strings.Contains(prompt, "Realist") {
-		t.Errorf("expected prompt to state Realist worldview")
+	if !strings.Contains(prompt, "Being There For People") || !strings.Contains(prompt, "0800 800 2000") {
+		t.Errorf("expected prompt to include emotional support guidance with a crisis line")
+	}
+	if !strings.Contains(prompt, "29. Reminders") {
+		t.Errorf("expected prompt to include the reminders rule")
+	}
+	if strings.ContainsAny(prompt[:strings.Index(prompt, "Operational Superpowers")], "—–") {
+		t.Errorf("persona must not model em or en dashes")
 	}
 }
 
@@ -503,6 +509,14 @@ func TestApplyReasoningControls(t *testing.T) {
 	applyReasoningControls(&r, chatAttempt{provider: "openrouter", model: "x"})
 	if r.Reasoning == nil || !r.Reasoning.Exclude || r.IncludeReasoning != nil || r.ReasoningFormat != "" {
 		t.Errorf("openrouter controls wrong: %+v", r)
+	}
+	applyReasoningControls(&r, chatAttempt{provider: "gemini", model: "gemini-3.5-flash-lite"})
+	if r.ReasoningEffort != "minimal" {
+		t.Errorf("flash lite rejects effort none, got %q", r.ReasoningEffort)
+	}
+	applyReasoningControls(&r, chatAttempt{provider: "gemini", model: "gemini-3.5-flash"})
+	if r.ReasoningEffort != "none" {
+		t.Errorf("gemini flash should disable thinking, got %q", r.ReasoningEffort)
 	}
 	applyReasoningControls(&r, chatAttempt{provider: "mistral", model: "mistral-small-latest"})
 	if r.Reasoning != nil || r.ReasoningEffort != "" {

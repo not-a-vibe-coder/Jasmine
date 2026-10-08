@@ -101,7 +101,7 @@ func TestFormatWalletAddressMessage(t *testing.T) {
 func TestCleanKeepsEmojisAndReplacesEmDashes(t *testing.T) {
 	// Jasmine may use emojis like a person texting; only dashes are normalised.
 	input := "🚀 Pushed straight to main — here's the new description: ✨"
-	expected := "🚀 Pushed straight to main - here's the new description: ✨"
+	expected := "🚀 Pushed straight to main, here's the new description: ✨"
 	res := cleanModelArtifacts(input)
 	if res != expected {
 		t.Errorf("cleanModelArtifacts(%q) = %q; want %q", input, res, expected)
@@ -109,7 +109,7 @@ func TestCleanKeepsEmojisAndReplacesEmDashes(t *testing.T) {
 
 	// Test en dash
 	inputEn := "Release v1 – latest updates"
-	expectedEn := "Release v1 - latest updates"
+	expectedEn := "Release v1, latest updates"
 	resEn := cleanModelArtifacts(inputEn)
 	if resEn != expectedEn {
 		t.Errorf("cleanModelArtifacts(%q) = %q; want %q", inputEn, resEn, expectedEn)
@@ -938,7 +938,7 @@ func TestCleanOutgoingText(t *testing.T) {
 	}
 
 	input := "Clean work by @AutomTravels - all tests passing!"
-	expected := "Clean work by AutomTravels - all tests passing!"
+	expected := "Clean work by AutomTravels, all tests passing!"
 	got := b.cleanOutgoingText(input)
 	if got != expected {
 		t.Errorf("cleanOutgoingText(%q) = %q; want %q", input, got, expected)

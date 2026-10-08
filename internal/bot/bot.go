@@ -30,6 +30,7 @@ import (
 	"shipp/internal/config"
 	"shipp/internal/crypto"
 	"shipp/internal/docparser"
+	"shipp/internal/reminders"
 	"shipp/internal/domain"
 	"shipp/internal/email"
 	"shipp/internal/github"
@@ -114,6 +115,7 @@ type Bot struct {
 	walmem   *walmem.Client
 	imagegen *imagegen.Service
 	voice    *voice.Service
+	reminders *reminders.Store
 	stickers stickerCache
 }
 
@@ -335,6 +337,7 @@ func (b *Bot) Start(ctx context.Context) error {
 
 		// Start background proactive messaging engine
 		go b.runProactiveEngine(ctx)
+		go b.runReminderLoop(ctx)
 		log.Printf("[Bot] Jasmine is live and listening for updates (webhook mode)...")
 
 		// In webhook mode, handleMessageWithThread is called directly from WebhookHandler.
@@ -351,6 +354,7 @@ func (b *Bot) Start(ctx context.Context) error {
 
 	// Start background proactive messaging engine
 	go b.runProactiveEngine(ctx)
+	go b.runReminderLoop(ctx)
 
 	log.Printf("[Bot] Jasmine is live and listening for updates (polling mode)...")
 
@@ -425,6 +429,9 @@ type ctxKeyPrompt struct{}
 // ctxKeySenderID carries the Telegram user ID of the person being answered, which
 // scopes their Walrus Memory namespace.
 type ctxKeySenderID struct{}
+
+// ctxKeySenderFirstName carries the speaker's first name (for reminders that mention them).
+type ctxKeySenderFirstName struct{}
 
 func (b *Bot) setLastBotMessageID(chatID int64, msgID int) {
 	if msgID <= 0 {
@@ -1379,13 +1386,13 @@ func (b *Bot) handleNLPAndChat(
 
 	var chatContext string
 	if msg.Chat.IsPrivate() {
-		chatContext = fmt.Sprintf("- YOU ARE IN A DIRECT 1-ON-1 PRIVATE CHAT (DM) WITH @%s.\n- There is nobody else in this chat. Do NOT say 'who else', 'what is everyone doing', 'anyone here', or speak to an imaginary room. Speak directly to @%s.\n- Strictly do NOT ask eager follow-up questions.", username, username)
+		chatContext = fmt.Sprintf("- YOU ARE IN A DIRECT 1-ON-1 PRIVATE CHAT (DM) WITH @%s.\n- There is nobody else in this chat. Do NOT say 'who else', 'what is everyone doing', 'anyone here', or speak to an imaginary room. Speak directly to @%s.\n- No filler or customer-service questions. One genuine, caring question is fine when you actually want to know.", username, username)
 	} else {
 		title := msg.Chat.Title
 		if title == "" {
 			title = "this group"
 		}
-		chatContext = fmt.Sprintf("- YOU ARE IN A TELEGRAM GROUP CHAT: %q.\n- Speak to the room or to @%s as appropriate.\n- Strictly do NOT ask eager follow-up questions.", title, username)
+		chatContext = fmt.Sprintf("- YOU ARE IN A TELEGRAM GROUP CHAT: %q.\n- Speak to the room or to @%s as appropriate.\n- No filler or customer-service questions. One genuine, caring question is fine when you actually want to know.", title, username)
 	}
 
 	if msg.ReplyToMessage != nil {
@@ -1415,8 +1422,10 @@ func (b *Bot) handleNLPAndChat(
 	if turn.voiceIn {
 		chatContext += "\n- They sent you a VOICE NOTE; what you see is its transcript. Answer with 'send_voice_note' (talk the way you would out loud) unless your answer needs links, code, addresses or a list."
 	}
+	chatContext += currentTimeContext(time.Now())
 	if msg.From != nil {
 		ctx = context.WithValue(ctx, ctxKeySenderID{}, msg.From.ID)
+		ctx = context.WithValue(ctx, ctxKeySenderFirstName{}, msg.From.FirstName)
 	}
 	if v := ctx.Value(ctxKeyReplyToMsgID{}); v == nil {
 		ctx = context.WithValue(ctx, ctxKeyReplyToMsgID{}, msg.MessageID)
@@ -2160,6 +2169,9 @@ func (b *Bot) executeToolCall(
 	log.Printf("[Bot] Executing NLP Tool: %s (args: %s) invoked by @%s", toolName, arguments, username)
 
 	if res, ok := b.executeExpressiveTool(ctx, chatID, toolName, arguments); ok {
+		return res
+	}
+	if res, ok := b.executeReminderTool(ctx, chatID, toolName, arguments, username); ok {
 		return res
 	}
 
@@ -4914,9 +4926,7 @@ func cleanModelArtifacts(text string) string {
 	cleaned = leakedFunctionRegex.ReplaceAllString(cleaned, "")
 	cleaned = leakedDeclarationRegex.ReplaceAllString(cleaned, "")
 	cleaned = eagerPromptRegex.ReplaceAllString(cleaned, "")
-	// Replace em dashes (—) and en dashes (–) with standard hyphens
-	cleaned = strings.ReplaceAll(cleaned, "—", " - ")
-	cleaned = strings.ReplaceAll(cleaned, "–", " - ")
+	cleaned = replaceDashPauses(cleaned)
 	cleaned = regexp.MustCompile(`[ \t]{2,}`).ReplaceAllString(cleaned, " ")
 	lines := strings.Split(cleaned, "\n")
 	for i, l := range lines {
@@ -4924,6 +4934,38 @@ func cleanModelArtifacts(text string) string {
 	}
 	res := strings.TrimSpace(strings.Join(lines, "\n"))
 	return deduplicateResponse(res)
+}
+
+var (
+	unicodeDashRegex = regexp.MustCompile(`\s*[—–]\s*`)
+	// A hyphen with spaces on both sides between words is a dash used as a pause.
+	hyphenPauseRegex = regexp.MustCompile(`([\p{L}\p{N}'")!?.])[ \t]+-[ \t]+([\p{L}\p{N}'"(])`)
+)
+
+// replaceDashPauses rewrites em/en dashes and spaced hyphens used as pauses into commas,
+// leaving code blocks, list bullets and arithmetic alone.
+func replaceDashPauses(text string) string {
+	parts := strings.Split(text, "```")
+	for i := 0; i < len(parts); i += 2 { // even parts are outside code fences
+		p := unicodeDashRegex.ReplaceAllString(parts[i], ", ")
+		p = hyphenPauseRegex.ReplaceAllStringFunc(p, func(m string) string {
+			sub := hyphenPauseRegex.FindStringSubmatch(m)
+			if isDigitRune(sub[1]) && isDigitRune(sub[2]) {
+				return m // "5 - 3"
+			}
+			return sub[1] + ", " + sub[2]
+		})
+		p = strings.ReplaceAll(p, ", ,", ",")
+		p = strings.ReplaceAll(p, ",,", ",")
+		p = strings.ReplaceAll(p, "., ", ". ")
+		parts[i] = p
+	}
+	return strings.Join(parts, "```")
+}
+
+func isDigitRune(s string) bool {
+	r := []rune(s)
+	return len(r) == 1 && r[0] >= '0' && r[0] <= '9'
 }
 
 var tgMentionRegex = regexp.MustCompile(`(^|[\s(\["'])(@([a-zA-Z0-9_]{3,32}))\b`)
