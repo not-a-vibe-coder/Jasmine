@@ -222,8 +222,8 @@ func (c *Client) generateReplyGemini(
 			prefix = fmt.Sprintf("@%s: ", h.Sender)
 		}
 		content := h.Content
-		if len(content) > 350 {
-			content = content[:350] + "..."
+		if len(content) > 800 {
+			content = content[:800] + "..."
 		}
 		req.Contents = append(req.Contents, geminiChatContent{
 			Role:  role,
@@ -389,8 +389,8 @@ func (c *Client) RunGeminiAgenticLoop(
 			prefix = fmt.Sprintf("@%s: ", h.Sender)
 		}
 		content := h.Content
-		if len(content) > 350 {
-			content = content[:350] + "..."
+		if len(content) > 800 {
+			content = content[:800] + "..."
 		}
 		req.Contents = append(req.Contents, geminiChatContent{
 			Role:  role,

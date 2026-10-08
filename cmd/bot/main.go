@@ -74,7 +74,7 @@ func main() {
 	// Fallback chain after the Groq pool. Each provider is skipped when its key is empty.
 	// Gemini via its OpenAI-compatible endpoint: generous free limits and solid tool calling.
 	aiClient.AddProvider(ai.Provider{Name: "gemini", URL: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-		APIKey: cfg.GeminiAPIKey, Models: modelList(os.Getenv("GEMINI_CHAT_MODELS"), "gemini-3.5-flash-lite,gemini-3.8-flash")})
+		APIKey: cfg.GeminiAPIKey, Models: modelList(os.Getenv("GEMINI_CHAT_MODELS"), "gemini-3.5-flash,gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite")})
 	aiClient.AddProvider(ai.Provider{Name: "cerebras", URL: "https://api.cerebras.ai/v1/chat/completions",
 		APIKey: cfg.CerebrasAPIKey, Models: modelList(cfg.CerebrasModels, "qwen-3.8-27b,gpt-oss-120b")})
 	aiClient.AddProvider(ai.Provider{Name: "openrouter", URL: "https://openrouter.ai/api/v1/chat/completions",

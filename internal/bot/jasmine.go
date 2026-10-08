@@ -31,7 +31,7 @@ func (b *Bot) recallMemories(ctx context.Context, msg *tgbotapi.Message, query s
 	if b.walmem == nil || msg.From == nil || strings.TrimSpace(query) == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
 	defer cancel()
 
 	type result struct {
@@ -260,4 +260,23 @@ func shortID(id string) string {
 		return id[:8] + "…" + id[len(id)-4:]
 	}
 	return id
+}
+
+// keepTyping refreshes Telegram's typing indicator every 4s until the returned stop func runs.
+func (b *Bot) keepTyping(chatID int64) func() {
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		t := time.NewTicker(4 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				b.sendChatAction(chatID, tgbotapi.ChatTyping)
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }

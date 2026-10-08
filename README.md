@@ -45,9 +45,9 @@ and sent as `x-public-key` / `x-signature` / `x-timestamp` / `x-nonce` / `x-acco
 
 No Claude or GPT anywhere in the chat path. Requests go through a chain, and each provider is used only when its key is set:
 
-Groq (Qwen 3.8 27B, then GPT-OSS) → Gemini 3.5 Flash Lite → OpenRouter free models → Mistral → Hugging Face → native Gemini
+Groq (Qwen 3.8 27B, then GPT-OSS) → Gemini 3.5 Flash → 3.6 Flash → 3.5/3.1 Flash Lite → OpenRouter free models → Mistral → Hugging Face → native Gemini
 
-Groq's free tier allows only 8,000 tokens per minute, so full tool-using requests skip straight to Gemini rather than failing. Reasoning is hidden for each provider, and a final check blocks any reply that is the model thinking out loud, whichever path produced it.
+**Focus.** Each request carries only the instructions and tools for what the conversation is about. Crypto, GitHub, sandbox, email and Moltbook rules are left out of casual chat, which halves the request (about 14k to 6.8k tokens), keeps the model on topic and answers in about 2 seconds. She sees the last 20 messages. Requests too big for Groq's free 8,000-tokens-per-minute limit go straight to Gemini, with reasoning turned off for speed. Reasoning is hidden for each provider, and a final check blocks any reply that is the model thinking out loud, whichever path produced it.
 
 **Images:** Pollinations Z-Image Turbo and FLUX (with a free key) → Hugging Face FLUX.1-schnell → Gemini → Pollinations' keyless model.
 

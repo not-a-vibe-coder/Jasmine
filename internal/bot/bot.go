@@ -1304,7 +1304,11 @@ func (b *Bot) handleNLPAndChat(
 	chatID := msg.Chat.ID
 
 	// 1. Fetch recent history (8 messages to stay well within Groq rate limits)
-	history, _ := b.memory.GetRecentMessages(ctx, chatID, 8)
+	history, _ := b.memory.GetRecentMessages(ctx, chatID, 20)
+
+	// Keep "typing..." visible for the whole time she's working (Telegram drops it after ~5s).
+	stopTyping := b.keepTyping(chatID)
+	defer stopTyping()
 
 	// 2. Fetch past summary and learned user profile
 	summary, _ := b.memory.GetSummary(ctx, chatID)

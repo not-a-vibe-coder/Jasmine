@@ -1573,8 +1573,8 @@ func (c *Client) GenerateReply(
 			prefix = fmt.Sprintf("@%s: ", h.Sender)
 		}
 		content := h.Content
-		if len(content) > 350 {
-			content = content[:350] + "..."
+		if len(content) > 800 {
+			content = content[:800] + "..."
 		}
 		msgs = append(msgs, ChatMessage{
 			Role:    role,
@@ -1656,6 +1656,13 @@ func (c *Client) RunAgenticLoop(
 
 	// Build the base message list (system + summary + history + current prompt)
 	sysPrompt := c.systemPrompt(senderUsername, isOwner, profile, chatContext...)
+	ctxText := ""
+	if len(chatContext) > 0 {
+		ctxText = chatContext[0]
+	}
+	active := detectDomains(userPrompt, history, ctxText)
+	sysPrompt = focusPrompt(sysPrompt, active)
+	tools := focusTools(c.tools, active)
 	var baseMsgs []ChatMessage
 	baseMsgs = append(baseMsgs, ChatMessage{Role: "system", Content: sysPrompt})
 	if summary != "" {
@@ -1671,8 +1678,8 @@ func (c *Client) RunAgenticLoop(
 			prefix = fmt.Sprintf("@%s: ", h.Sender)
 		}
 		content := h.Content
-		if len(content) > 350 {
-			content = content[:350] + "..."
+		if len(content) > 800 {
+			content = content[:800] + "..."
 		}
 		baseMsgs = append(baseMsgs, ChatMessage{Role: role, Content: prefix + content})
 	}
@@ -1692,7 +1699,7 @@ func (c *Client) RunAgenticLoop(
 		reqBody := ChatCompletionRequest{
 			Model:            c.model,
 			Messages:         runMsgs,
-			Tools:            c.tools,
+			Tools:            tools,
 			ToolChoice:       "auto",
 			Temperature:      0.7,
 			MaxTokens:        500,
@@ -1860,8 +1867,8 @@ func (c *Client) GenerateVisionReply(
 			prefix = fmt.Sprintf("@%s: ", h.Sender)
 		}
 		content := h.Content
-		if len(content) > 350 {
-			content = content[:350] + "..."
+		if len(content) > 800 {
+			content = content[:800] + "..."
 		}
 		msgs = append(msgs, ChatMessage{
 			Role:    role,
@@ -2456,6 +2463,9 @@ func applyReasoningControls(req *ChatCompletionRequest, at chatAttempt) {
 		}
 	case "openrouter":
 		req.Reasoning = &ReasoningConfig{Effort: "low", Exclude: true}
+	case "gemini":
+		// Thinking adds seconds and eats the token budget; chat replies don't need it.
+		req.ReasoningEffort = "none"
 	}
 }
 
@@ -2577,7 +2587,7 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 					break
 				}
 
-				if isRateLimit && attempt < maxRetries {
+				if isRateLimit && attempt < maxRetries && at.provider == "groq" {
 					log.Printf("[AI] %s rate limit reached for %s (attempt %d/%d). Pausing 2.5s...", at.provider, at.model, attempt+1, maxRetries)
 					select {
 					case <-ctx.Done():
@@ -3057,4 +3067,10 @@ func LooksLikeLeakedReasoning(text string) bool {
 // DebugPromptSizes exposes the base system prompt and tool list for size checks.
 func (c *Client) DebugPromptSizes() (string, []ToolDefinition) {
 	return c.systemPrompt("someone", false, nil), c.tools
+}
+
+// DebugFocusedSizes returns the focused prompt and tools for a single message.
+func (c *Client) DebugFocusedSizes(userPrompt string) (string, []ToolDefinition) {
+	active := detectDomains(userPrompt, nil, "")
+	return focusPrompt(c.systemPrompt("someone", false, nil), active), focusTools(c.tools, active)
 }
