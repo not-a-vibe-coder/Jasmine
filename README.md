@@ -65,6 +65,14 @@ She reads the mood under a message, names feelings specifically, listens before 
 
 "jasmine remind me by 3pm lagos time to fetch water" schedules a reminder; at 3pm she tags you in the same chat with a message she writes herself. She also understands "in 20 mins", "every morning" (daily/weekly repeats), reminding someone else, and listing or cancelling reminders. They are stored in Postgres, and missed ones (while Render slept) are sent on wake. While any are pending she pings her own `/healthz` every 10 minutes so the free plan doesn't put her to sleep. `DEFAULT_TIMEZONE` sets the zone used when nobody names one (default `Africa/Lagos`).
 
+## Calls
+
+"jasmine call me" rings you and she holds a real spoken conversation: she talks (same voice as her voice notes), listens, transcribes, answers, and says goodbye when you're done. What you say on the call goes into her Walrus memory. Reminders can arrive as calls too ("call me at 6am to wake me up"); if you don't pick up, she texts the reminder instead.
+
+- **Telegram calls** come from a second, normal Telegram account, because bots can't place calls. `caller/caller.py` (py-tgcalls) runs next to the bot in the same container. Create the account, get `TG_API_ID`/`TG_API_HASH` at my.telegram.org, then run `uv run --with telethon python scripts/tg-caller-login.py` once to get `TG_CALLER_SESSION`.
+- **Phone calls** go through Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`). People give her their number in a DM; it is stored in Postgres, never shown in chat. Twilio webhooks are signature-checked.
+- Only the owner can ask her to call someone else; everyone else gets 3 calls a day.
+
 ## Other abilities
 
 Web search and page reading, token analytics, Solana and EVM wallets (owner-only sends), GitHub actions, a private GitHub Actions sandbox for running code, document and image understanding, DMs, and spontaneous group check-ins.

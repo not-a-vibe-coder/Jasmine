@@ -18,18 +18,26 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/bin/shipp cmd/bot/main.go
 
 # Production Runner Stage
-FROM alpine:3.21
+# Debian (glibc) rather than Alpine: the Telegram calling engine (ntgcalls) ships glibc wheels.
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
-# Install CA certificates for HTTPS / TLS RPCs and bash for script validation
-# ffmpeg converts Orpheus voice output into Telegram voice-note format (Opus)
-RUN apk --no-cache add ca-certificates tzdata bash ffmpeg
+# CA certificates for HTTPS RPCs, bash for script validation, ffmpeg for voice notes and calls
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata bash ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Telegram caller (only started when TG_CALLER_SESSION is set)
+COPY caller/requirements.txt /app/caller/requirements.txt
+RUN pip install --no-cache-dir -r /app/caller/requirements.txt
+COPY caller/caller.py /app/caller/caller.py
 
 # Copy compiled binary from builder
 COPY --from=builder /app/bin/shipp /app/shipp
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 # Default port for health check
 EXPOSE 8080
 
-ENTRYPOINT ["/app/shipp"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

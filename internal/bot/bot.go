@@ -29,6 +29,7 @@ import (
 	"shipp/internal/ai"
 	"shipp/internal/config"
 	"shipp/internal/crypto"
+	"shipp/internal/calls"
 	"shipp/internal/docparser"
 	"shipp/internal/reminders"
 	"shipp/internal/domain"
@@ -116,6 +117,8 @@ type Bot struct {
 	imagegen *imagegen.Service
 	voice    *voice.Service
 	reminders *reminders.Store
+	calls     *calls.Manager
+	phonebook *calls.Phonebook
 	stickers stickerCache
 }
 
@@ -2172,6 +2175,9 @@ func (b *Bot) executeToolCall(
 		return res
 	}
 	if res, ok := b.executeReminderTool(ctx, chatID, toolName, arguments, username); ok {
+		return res
+	}
+	if res, ok := b.executeCallTool(ctx, chatID, toolName, arguments, username, isOwner); ok {
 		return res
 	}
 

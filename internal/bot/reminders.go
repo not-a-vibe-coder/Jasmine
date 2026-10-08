@@ -13,6 +13,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"shipp/internal/calls"
 	"shipp/internal/reminders"
 )
 
@@ -47,6 +48,7 @@ func (b *Bot) executeReminderTool(ctx context.Context, chatID int64, toolName, a
 		Timezone  string  `json:"timezone"`
 		Repeat    string  `json:"repeat"`
 		Target    string  `json:"target_username"`
+		DeliverBy string  `json:"deliver_by"`
 		ID        int64   `json:"id"`
 	}
 	_ = json.Unmarshal([]byte(arguments), &args)
@@ -99,13 +101,24 @@ func (b *Bot) executeReminderTool(ctx context.Context, chatID int64, toolName, a
 	if repeat != "daily" && repeat != "weekly" {
 		repeat = ""
 	}
+	deliverBy := strings.ToLower(strings.TrimSpace(args.DeliverBy))
+	switch deliverBy {
+	case "voice_note", "telegram_call", "phone_call":
+	default:
+		deliverBy = ""
+	}
+	if deliverBy == "phone_call" && b.phonebook != nil {
+		if phone, _ := b.phonebook.Get(ctx, senderID); phone == "" {
+			return "They want a phone call but you don't have their number. Ask them to DM it to you (with country code), or offer a Telegram call instead.", true
+		}
+	}
 	threadID, _ := ctx.Value(ctxKeyThreadID{}).(int)
 	replyTo, _ := ctx.Value(ctxKeyReplyToMsgID{}).(int)
 	firstName, _ := ctx.Value(ctxKeySenderFirstName{}).(string)
 	r := &reminders.Reminder{
 		ChatID: chatID, ThreadID: threadID, UserID: senderID, Username: username, FirstName: firstName,
 		Target: strings.TrimPrefix(strings.TrimSpace(args.Target), "@"), ReplyTo: replyTo,
-		Text: text, DueAt: due, Timezone: loc.String(), Repeat: repeat,
+		Text: text, DueAt: due, Timezone: loc.String(), Repeat: repeat, DeliverBy: deliverBy,
 	}
 	if strings.EqualFold(r.Target, username) || strings.EqualFold(r.Target, "me") {
 		r.Target = ""
@@ -185,6 +198,9 @@ func (b *Bot) deliverReminder(ctx context.Context, r *reminders.Reminder, now ti
 	if strings.TrimSpace(body) == "" || body == NoReply {
 		body = fmt.Sprintf("hey %s, it's time: %s", name, r.Text)
 	}
+	if b.deliverReminderSpecial(ctx, r, name, body) {
+		return nil
+	}
 
 	// Mention so Telegram notifies them, even in a busy group.
 	text := html.EscapeString(body)
@@ -249,4 +265,58 @@ func nonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// deliverReminderSpecial handles voice-note and call reminders. It returns false to fall
+// back to a normal text reminder.
+func (b *Bot) deliverReminderSpecial(ctx context.Context, r *reminders.Reminder, name, body string) bool {
+	if r.Target != "" {
+		return false // calls and voice notes only go to the person who asked
+	}
+	switch r.DeliverBy {
+	case "voice_note":
+		vctx := ctx
+		if r.ThreadID != 0 {
+			vctx = context.WithValue(ctx, ctxKeyThreadID{}, r.ThreadID)
+		}
+		if err := b.sendVoiceNote(vctx, r.ChatID, r.ReplyTo, body); err != nil {
+			log.Printf("[Reminder] #%d voice note failed, sending text: %v", r.ID, err)
+			return false
+		}
+		log.Printf("[Reminder] #%d delivered as a voice note", r.ID)
+		return true
+
+	case "telegram_call", "phone_call":
+		if b.calls == nil {
+			return false
+		}
+		s := &calls.Session{
+			ChatID: r.ChatID, ThreadID: r.ThreadID, ReplyTo: r.ReplyTo, UserID: r.UserID,
+			Username: r.Username, Name: name,
+			Purpose:      "they asked you to remind them: " + r.Text,
+			FallbackText: body,
+		}
+		to := calls.TelegramTarget(r.Username, r.UserID)
+		s.Channel = calls.ChannelTelegram
+		if r.DeliverBy == "phone_call" {
+			s.Channel = calls.ChannelPhone
+			if b.phonebook == nil {
+				return false
+			}
+			phone, _ := b.phonebook.Get(ctx, r.UserID)
+			if phone == "" {
+				return false
+			}
+			to = phone
+		}
+		cctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+		defer cancel()
+		if err := b.calls.Start(cctx, s, to); err != nil {
+			log.Printf("[Reminder] #%d call failed, sending text: %v", r.ID, err)
+			return false
+		}
+		log.Printf("[Reminder] #%d delivered as a %s", r.ID, r.DeliverBy)
+		return true // if they don't pick up, the call reports back with the text
+	}
+	return false
 }

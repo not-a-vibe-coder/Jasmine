@@ -204,6 +204,16 @@ func (s *Service) Speak(ctx context.Context, text string) (*Speech, error) {
 	return s.speakEdge(ctx, clean)
 }
 
+// SpeakMP3 always returns MP3 (Edge TTS), which phone systems and ffmpeg players accept.
+// Calls use it because it is faster than Orpheus and Twilio can't play Opus.
+func (s *Service) SpeakMP3(ctx context.Context, text string) (*Speech, error) {
+	clean := CleanForSpeech(text, false)
+	if clean == "" {
+		return nil, fmt.Errorf("nothing speakable in the text")
+	}
+	return s.speakEdge(ctx, clean)
+}
+
 func (s *Service) speakOrpheus(ctx context.Context, text string) (*Speech, error) {
 	clean := CleanForSpeech(text, true)
 	if clean == "" {

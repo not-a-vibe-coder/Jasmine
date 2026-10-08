@@ -11,6 +11,7 @@ import (
 
 	"shipp/internal/ai"
 	"shipp/internal/bot"
+	"shipp/internal/calls"
 	"shipp/internal/config"
 	"shipp/internal/crypto"
 	"shipp/internal/domain"
@@ -163,6 +164,25 @@ func main() {
 	if tz := os.Getenv("DEFAULT_TIMEZONE"); tz != "" {
 		reminders.DefaultZone = tz
 	}
+	// Voice calls: Twilio for phone numbers, a companion Telegram account for Telegram calls.
+	publicURL := os.Getenv("RENDER_EXTERNAL_URL")
+	if publicURL == "" {
+		publicURL = strings.TrimSuffix(cfg.WebhookURL, "/webhook")
+	}
+	callMgr := calls.NewManager(tgBot, publicURL)
+	callMgr.Twilio = calls.NewTwilio(os.Getenv("TWILIO_ACCOUNT_SID"), os.Getenv("TWILIO_AUTH_TOKEN"),
+		os.Getenv("TWILIO_FROM_NUMBER"), os.Getenv("TWILIO_SPEECH_LANG"))
+	if os.Getenv("TG_CALLER_SESSION") != "" {
+		callMgr.Telegram = calls.NewTelegramCaller(envOr("CALLER_URL", "http://127.0.0.1:8091"), os.Getenv("CALLER_SECRET"), os.Getenv("CALLER_CLIP_DIR"))
+	}
+	phonebook, err := calls.NewPhonebook(context.Background(), memStore.GetDB())
+	if err != nil {
+		log.Printf("[Main] Phonebook unavailable: %v", err)
+	}
+	tgBot.SetCalls(callMgr, phonebook)
+	phoneOK, tgOK := callMgr.Available()
+	log.Printf("[Main] Calls: phone (Twilio) %v, Telegram %v", phoneOK, tgOK)
+
 	if remStore, err := reminders.New(context.Background(), memStore.GetDB()); err != nil {
 		log.Printf("[Main] Reminders unavailable: %v", err)
 	} else {
@@ -179,6 +199,9 @@ func main() {
 	httpServer := server.NewServer(cfg.Port, memStore.GetDB(), memStore.GetRedis())
 	httpServer.RegisterHandler("/webhook", tgBot.WebhookHandler)
 	httpServer.RegisterHandler("/api/sandbox/callback", sandboxSvc.CallbackHTTPHandler)
+	httpServer.RegisterHandler("/calls/audio/", callMgr.AudioHandler)
+	httpServer.RegisterHandler("/calls/twilio/", callMgr.TwilioHandler)
+	httpServer.RegisterHandler("/calls/tg/event", callMgr.TelegramEventHandler)
 	go func() {
 		if err := httpServer.Start(); err != nil {
 			log.Printf("[Main] HTTP server exited: %v", err)
@@ -224,4 +247,11 @@ func modelList(override, defaults string) []string {
 		}
 	}
 	return out
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

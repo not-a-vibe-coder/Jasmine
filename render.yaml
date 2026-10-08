@@ -15,6 +15,8 @@ services:
     envVars:
       # Optional extras (add in the dashboard): OWNER_IDS, POLLINATIONS_API_KEY, GIPHY_API_KEY,
       # HF_TOKEN, VOICE_NAME, MISTRAL_API_KEY, MOLTBOOK_API_KEY, DEFAULT_TIMEZONE (default Africa/Lagos), REDIS_URL.
+      # Calls: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER (phone) and
+      # TG_API_ID, TG_API_HASH, TG_CALLER_SESSION (Telegram calls; see scripts/tg-caller-login.py).
       # WEBHOOK_URL and SANDBOX_CALLBACK_URL are derived from RENDER_EXTERNAL_URL automatically.
       - key: OWNERS_USERNAME
         value: "@jackdotsol_"

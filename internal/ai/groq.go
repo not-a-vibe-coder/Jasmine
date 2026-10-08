@@ -992,9 +992,59 @@ func (c *Client) buildTools() []ToolDefinition {
 							"type":        "string",
 							"description": "Only when reminding SOMEONE ELSE in this chat ('remind @tobi at 5pm'); their username. Empty for the speaker.",
 						},
+						"deliver_by": map[string]interface{}{
+							"type":        "string",
+							"description": "How to deliver it: empty for a text message, 'voice_note', 'telegram_call' ('call me at 6 to wake me'), or 'phone_call' (only when they say phone/number/line).",
+						},
 					},
 					"required": []string{"message"},
 				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "call_user",
+				Description: "Place a live voice call right now and talk with them. Use when someone says 'call me', 'ring me', 'can you call me'. For a call at a later time use set_reminder with deliver_by instead.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"via": map[string]interface{}{
+							"type":        "string",
+							"description": "'telegram' (default, a Telegram voice call) or 'phone' (a real phone call to their saved number, when they say phone/number/line).",
+						},
+						"reason": map[string]interface{}{
+							"type":        "string",
+							"description": "Why you are calling, in a few words, e.g. 'they want to talk through their exam stress' or 'just to chat'.",
+						},
+						"target_username": map[string]interface{}{
+							"type":        "string",
+							"description": "Only when calling someone other than the speaker (owners only).",
+						},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "save_phone_number",
+				Description: "Save the speaker's own phone number so you can phone them. Use when they give you their number.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"phone": map[string]interface{}{"type": "string", "description": "The number as they wrote it, ideally with country code."},
+					},
+					"required": []string{"phone"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "forget_phone_number",
+				Description: "Delete the speaker's saved phone number.",
+				Parameters:  map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 			},
 		},
 		{
@@ -1291,7 +1341,12 @@ Operational Superpowers & Tools:
 29. Reminders ('set_reminder', 'list_reminders', 'cancel_reminder'):
     - When someone asks you to remind them of anything ("jasmine remind me by 3pm lagos time to fetch water", "ping me in 20 mins", "remind me every morning to pray"), call 'set_reminder' right away. Work out the exact date and time from CURRENT TIME in your context; "by 3pm" means at 3pm; a bare time that has passed today means tomorrow. Default timezone is Africa/Lagos unless they say otherwise.
     - Only ask a question if the time is truly unclear ("later", "soon"). Never ask them to repeat what they already said.
-    - When it is due you will message them yourself in this chat. Confirm in one short warm line with the time, or just react and say it briefly. Never promise a reminder without calling the tool.`, ownersStr, roleNote, profileSection, chatEnvironment, identitySection)
+    - When it is due you will message them yourself in this chat. Confirm in one short warm line with the time, or just react and say it briefly. Never promise a reminder without calling the tool.
+    - If they want the reminder as a voice note or a call ("call me at 6am to wake me up"), set deliver_by. If a call isn't answered, the reminder is sent as text.
+30. Voice Calls ('call_user', 'save_phone_number'):
+    - You can call people: a Telegram voice call (default) or a real phone call to a number they gave you. On the call you talk and listen like a friend, and what they say joins your memory.
+    - "call me" / "ring me" → call 'call_user' right away. Phone calls need their number: if you don't have it, ask them to DM it with the country code, then 'save_phone_number'.
+    - Only your creator can ask you to call someone else. Never read phone numbers back in full.`, ownersStr, roleNote, profileSection, chatEnvironment, identitySection)
 }
 
 type AIResponse struct {
@@ -1355,6 +1410,12 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 		name = "save_memory"
 	case "setreminder", "set_reminder", "remind", "remind_me", "create_reminder", "add_reminder":
 		name = "set_reminder"
+	case "calluser", "call_user", "call", "call_me", "phone_call", "voice_call":
+		name = "call_user"
+	case "savephonenumber", "save_phone_number", "save_phone", "set_phone_number":
+		name = "save_phone_number"
+	case "forgetphonenumber", "forget_phone_number", "delete_phone_number":
+		name = "forget_phone_number"
 	case "listreminders", "list_reminders", "reminders", "get_reminders":
 		name = "list_reminders"
 	case "cancelreminder", "cancel_reminder", "delete_reminder", "remove_reminder":
@@ -2142,6 +2203,23 @@ CRITICAL RULES:
 		return strings.TrimSpace(resp.Choices[0].Message.Content), nil
 	}
 	return "", fmt.Errorf("empty proactive message")
+}
+
+// CallReply produces Jasmine's next spoken line on a live call. turns alternate
+// "user"/"assistant" starting with whatever was said first.
+func (c *Client) CallReply(ctx context.Context, system string, turns []ChatMessage) (string, error) {
+	msgs := append([]ChatMessage{{Role: "system", Content: system}}, turns...)
+	if len(turns) == 0 {
+		msgs = append(msgs, ChatMessage{Role: "user", Content: "(the call just connected; say your opening line)"})
+	}
+	resp, err := c.sendChatCompletion(ctx, ChatCompletionRequest{Model: c.model, Messages: msgs, Temperature: 0.8, MaxTokens: 220})
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("empty call reply")
+	}
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
 }
 
 // ComposeReminder writes the message Jasmine sends when a reminder comes due.

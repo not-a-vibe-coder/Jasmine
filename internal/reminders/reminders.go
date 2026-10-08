@@ -28,6 +28,7 @@ type Reminder struct {
 	DueAt     time.Time
 	Timezone  string
 	Repeat    string // "", "daily", "weekly"
+	DeliverBy string // "" (text), "voice_note", "telegram_call", "phone_call"
 	CreatedAt time.Time
 }
 
@@ -62,7 +63,8 @@ func New(ctx context.Context, db *sql.DB) (*Store, error) {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			done BOOLEAN NOT NULL DEFAULT false
 		);
-		CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at) WHERE NOT done;`)
+		CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at) WHERE NOT done;
+		ALTER TABLE reminders ADD COLUMN IF NOT EXISTS deliver_by TEXT NOT NULL DEFAULT '';`)
 	if err != nil {
 		return nil, fmt.Errorf("create reminders table: %w", err)
 	}
@@ -81,13 +83,13 @@ func (s *Store) Add(ctx context.Context, r *Reminder) error {
 		return nil
 	}
 	return s.db.QueryRowContext(ctx, `
-		INSERT INTO reminders (chat_id, thread_id, user_id, username, first_name, target, reply_to, text, due_at, timezone, repeat)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
-		r.ChatID, r.ThreadID, r.UserID, r.Username, r.FirstName, r.Target, r.ReplyTo, r.Text, r.DueAt, r.Timezone, r.Repeat,
+		INSERT INTO reminders (chat_id, thread_id, user_id, username, first_name, target, reply_to, text, due_at, timezone, repeat, deliver_by)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+		r.ChatID, r.ThreadID, r.UserID, r.Username, r.FirstName, r.Target, r.ReplyTo, r.Text, r.DueAt, r.Timezone, r.Repeat, r.DeliverBy,
 	).Scan(&r.ID)
 }
 
-const selectCols = `id, chat_id, thread_id, user_id, username, first_name, target, reply_to, text, due_at, timezone, repeat, created_at`
+const selectCols = `id, chat_id, thread_id, user_id, username, first_name, target, reply_to, text, due_at, timezone, repeat, created_at, deliver_by`
 
 func scan(rows *sql.Rows) ([]*Reminder, error) {
 	defer rows.Close()
@@ -95,7 +97,7 @@ func scan(rows *sql.Rows) ([]*Reminder, error) {
 	for rows.Next() {
 		r := &Reminder{}
 		if err := rows.Scan(&r.ID, &r.ChatID, &r.ThreadID, &r.UserID, &r.Username, &r.FirstName, &r.Target,
-			&r.ReplyTo, &r.Text, &r.DueAt, &r.Timezone, &r.Repeat, &r.CreatedAt); err != nil {
+			&r.ReplyTo, &r.Text, &r.DueAt, &r.Timezone, &r.Repeat, &r.CreatedAt, &r.DeliverBy); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
