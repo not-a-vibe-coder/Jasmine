@@ -72,7 +72,7 @@ func (s *Service) ParseRepoSlug(input string) (string, string, error) {
 		if s.username != "" {
 			return s.username, parts[0], nil
 		}
-		return "", "", fmt.Errorf("repository must be in 'owner/repo' format (e.g. davidnzube101/shipp)")
+		return "", "", fmt.Errorf("repository must be in 'owner/repo' format (e.g. owner/repo)")
 	}
 	return "", "", fmt.Errorf("invalid repository format '%s'. Please specify 'owner/repo'", input)
 }
@@ -315,17 +315,21 @@ func (s *Service) IsRepoEmptyWithToken(ctx context.Context, owner, repo, customT
 func (s *Service) CommitFileWithOptions(ctx context.Context, owner, repo, path string, opts CommitOptions) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", s.baseURL, owner, repo, strings.TrimPrefix(path, "/"))
 
+	// Commits are authored as the bot's own GitHub account unless told otherwise.
 	authorName := strings.TrimSpace(opts.AuthorName)
 	if authorName == "" {
-		authorName = "Shipp" // Strictly "Shipp" by default
+		authorName = s.username
+	}
+	if authorName == "" {
+		authorName = "Jasmine"
 	}
 
 	authorEmail := strings.TrimSpace(opts.AuthorEmail)
 	if authorEmail == "" {
 		authorEmail = s.defaultEmail
 	}
-	if authorEmail == "" {
-		authorEmail = "shippzero@atomicmail.io"
+	if authorEmail == "" && s.username != "" {
+		authorEmail = s.username + "@users.noreply.github.com"
 	}
 
 	payload := map[string]interface{}{
@@ -425,7 +429,7 @@ func (s *Service) MergePullRequestWithToken(ctx context.Context, owner, repo str
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", s.baseURL, owner, repo, pullNumber)
 
 	payload := map[string]string{
-		"commit_title": fmt.Sprintf("Merge PR #%d via Shipp Bot", pullNumber),
+		"commit_title": fmt.Sprintf("Merge PR #%d via Jasmine", pullNumber),
 		"merge_method": "squash",
 	}
 

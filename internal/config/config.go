@@ -57,9 +57,34 @@ type Config struct {
 	VercelToken    string
 	MoltbookAPIKey string
 
+	// Fallback AI providers (OpenAI-compatible). Models are comma-separated overrides.
+	CerebrasAPIKey    string
+	CerebrasModels    string
+	OpenRouterAPIKey  string
+	OpenRouterModels  string
+	MistralAPIKey     string
+	MistralModels     string
+	HuggingFaceAPIKey string
+	HuggingFaceModels string
+
+	// Image generation
+	PollinationsAPIKey string
+	GeminiImageModel   string
+
+	// Walrus Memory
+	MemwalServerURL   string
+	MemwalAccountID   string
+	MemwalDelegateKey string
+
+	// Sandbox runner
+	SandboxRepo        string
+	SandboxPrivateRepo string
+	SandboxCallbackURL string
+
 	// Server & Webhook
-	Port       string
-	WebhookURL string
+	Port          string
+	WebhookURL    string
+	WebhookSecret string
 }
 
 func LoadConfig() (*Config, error) {
@@ -96,12 +121,38 @@ func LoadConfig() (*Config, error) {
 		GeminiAPIKey:        os.Getenv("GEMINI_API_KEY"),
 		VercelToken:         os.Getenv("VERCEL_TOKEN"),
 		MoltbookAPIKey:      os.Getenv("MOLTBOOK_API_KEY"),
+		CerebrasAPIKey:      os.Getenv("CEREBRAS_API_KEY"),
+		CerebrasModels:      os.Getenv("CEREBRAS_MODELS"),
+		OpenRouterAPIKey:    os.Getenv("OPENROUTER_API_KEY"),
+		OpenRouterModels:    os.Getenv("OPENROUTER_MODELS"),
+		MistralAPIKey:       os.Getenv("MISTRAL_API_KEY"),
+		MistralModels:       os.Getenv("MISTRAL_MODELS"),
+		HuggingFaceAPIKey:   os.Getenv("HF_TOKEN"),
+		HuggingFaceModels:   os.Getenv("HF_MODELS"),
+		PollinationsAPIKey:  os.Getenv("POLLINATIONS_API_KEY"),
+		GeminiImageModel:    os.Getenv("GEMINI_IMAGE_MODEL"),
+		MemwalServerURL:     os.Getenv("MEMWAL_SERVER_URL"),
+		MemwalAccountID:     os.Getenv("MEMWAL_ACCOUNT_ID"),
+		MemwalDelegateKey:   os.Getenv("MEMWAL_DELEGATE_KEY"),
+		SandboxRepo:         os.Getenv("SANDBOX_REPO"),
+		SandboxPrivateRepo:  os.Getenv("SANDBOX_PRIVATE_REPO"),
+		SandboxCallbackURL:  os.Getenv("SANDBOX_CALLBACK_URL"),
 		Port:                os.Getenv("PORT"),
 		WebhookURL:          os.Getenv("WEBHOOK_URL"),
+		WebhookSecret:       os.Getenv("WEBHOOK_SECRET"),
 	}
 
-	if cfg.ResendFromEmail == "" {
-		cfg.ResendFromEmail = "Shipp <shipp@bot.davidnzube.xyz>"
+	// On Render, the public URL is injected automatically; use it for the webhook
+	// unless WEBHOOK_URL was set explicitly. USE_POLLING=true opts out.
+	if cfg.WebhookURL == "" && os.Getenv("USE_POLLING") != "true" {
+		if ext := strings.TrimRight(os.Getenv("RENDER_EXTERNAL_URL"), "/"); ext != "" {
+			cfg.WebhookURL = ext + "/webhook"
+		}
+	}
+
+	if cfg.SandboxCallbackURL == "" && cfg.WebhookURL != "" {
+		// WEBHOOK_URL is https://host/webhook; the sandbox calls back on the same host.
+		cfg.SandboxCallbackURL = strings.TrimSuffix(strings.TrimRight(cfg.WebhookURL, "/"), "/webhook") + "/api/sandbox/callback"
 	}
 
 	if cfg.CodexIOAPIKey == "" {
@@ -119,7 +170,7 @@ func LoadConfig() (*Config, error) {
 	// Parse owners
 	ownersRaw := os.Getenv("OWNERS_USERNAME")
 	if ownersRaw == "" {
-		ownersRaw = "@skipp_dev,@shigarakiXBT"
+		ownersRaw = "@jackdotsol_"
 	}
 	parts := strings.Split(ownersRaw, ",")
 	for _, p := range parts {
@@ -138,7 +189,8 @@ func LoadConfig() (*Config, error) {
 	return cfg, nil
 }
 
-// IsOwner checks whether a Telegram username or display name belongs to one of the bot owners
+// IsOwner checks whether a Telegram @username exactly matches one of the bot owners.
+// Display names are never trusted: anyone can set their first name to an owner's name.
 func (c *Config) IsOwner(username string) bool {
 	if username == "" {
 		return false
@@ -148,10 +200,6 @@ func (c *Config) IsOwner(username string) bool {
 		if cleaned == owner {
 			return true
 		}
-	}
-	// Also check display names containing owner identifiers (e.g. "Skipp Air", "shigaraki")
-	if strings.Contains(cleaned, "skipp") || strings.Contains(cleaned, "shigaraki") {
-		return true
 	}
 	return false
 }

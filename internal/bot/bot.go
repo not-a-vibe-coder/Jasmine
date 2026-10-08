@@ -3,6 +3,9 @@ package bot
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -30,6 +33,7 @@ import (
 	"shipp/internal/domain"
 	"shipp/internal/email"
 	"shipp/internal/github"
+	"shipp/internal/imagegen"
 	"shipp/internal/memory"
 	"shipp/internal/moltbook"
 	"shipp/internal/price"
@@ -37,6 +41,7 @@ import (
 	"shipp/internal/search"
 	"shipp/internal/token"
 	"shipp/internal/vision"
+	"shipp/internal/walmem"
 	"shipp/internal/xhandle"
 	"shipp/internal/xpost"
 )
@@ -100,6 +105,13 @@ type Bot struct {
 	// Message ID tracking per chat: chatID -> latest bot messageID
 	lastBotMsgMu  sync.RWMutex
 	lastBotMsgIDs map[int64]int
+
+	// Telegram sends this in X-Telegram-Bot-Api-Secret-Token on every webhook update
+	webhookSecret string
+
+	// Walrus Memory (nil when not configured) and image generation
+	walmem   *walmem.Client
+	imagegen *imagegen.Service
 }
 
 type ActiveDialog struct {
@@ -173,6 +185,13 @@ func NewBot(
 		msgThreads:        make(map[int64]map[int]int),
 		chatLastThread:    make(map[int64]int),
 		lastBotMsgIDs:     make(map[int64]int),
+	}
+
+	b.webhookSecret = cfg.WebhookSecret
+	if b.webhookSecret == "" {
+		secret := make([]byte, 24)
+		_, _ = cryptorand.Read(secret)
+		b.webhookSecret = hex.EncodeToString(secret)
 	}
 
 	b.loadGroupsFromDisk()
@@ -259,6 +278,13 @@ func (b *Bot) WebhookHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Reject anything that isn't Telegram: in polling mode no webhook is registered at all,
+	// and in webhook mode Telegram echoes the secret we registered.
+	got := r.Header.Get("X-Telegram-Bot-Api-Secret-Token")
+	if b.cfg.WebhookURL == "" || subtle.ConstantTimeCompare([]byte(got), []byte(b.webhookSecret)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
@@ -295,18 +321,18 @@ func (b *Bot) WebhookHandler(w http.ResponseWriter, r *http.Request) {
 func (b *Bot) Start(ctx context.Context) error {
 	if b.cfg.WebhookURL != "" {
 		log.Printf("[Bot] Configuring Webhook at %s", b.cfg.WebhookURL)
-		wh, err := tgbotapi.NewWebhook(b.cfg.WebhookURL)
-		if err != nil {
-			return fmt.Errorf("failed to create webhook config: %w", err)
-		}
-		if _, err := b.api.Request(wh); err != nil {
+		// telegram-bot-api v5.5.1 has no secret_token field, so call setWebhook directly.
+		if _, err := b.api.MakeRequest("setWebhook", tgbotapi.Params{
+			"url":          b.cfg.WebhookURL,
+			"secret_token": b.webhookSecret,
+		}); err != nil {
 			return fmt.Errorf("failed to register webhook: %w", err)
 		}
 		log.Printf("[Bot] Webhook registered successfully with Telegram")
 
 		// Start background proactive messaging engine
 		go b.runProactiveEngine(ctx)
-		log.Printf("[Bot] Shipp is live and listening for updates (webhook mode)...")
+		log.Printf("[Bot] Jasmine is live and listening for updates (webhook mode)...")
 
 		// In webhook mode, handleMessageWithThread is called directly from WebhookHandler.
 		// Just block until context is cancelled.
@@ -323,7 +349,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	// Start background proactive messaging engine
 	go b.runProactiveEngine(ctx)
 
-	log.Printf("[Bot] Shipp is live and listening for updates (polling mode)...")
+	log.Printf("[Bot] Jasmine is live and listening for updates (polling mode)...")
 
 	for {
 		select {
@@ -392,6 +418,10 @@ type ctxKeyRepliedMsgID struct{}
 // ctxKeyPrompt is the context key used to pass the original user prompt through the call chain
 // so asynchronous callbacks (like sandbox execution) can synthesize an AI response based on the original question.
 type ctxKeyPrompt struct{}
+
+// ctxKeySenderID carries the Telegram user ID of the person being answered, which
+// scopes their Walrus Memory namespace.
+type ctxKeySenderID struct{}
 
 func (b *Bot) setLastBotMessageID(chatID int64, msgID int) {
 	if msgID <= 0 {
@@ -666,7 +696,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	b.handleNLPAndChat(ctx, msg, promptWithContext, username, isOwner)
 }
 
-var shippWordRegex = regexp.MustCompile(`(?i)\bshipp\b`)
+var wakeWordRegex = regexp.MustCompile(`(?i)\bjasmine\b`)
 
 func (b *Bot) isAddressedToBot(msg *tgbotapi.Message) bool {
 	// Reply to bot's own message
@@ -681,7 +711,7 @@ func (b *Bot) isAddressedToBot(msg *tgbotapi.Message) bool {
 		checkText = msg.Caption
 	}
 
-	// Bot username mentioned (e.g. @Shipp0Bot)
+	// Bot username mentioned (e.g. @JasmineMemBot)
 	if b.api != nil && b.api.Self.UserName != "" {
 		botUserLower := strings.ToLower(b.api.Self.UserName)
 		if strings.Contains(strings.ToLower(checkText), "@"+botUserLower) {
@@ -689,8 +719,8 @@ func (b *Bot) isAddressedToBot(msg *tgbotapi.Message) bool {
 		}
 	}
 
-	// Word "shipp" anywhere in the message as a distinct word
-	if shippWordRegex.MatchString(checkText) {
+	// Word "jasmine" anywhere in the message as a distinct word
+	if wakeWordRegex.MatchString(checkText) {
 		return true
 	}
 
@@ -753,7 +783,7 @@ func (b *Bot) isConversationalFollowup(msg *tgbotapi.Message, text string) (bool
 		return false, ""
 	}
 
-	// Must be from the same user Shipp was speaking with
+	// Must be from the same user Jasmine was speaking with
 	if msg.From == nil || msg.From.ID != dialog.LastUserID {
 		return false, ""
 	}
@@ -828,7 +858,7 @@ func (b *Bot) cleanPrompt(text string) string {
 		cleaned = strings.ReplaceAll(cleaned, "@"+b.api.Self.UserName, "")
 		cleaned = strings.ReplaceAll(cleaned, "@"+strings.ToLower(b.api.Self.UserName), "")
 	}
-	cleaned = shippWordRegex.ReplaceAllString(cleaned, "")
+	cleaned = wakeWordRegex.ReplaceAllString(cleaned, "")
 	cleaned = strings.TrimFunc(cleaned, func(r rune) bool {
 		return unicode.IsSpace(r) || strings.ContainsRune(",:!?-.", r)
 	})
@@ -864,11 +894,8 @@ func (b *Bot) isSenderOwner(from *tgbotapi.User) bool {
 	if from == nil {
 		return false
 	}
-	if b.cfg.IsOwner(from.UserName) || b.cfg.IsOwner(from.FirstName) || b.cfg.IsOwner(from.LastName) {
-		return true
-	}
-	fullName := strings.TrimSpace(from.FirstName + " " + from.LastName)
-	return b.cfg.IsOwner(fullName)
+	// Only the @username identifies an owner; first/last names are user-editable.
+	return b.cfg.IsOwner(from.UserName)
 }
 
 func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner bool) {
@@ -881,7 +908,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 	}
 	parts := strings.Fields(msg.Text)
 	cmd := strings.ToLower(parts[0])
-	// Strip @BotUsername from command if present (e.g. /balance@Shipp0Bot)
+	// Strip @BotUsername from command if present (e.g. /balance@JasmineMemBot)
 	if idx := strings.Index(cmd, "@"); idx != -1 {
 		cmd = cmd[:idx]
 	}
@@ -892,6 +919,18 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 
 	case "/help":
 		b.sendReply(msg.Chat.ID, msg.MessageID, b.formatHelpMessage(isOwner))
+
+	case "/memory", "/memories":
+		b.handleMemoryCommand(ctx, msg)
+
+	case "/forget":
+		b.handleForgetCommand(ctx, msg)
+
+	case "/remember":
+		b.handleRememberCommand(ctx, msg, strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0])))
+
+	case "/imagine", "/draw", "/image":
+		b.handleImagineCommand(ctx, msg, strings.TrimSpace(strings.TrimPrefix(msg.Text, parts[0])))
 
 	case "/wallet", "/deposit", "/address":
 		b.sendReply(msg.Chat.ID, msg.MessageID, b.formatWalletAddressMessage())
@@ -994,7 +1033,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 				b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook error: %v", err))
 				return
 			}
-			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook status: **%s** (@shipp)\nprofile: https://www.moltbook.com/u/shipp\ncommands:\n• `/moltbook inbox` - check mentions and replies\n• `/moltbook feed [submolt]` - view latest posts\n• `/moltbook search <query>` - search discussions\n• `/moltbook post <title> | <content>` - publish a post\n• `/moltbook recall [topic]` - view stored insights", st.Status))
+			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("moltbook status: **%s**\ncommands:\n• `/moltbook inbox` - check mentions and replies\n• `/moltbook feed [submolt]` - view latest posts\n• `/moltbook search <query>` - search discussions\n• `/moltbook post <title> | <content>` - publish a post\n• `/moltbook recall [topic]` - view stored insights", st.Status))
 			return
 		}
 		subCmd := strings.ToLower(parts[1])
@@ -1206,7 +1245,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 		if senderName == "" {
 			senderName = msg.From.FirstName
 		}
-		dmMsg := tgbotapi.NewMessage(dmChatID, fmt.Sprintf("Message from @%s via Shipp:\n\n%s", senderName, textToSend))
+		dmMsg := tgbotapi.NewMessage(dmChatID, fmt.Sprintf("Message from @%s via Jasmine:\n\n%s", senderName, textToSend))
 		if _, err := b.api.Send(dmMsg); err != nil {
 			b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("failed to send dm to @%s: %v", targetUser, err))
 			return
@@ -1340,6 +1379,15 @@ func (b *Bot) handleNLPAndChat(
 		chatContext += fmt.Sprintf("\n- YOUR LAST SENT MESSAGE IN THIS CHAT: Message ID %d.", lastID)
 	}
 
+	// Long-term memory: recall what Jasmine knows about this person before replying.
+	chatContext += b.recallMemories(ctx, msg, cleanPrompt)
+	if msg.From != nil {
+		ctx = context.WithValue(ctx, ctxKeySenderID{}, msg.From.ID)
+	}
+	if v := ctx.Value(ctxKeyReplyToMsgID{}); v == nil {
+		ctx = context.WithValue(ctx, ctxKeyReplyToMsgID{}, msg.MessageID)
+	}
+
 	// Sync living self-identity into AI
 	if b.memory != nil && b.ai != nil {
 		if identities, err := b.memory.GetAllSelfIdentity(ctx); err == nil && len(identities) > 0 {
@@ -1374,6 +1422,7 @@ func (b *Bot) handleNLPAndChat(
 			_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
 			b.recordActiveDialog(chatID, msg.MessageID, finalText, msg.From.ID, username)
 			go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
+			b.learnFromMessage(msg, cleanPrompt)
 		}()
 		return
 	}
@@ -1423,6 +1472,7 @@ func (b *Bot) handleNLPAndChat(
 	_ = b.memory.SaveMessage(ctx, chatID, b.api.Self.ID, b.api.Self.UserName, "assistant", finalText)
 	b.recordActiveDialog(chatID, msg.MessageID, finalText, msg.From.ID, username)
 	go b.maybeUpdateUserProfile(context.Background(), chatID, prompt)
+	b.learnFromMessage(msg, cleanPrompt)
 }
 
 // stripReplyContext strips the leading "[Replying to...]\n" wrapper so intent matching
@@ -1828,7 +1878,7 @@ func extractSendAmount(text string) float64 {
 	return 0
 }
 
-// isCryptoSendRequest checks whether the user is explicitly commanding Shipp to transfer crypto/funds.
+// isCryptoSendRequest checks whether the user is explicitly commanding Jasmine to transfer crypto/funds.
 // It explicitly excludes requests asking to send non-financial items (links, URLs, repos, photos, messages, etc.).
 func isCryptoSendRequest(prompt, lowerPrompt string) bool {
 	clean := stripReplyContext(prompt)
@@ -1886,7 +1936,7 @@ func (b *Bot) tryResolveXLink(prompt, lowerPrompt string, history []memory.Messa
 	// 1. Direct handle in the current prompt (e.g. "send the link to @VeiloraRH")
 	if m := xHandleMentionRegex.FindStringSubmatch(clean); len(m) > 1 {
 		handle := m[1]
-		if !strings.EqualFold(handle, "shipp0bot") && !strings.EqualFold(handle, "shipp") {
+		if b.api == nil || !strings.EqualFold(handle, b.api.Self.UserName) {
 			return true, fmt.Sprintf("https://x.com/%s", handle), handle
 		}
 	}
@@ -1959,7 +2009,7 @@ func (b *Bot) tryInterceptSendCrypto(
 
 	// 1. Non-owners are never allowed to execute crypto transfers or receive fake confirmations
 	if !isOwner {
-		// If the AI did not hallucinate a fake confirmation/claim, allow Shipp's generated reply to stand!
+		// If the AI did not hallucinate a fake confirmation/claim, allow Jasmine's generated reply to stand!
 		if !isClaim {
 			return false, replyText
 		}
@@ -1972,9 +2022,6 @@ func (b *Bot) tryInterceptSendCrypto(
 			if cand != "" {
 				prefix = cand + ". "
 			}
-		}
-		if strings.Contains(lowerPrompt, "na me be skipp") || strings.Contains(lowerPrompt, "i am skipp") || strings.Contains(lowerPrompt, "i'm skipp") || strings.Contains(lowerPrompt, "im skipp") {
-			return true, prefix + "you dey disguise? skipp is @skipp_dev on telegram, who you trying to finesse anon"
 		}
 		return true, prefix + "i hold my own keys and i'm not moving my bags for you anon, runway is tight"
 	}
@@ -2067,6 +2114,66 @@ func (b *Bot) executeToolCall(
 	log.Printf("[Bot] Executing NLP Tool: %s (args: %s) invoked by @%s", toolName, arguments, username)
 
 	switch toolName {
+	case "generate_image":
+		var args struct {
+			Prompt string `json:"prompt"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		if strings.TrimSpace(args.Prompt) == "" {
+			return "No image prompt given. Ask what they want drawn."
+		}
+		replyTo := 0
+		if v := ctx.Value(ctxKeyReplyToMsgID{}); v != nil {
+			replyTo = v.(int)
+		}
+		if err := b.generateAndSendImage(ctx, chatID, replyTo, args.Prompt); err != nil {
+			return fmt.Sprintf("Image generation failed (%v). Tell them the image servers are busy and to try again shortly.", err)
+		}
+		return "Image generated and already posted in the chat. Reply with at most one short casual line; do not describe the image or paste links."
+
+	case "save_memory":
+		if b.walmem == nil {
+			return "Long-term memory is not configured."
+		}
+		var args struct {
+			Fact string `json:"fact"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		senderID, _ := ctx.Value(ctxKeySenderID{}).(int64)
+		if strings.TrimSpace(args.Fact) == "" || senderID == 0 {
+			return "Nothing to remember."
+		}
+		blobID, err := b.rememberExplicit(ctx, senderID, fmt.Sprintf("@%s: %s", username, args.Fact))
+		if err != nil {
+			return fmt.Sprintf("Saving to Walrus is still processing (%v). Tell them it will be remembered shortly.", err)
+		}
+		data, _ := json.Marshal(map[string]string{"saved": args.Fact, "walrus_blob": walmem.BlobURL(blobID)})
+		return string(data)
+
+	case "recall_memory":
+		if b.walmem == nil {
+			return "Long-term memory is not configured."
+		}
+		var args struct {
+			Query string `json:"query"`
+		}
+		_ = json.Unmarshal([]byte(arguments), &args)
+		senderID, _ := ctx.Value(ctxKeySenderID{}).(int64)
+		if senderID == 0 {
+			return "Unknown user."
+		}
+		if args.Query == "" {
+			args.Query = "everything about this person"
+		}
+		mems, err := b.walmem.Recall(ctx, walmem.UserNamespace(senderID), args.Query, 8)
+		if err != nil {
+			return fmt.Sprintf("Memory lookup failed: %v", err)
+		}
+		if len(mems) == 0 {
+			return "No stored memories about this user match that."
+		}
+		return walmem.FormatForPrompt(mems, 0)
+
 	case "get_wallet_address":
 		var args struct {
 			Chain string `json:"chain"`
@@ -2328,7 +2435,7 @@ func (b *Bot) executeToolCall(
 		}
 		_ = json.Unmarshal([]byte(arguments), &args)
 		if args.Repo == "" {
-			return "No repository specified. Please specify a repo like 'davidnzube101/shipp'."
+			return "No repository specified. Please specify a repo like 'owner/repo'."
 		}
 		owner, repoName, err := b.github.ParseRepoSlug(args.Repo)
 		if err != nil {
@@ -2410,7 +2517,7 @@ func (b *Bot) executeToolCall(
 
 	case "github_edit_file":
 		if !isOwner {
-			return "Declined: Code changes and opening PRs are reserved for my creators (@skipp_dev)."
+			return "Declined: Code changes and opening PRs are reserved for my creators."
 		}
 
 		var args struct {
@@ -2514,7 +2621,7 @@ func (b *Bot) executeToolCall(
 			}
 
 			commitOpts := github.CommitOptions{
-				Message:     fmt.Sprintf("Initialize %s via Shipp", filePath),
+				Message:     fmt.Sprintf("Initialize %s via Jasmine", filePath),
 				Content:     newContent,
 				CustomPAT:   args.CustomPAT,
 				AuthorName:  args.GitName,
@@ -2535,7 +2642,7 @@ func (b *Bot) executeToolCall(
 			}
 
 			// Non-empty repo and PushToMain is false: create branch & PR
-			branchName := fmt.Sprintf("shipp/create-%s-%d", strings.ToLower(filepath.Base(filePath)), time.Now().Unix())
+			branchName := fmt.Sprintf("jasmine/create-%s-%d", strings.ToLower(filepath.Base(filePath)), time.Now().Unix())
 			if err := b.github.CreateBranchWithToken(ctx, owner, repoName, branchName, defaultBranch, args.CustomPAT); err != nil {
 				return fmt.Sprintf("Failed to create branch '%s': %v", branchName, err)
 			}
@@ -2548,7 +2655,7 @@ func (b *Bot) executeToolCall(
 				ctx,
 				owner,
 				repoName,
-				fmt.Sprintf("Shipp: Create %s", filePath),
+				fmt.Sprintf("Jasmine: Create %s", filePath),
 				fmt.Sprintf("Automated file creation requested by @%s:\n\n> %s", username, args.Instruction),
 				branchName,
 				defaultBranch,
@@ -2580,7 +2687,7 @@ func (b *Bot) executeToolCall(
 
 		// 5. Commit & Push (Direct to main or Open PR)
 		commitOpts := github.CommitOptions{
-			Message:     fmt.Sprintf("Update %s via Shipp", filePath),
+			Message:     fmt.Sprintf("Update %s via Jasmine", filePath),
 			Content:     refactored,
 			FileSHA:     fc.SHA,
 			CustomPAT:   args.CustomPAT,
@@ -2598,7 +2705,7 @@ func (b *Bot) executeToolCall(
 		}
 
 		// Safe PR-first default
-		branchName := fmt.Sprintf("shipp/update-%s-%d", strings.ToLower(filepath.Base(filePath)), time.Now().Unix())
+		branchName := fmt.Sprintf("jasmine/update-%s-%d", strings.ToLower(filepath.Base(filePath)), time.Now().Unix())
 		if err := b.github.CreateBranchWithToken(ctx, owner, repoName, branchName, defaultBranch, args.CustomPAT); err != nil {
 			return fmt.Sprintf("Failed to create branch '%s': %v", branchName, err)
 		}
@@ -2613,7 +2720,7 @@ func (b *Bot) executeToolCall(
 			ctx,
 			owner,
 			repoName,
-			fmt.Sprintf("Shipp: Update %s", filePath),
+			fmt.Sprintf("Jasmine: Update %s", filePath),
 			fmt.Sprintf("Automated update requested by @%s:\n\n> %s", username, args.Instruction),
 			branchName,
 			defaultBranch,
@@ -2627,7 +2734,7 @@ func (b *Bot) executeToolCall(
 
 	case "github_merge_pr":
 		if !isOwner {
-			return "Declined: Merging PRs is reserved for my creators (@skipp_dev)."
+			return "Declined: Merging PRs is reserved for my creators."
 		}
 
 		var args struct {
@@ -2664,7 +2771,7 @@ func (b *Bot) executeToolCall(
 
 	case "github_close_pr":
 		if !isOwner {
-			return "Declined: Closing PRs is reserved for my creators (@skipp_dev)."
+			return "Declined: Closing PRs is reserved for my creators."
 		}
 
 		var args struct {
@@ -2701,7 +2808,7 @@ func (b *Bot) executeToolCall(
 
 	case "github_close_issue":
 		if !isOwner {
-			return "Declined: Closing issues is reserved for my creators (@skipp_dev)."
+			return "Declined: Closing issues is reserved for my creators."
 		}
 
 		var args struct {
@@ -2739,7 +2846,7 @@ func (b *Bot) executeToolCall(
 
 	case "github_create_repo":
 		if !isOwner {
-			return "Declined: Creating repositories is reserved for my creators (@skipp_dev)."
+			return "Declined: Creating repositories is reserved for my creators."
 		}
 		if b.github == nil {
 			return "GitHub service is not initialized (GITHUB_PAT missing)."
@@ -2782,7 +2889,7 @@ func (b *Bot) executeToolCall(
 
 	case "send_email":
 		if !isOwner {
-			return "Declined: Outbound email is reserved for my creators (@skipp_dev)."
+			return "Declined: Outbound email is reserved for my creators."
 		}
 
 		var args struct {
@@ -2806,7 +2913,7 @@ func (b *Bot) executeToolCall(
 
 	case "run_sandbox_task":
 		if !isOwner {
-			return "Declined: Ephemeral sandbox compute is reserved for my creators (@skipp_dev)."
+			return "Declined: Ephemeral sandbox compute is reserved for my creators."
 		}
 		if b.sandbox == nil {
 			return "Sandbox runner is not configured (GITHUB_PAT missing)."
@@ -3119,7 +3226,7 @@ func (b *Bot) executeToolCall(
 			return fmt.Sprintf("cant dm @%s directly yet because telegram restricts bots from cold-dm'ing users until they message the bot first. tell @%s to send /start to @%s.", targetUser, targetUser, b.api.Self.UserName)
 		}
 
-		dmMsg := tgbotapi.NewMessage(dmChatID, fmt.Sprintf("Message from @%s via Shipp:\n\n%s", username, args.Message))
+		dmMsg := tgbotapi.NewMessage(dmChatID, fmt.Sprintf("Message from @%s via Jasmine:\n\n%s", username, args.Message))
 		if _, err := b.api.Send(dmMsg); err != nil {
 			return fmt.Sprintf("Failed to send DM to @%s: %v", targetUser, err)
 		}
@@ -3500,7 +3607,7 @@ func (b *Bot) executeCryptoSend(ctx context.Context, chain, toAddress string, am
 
 func (b *Bot) handleEmailCommand(ctx context.Context, msg *tgbotapi.Message, args []string, isOwner bool) {
 	if !isOwner {
-		b.sendReply(msg.Chat.ID, msg.MessageID, "nice try anon, outbound email is reserved for my creators (@skipp_dev).")
+		b.sendReply(msg.Chat.ID, msg.MessageID, "nice try anon, outbound email is reserved for my creators.")
 		return
 	}
 
@@ -3539,7 +3646,7 @@ func (b *Bot) handleEmailCommand(ctx context.Context, msg *tgbotapi.Message, arg
 	}
 
 	if subject == "" {
-		subject = "Message from Shipp"
+		subject = "Message from Jasmine"
 	}
 
 	b.sendChatAction(msg.Chat.ID, tgbotapi.ChatTyping)
@@ -4058,12 +4165,14 @@ func (b *Bot) formatStartMessage(username string, isOwner bool) string {
 	if isOwner {
 		roleGreeting = "Welcome"
 	}
-	return fmt.Sprintf(`%s! I'm Shipp, your personal AI companion with native crypto powers.
+	return fmt.Sprintf(`%s! I'm Jasmine, and I remember people.
 
-I'm built for both group chats and private DMs. You can talk to me completely naturally or use slash commands!
+Tell me things once and I'll still know them next week, in any chat, on any device. My long-term memory lives encrypted on Walrus, owned on-chain. Say "jasmine" or tag me (@%s) to talk.
 
 What I can do:
-• Natural Chat & Banter: Tag me (@%s) or reply to me. Powered by Groq fast inference.
+• Remember You: /memory shows what I know about you (with Walrus proof links), /remember saves something, /forget wipes it.
+• Draw: ask me to draw anything, or use /imagine.
+• Natural Chat & Banter in groups and DMs.
 • Proactive Presence: I'll chime in spontaneously to keep the chat lively.
 • Crypto Deposits: Ask "what's your address?" or use /wallet.
 • Check Balances: Ask "how much sol do you have?" or use /balance.
@@ -4079,10 +4188,13 @@ func (b *Bot) formatHelpMessage(isOwner bool) string {
 		ownerNote = "\nOwner Commands:\n• `/tokens` or `/usage` - View daily & total token consumption\n• `/bash <command>` - Ephemeral runner execution (e.g. `/bash go test ./...`)\n• `/dm @username <msg>` - Send direct message to user\n• `/send <chain> <to> <amount>` - Transfer funds (e.g. `/send base 0x123... 0.01`)\n• `/email <to> <subject> | <body>` - Dispatch email (e.g. `/email dev@example.com Hi | Hello!`)"
 	}
 
-	return "Shipp Command & NLP Reference\n\n" +
+	return "Jasmine Command & NLP Reference\n\n" +
 		"Natural Language:\n" +
 		"You don't need slashes! You can say:\n" +
-		"• \"Shipp, what's your sol address?\"\n" +
+		"• \"Jasmine, remember that my exam is on Friday\"\n" +
+		"• \"Jasmine, what do you remember about me?\"\n" +
+		"• \"Jasmine, draw a walrus in sunglasses coding\"\n" +
+		"• \"Jasmine, what's your sol address?\"\n" +
 		"• \"Check your balances across chains\"\n" +
 		"• \"Check this token CA: 0x8335...\"\n" +
 		"• \"Summarize what we discussed earlier\"\n" +
@@ -4091,6 +4203,10 @@ func (b *Bot) formatHelpMessage(isOwner bool) string {
 		"• \"Send 0.01 eth to 0x... on base\" (Owner only)\n" +
 		"• \"Email dev@example.com about the release update\" (Owner only)\n\n" +
 		"Slash Commands:\n" +
+		"• `/memory` - See what I remember about you (stored on Walrus)\n" +
+		"• `/remember <fact>` - Save something to my long-term memory\n" +
+		"• `/forget` - Wipe everything I remember about you\n" +
+		"• `/imagine <description>` - Generate an image\n" +
 		"• `/curate <topic>` or `/draft <topic>` - Curate a high-impact X/Twitter post or thread\n" +
 		"• `/ca <address>` or `/token <address>` - Analyze token metrics (MCap, Vol, LP)\n" +
 		"• `/domain <name>` or `/domains <name>` - Search Vercel domain availability & pricing\n" +
@@ -4104,7 +4220,10 @@ func (b *Bot) formatHelpMessage(isOwner bool) string {
 
 func (b *Bot) formatWalletAddressMessage() string {
 	svmAddr, evmAddr := b.crypto.GetAddresses()
-	return fmt.Sprintf("Shipp Deposit Addresses\n\n"+
+	if svmAddr == "" && evmAddr == "" {
+		return "i don't have a wallet set up yet"
+	}
+	return fmt.Sprintf("Jasmine Deposit Addresses\n\n"+
 		"Solana (SVM):\n`%s`\n\n"+
 		"EVM (Base, Robinhood, Ethereum, Arbitrum, BSC):\n`%s`\n\n"+
 		"*(Tap any address above to copy it)*", svmAddr, evmAddr)

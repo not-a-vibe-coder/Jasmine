@@ -21,6 +21,10 @@ func TestConfigOwners(t *testing.T) {
 		{"shigarakiXBT", true},
 		{"random_user", false},
 		{"", false},
+		// Display-name spoofing must not grant ownership
+		{"Skipp Air", false},
+		{"skipp_dev_fan", false},
+		{"shigaraki", false},
 	}
 
 	for _, tt := range tests {
@@ -40,5 +44,28 @@ func TestLoadConfigDefaultPort(t *testing.T) {
 	}
 	if cfg.Port != "8080" {
 		t.Errorf("expected default port 8080, got %s", cfg.Port)
+	}
+}
+
+func TestRenderExternalURLDerivesWebhookAndCallback(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "mock_token")
+	t.Setenv("WEBHOOK_URL", "")
+	t.Setenv("SANDBOX_CALLBACK_URL", "")
+	t.Setenv("RENDER_EXTERNAL_URL", "https://jasmine.onrender.com/")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WebhookURL != "https://jasmine.onrender.com/webhook" {
+		t.Errorf("webhook = %q", cfg.WebhookURL)
+	}
+	if cfg.SandboxCallbackURL != "https://jasmine.onrender.com/api/sandbox/callback" {
+		t.Errorf("callback = %q", cfg.SandboxCallbackURL)
+	}
+
+	t.Setenv("USE_POLLING", "true")
+	cfg, _ = LoadConfig()
+	if cfg.WebhookURL != "" {
+		t.Errorf("USE_POLLING should keep polling mode, got webhook %q", cfg.WebhookURL)
 	}
 }

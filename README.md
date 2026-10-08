@@ -1,87 +1,79 @@
-# Shipp 🚀
+# Jasmine
 
-A sharp, witty personal AI companion with native crypto superpowers on Solana and EVM chains.
+A Telegram companion that remembers people across conversations, across users, and across devices. Built for Walrus Session 8: Chatbots That Remember.
 
----
+Talk to her in a group by saying "jasmine" or tagging `@JasmineMemBot`, or DM her. Tell her something once and she still knows it next week, in a different chat, on a different phone.
 
-## ✨ Features
+## How memory works
 
-1. **Intelligent Conversational AI:**
-   - Powered by Groq fast inference (`qwen/qwen3.8-27b`).
-   - Witty, natural, sharp, and context-aware—talks like a real member of your group chat.
-   - Responds to mentions (`@Shipp0Bot`), replies, and direct messages.
+Jasmine's long-term memory is [Walrus Memory](https://docs.wal.app/walrus-memory/llms.txt) on **mainnet**. Each memory is embedded, Seal-encrypted and stored as a blob on Walrus, owned by an on-chain account on Sui.
 
-2. **High-Confidence NLP & Slash Commands:**
-   - **No rigid commands required!** Natural language triggers tools automatically:
-     - *"What's your sol wallet address?"* ➔ outputs deposit addresses.
-     - *"How much funds do you have left?"* ➔ checks live balances across Solana & EVM.
-     - *"Recap what we discussed earlier"* ➔ generates a concise chat summary.
-     - *"Clear context bro"* ➔ wipes recent conversation memory for a fresh start.
-     - *"Send 0.01 eth to 0x... on base"* ➔ transfers crypto (owner-only).
-   - Also supports direct high-speed slash commands:
-     - `/wallet` or `/deposit` - View deposit addresses
-     - `/balance` - Check live balances
-     - `/summarize` - Recap recent conversation
-     - `/clear` - Flush context memory
-     - `/send <chain> <to> <amount>` - Transfer funds (Owner only)
-     - `/proactive on|off` - Toggle spontaneous messages
-     - `/help` - Command reference
+Every message goes through three steps:
 
-3. **Multi-Chain Crypto Superpowers:**
-   - **Solana (SVM):** Native SOL transfers, address generation, balance checks.
-   - **EVM:** Base, Ethereum Mainnet, Arbitrum, BNB Smart Chain, Monad, Robinhood, Hyperliquid.
-   - **Security Guardrail:** Only verified owners (`@skipp_dev`, `@shigarakiXBT`) can authorize transfers.
+1. **Recall.** Before replying, Jasmine runs a semantic search over the speaker's memory (and, in groups, the group's shared memory). Relevant facts go into the system prompt. Anything past a cosine distance of 0.8 is dropped as unrelated.
+2. **Reply.** The model answers using those memories naturally, the way a friend would.
+3. **Learn.** After replying, the message goes to the relayer's `/api/analyze`, which extracts lasting facts and writes each one to Walrus. This runs in the background, so replies are never slowed down.
 
-4. **Dual Memory Architecture:**
-   - **PostgreSQL (Supabase):** Durable long-term message history and chat summaries.
-   - **Redis (Aiven):** Low-latency memory caching for recent conversational context.
-   - Automatic in-memory fallback for high availability.
+| Scope | Namespace | Gives you |
+|---|---|---|
+| Person | `tg-user-<telegram id>` | Remembers you in every group and DM, on every device |
+| Group | `tg-group-<chat id>` | Shared group context: anyone can ask about what someone else told her |
 
-5. **Proactive / Spontaneous Presence:**
-   - Periodically drops witty thoughts, check-ins, or questions into active group chats to keep the chat lively without being spammy.
+Short-term context (the last few messages) stays in Postgres/Redis. Walrus holds everything long-term.
 
-6. **Render Cloud Ready:**
-   - Includes lightweight HTTP health-check server (`/healthz`) listening on `$PORT`.
+### Native Go client
 
----
+The official SDK is TypeScript, so `internal/walmem` talks to the relayer directly. Each request is signed with the account's Ed25519 delegate key over:
 
-## 🚀 Deployment on Render
-
-**Build:**
-```bash
-go build -o bin/shipp cmd/bot/main.go
+```
+{timestamp}.{method}.{path}.{sha256(body)}.{nonce}.{account_id}
 ```
 
-**Start:**
+and sent as `x-public-key` / `x-signature` / `x-timestamp` / `x-nonce` / `x-account-id` headers. There's no Node sidecar.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `/memory` | What Jasmine remembers about you, with a walruscan.com link to each blob |
+| `/remember <fact>` | Save a fact now and get back its Walrus blob link |
+| `/forget` | Delete everything she remembers about you |
+| `/imagine <prompt>` | Generate an image (also works by asking "jasmine, draw ...") |
+
+## Models
+
+Jasmine runs on open models, with no Claude or GPT in the chat path. Requests fall through a chain so one provider's rate limit doesn't take her down:
+
+Groq (Qwen 3.8 27B, then GPT-OSS) → Cerebras → OpenRouter free models → Mistral → Hugging Face → Gemini Flash
+
+A provider is used only when its key is set. Images come from Pollinations (no key), falling back to Gemini.
+
+## Other abilities
+
+Web search and page reading, token analytics, Solana and EVM wallets (owner-only sends), GitHub actions, a private GitHub Actions sandbox for running code, document and image understanding, DMs, and spontaneous group check-ins.
+
+Owners are matched by exact Telegram `@username` only. Webhook updates must carry Telegram's secret token, and each sandbox run gets a one-time callback token.
+
+## Run it
+
 ```bash
-./bin/shipp
+cp .env.example .env            # fill in the bot token, Walrus account, and AI keys
+go run ./cmd/walmem-check roundtrip   # checks the Walrus credentials with a live write and recall
+go run ./cmd/genwallet          # optional: fresh wallets written straight to .env
+go run ./cmd/bot
 ```
 
-**Env Vars:**
-Copy from `.env.example` to Render settings:
-- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `OWNERS_USERNAME`
-- `GROQ_API_KEY`, `GROQ_MODEL`
-- `REDIS_URL`, `DATABASE_URL`
-- `SVM_WALLET_PUBLIC_KEY`, `SVM_WALLET_PRIVATE_KEY`, `SVM_RPC_URL`
-- `EVM_WALLET_PUBLIC_KEY`, `EVM_WALLET_PRIVATE_KEY`
-- `BASE_RPC_URL`, `ETHEREUM_RPC_URL`, `ARBITRUM_RPC_URL`, `BNB_RPC_URL`
+## Deploy to Render
 
----
-
-## 💡 Important Telegram Bot Setting
-
-For Shipp to read **all** messages in your group chat (and maintain full conversational context without needing to be tagged every single time):
-1. Open [@BotFather](https://t.me/BotFather) in Telegram.
-2. Send `/setprivacy`.
-3. Select `@Shipp0Bot`.
-4. Choose **Disable**.
-5. Re-add Shipp to your group chat or promote it to admin.
-
----
-
-## 🧪 Running Tests
-
-To run the complete test suite:
 ```bash
-go test -v ./...
+scripts/ship.sh https://github.com/<owner>/<repo>.git   # vet, test, commit, push
+scripts/render-env.sh                                    # copies .env for Render's "Add from .env"
+```
+
+The first time, create the service on Render: New → Blueprint, then pick the repo. `render.yaml` sets up a Docker web service with a `/healthz` check. Jasmine builds her webhook and sandbox callback URLs from `RENDER_EXTERNAL_URL`, so there are no URLs to configure. Every push to `main` redeploys.
+
+Telegram updates are only accepted with the secret token registered at startup. To run anywhere else, set `WEBHOOK_URL=https://<host>/webhook`, or leave it empty to use long polling.
+
+```bash
+go test ./...
 ```

@@ -1,0 +1,52 @@
+# Render Blueprint for Jasmine.
+# Render dashboard -> New -> Blueprint -> pick this repo. Secrets marked `sync: false`
+# are asked for once at creation (or paste .env via "Add from .env").
+services:
+  - type: web
+    name: jasmine
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Free instances sleep after 15 min idle; a Telegram webhook wakes them, but spontaneous
+    # group messages pause while asleep. Use "starter" to keep Jasmine always on.
+    plan: free
+    region: frankfurt
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # WEBHOOK_URL and SANDBOX_CALLBACK_URL are derived from RENDER_EXTERNAL_URL automatically.
+      - key: OWNERS_USERNAME
+        value: "@jackdotsol_"
+      - key: TELEGRAM_BOT_USERNAME
+        value: "@JasmineMemBot"
+      - key: GROQ_MODEL
+        value: qwen/qwen3.8-27b
+      - key: MEMWAL_SERVER_URL
+        value: https://relayer.memory.walrus.xyz
+      - key: GITHUB_USERNAME
+        value: thejasminebot
+      - key: SANDBOX_REPO
+        value: thejasminebot/sand-box
+      - key: SANDBOX_PRIVATE_REPO
+        value: thejasminebot/sand-box
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: MEMWAL_ACCOUNT_ID
+        sync: false
+      - key: MEMWAL_DELEGATE_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GITHUB_PAT
+        sync: false
+      - key: SVM_WALLET_PRIVATE_KEY
+        sync: false
+      - key: EVM_WALLET_PRIVATE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false

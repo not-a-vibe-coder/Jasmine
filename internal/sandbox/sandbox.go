@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -25,6 +26,9 @@ type Task struct {
 	Prompt       string
 	Repo         string
 	IsPrivate    bool
+	// Token authenticates this task's callback. It is unique per task and dies with it,
+	// since workflow_dispatch inputs are readable by anyone on a public repo.
+	Token        string
 	StartTime    time.Time
 	Done         chan struct{}
 }
@@ -116,15 +120,10 @@ func NewService(githubPAT, defaultRepo, callbackURL string) *Service {
 	_, _ = rand.Read(secretBytes)
 	secret := hex.EncodeToString(secretBytes)
 
+	// No defaults: Jasmine must use her own repos and callback (SANDBOX_REPO, SANDBOX_CALLBACK_URL).
+	// With no private repo, commands that carry secrets are refused instead of running publicly.
 	publicRepo := defaultRepo
-	if publicRepo == "" {
-		publicRepo = "ShippZero/sandbox"
-	}
-	privateRepo := "ShippZero/sandbox-private"
-
-	if callbackURL == "" {
-		callbackURL = "https://bot.davidnzube.xyz/api/sandbox/callback"
-	}
+	privateRepo := ""
 
 	return &Service{
 		githubPAT:   githubPAT,
@@ -163,10 +162,10 @@ func (s *Service) SetRepos(publicRepo, privateRepo string) {
 // ResolveRepo decides whether to target publicRepo or privateRepo based on explicit repo argument or code sensitivity
 func (s *Service) ResolveRepo(repo, command, prompt string) (string, bool) {
 	cleaned := strings.ToLower(strings.TrimSpace(repo))
-	if cleaned == "private" || cleaned == "sandbox-private" || cleaned == "shippzero/sandbox-private" {
+	if cleaned == "private" || cleaned == "sandbox-private" {
 		return s.GetPrivateRepo(), true
 	}
-	if cleaned == "public" || cleaned == "sandbox" || cleaned == "shippzero/sandbox" {
+	if cleaned == "public" || cleaned == "sandbox" {
 		return s.GetPublicRepo(), false
 	}
 	if cleaned != "" {
@@ -213,6 +212,17 @@ func (s *Service) DispatchWithPrompt(ctx context.Context, chatID int64, threadID
 	}
 
 	targetRepo, isPrivate := s.ResolveRepo(repo, command, prompt)
+	if targetRepo == "" {
+		if isPrivate {
+			return "", fmt.Errorf("this command touches secrets and no private sandbox repo is configured (SANDBOX_PRIVATE_REPO); refusing to run it in the public sandbox")
+		}
+		return "", fmt.Errorf("no sandbox repo configured (SANDBOX_REPO)")
+	}
+	if s.callbackURL == "" {
+		return "", fmt.Errorf("no sandbox callback URL configured (SANDBOX_CALLBACK_URL or WEBHOOK_URL)")
+	}
+	tokenBytes := make([]byte, 16)
+	_, _ = rand.Read(tokenBytes)
 
 	taskIDBytes := make([]byte, 8)
 	_, _ = rand.Read(taskIDBytes)
@@ -231,6 +241,7 @@ func (s *Service) DispatchWithPrompt(ctx context.Context, chatID int64, threadID
 		Prompt:       prompt,
 		Repo:         targetRepo,
 		IsPrivate:    isPrivate,
+		Token:        hex.EncodeToString(tokenBytes),
 		StartTime:    time.Now(),
 		Done:         make(chan struct{}),
 	}
@@ -250,7 +261,7 @@ func (s *Service) DispatchWithPrompt(ctx context.Context, chatID int64, threadID
 			"chat_id":      fmt.Sprintf("%d", chatID),
 			"command":      command,
 			"callback_url": s.callbackURL,
-			"auth_token":   s.secretToken,
+			"auth_token":   task.Token,
 		},
 	}
 
@@ -305,12 +316,12 @@ func (s *Service) DispatchWithPrompt(ctx context.Context, chatID int64, threadID
 
 // HandleCallback processes the HTTP callback payload from the GitHub Actions runner
 func (s *Service) HandleCallback(authToken string, payload CallbackPayload) error {
-	if authToken != s.secretToken {
-		return fmt.Errorf("unauthorized callback secret")
-	}
-
 	s.mu.Lock()
 	task, exists := s.tasks[payload.TaskID]
+	if exists && task.Token != "" && subtle.ConstantTimeCompare([]byte(authToken), []byte(task.Token)) != 1 {
+		s.mu.Unlock()
+		return fmt.Errorf("unauthorized callback secret")
+	}
 	if exists {
 		delete(s.tasks, payload.TaskID)
 	}
@@ -320,6 +331,8 @@ func (s *Service) HandleCallback(authToken string, payload CallbackPayload) erro
 		log.Printf("[Sandbox] Received callback for unknown or expired task: %s", payload.TaskID)
 		return nil
 	}
+	// The runner reports chat_id too, but only the one recorded at dispatch is trusted.
+	payload.ChatID = task.ChatID
 
 	close(task.Done)
 

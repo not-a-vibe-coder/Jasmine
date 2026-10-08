@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"shipp/internal/domain"
 	"shipp/internal/email"
 	"shipp/internal/github"
+	"shipp/internal/imagegen"
 	"shipp/internal/memory"
 	"shipp/internal/moltbook"
 	"shipp/internal/price"
@@ -23,12 +25,13 @@ import (
 	"shipp/internal/server"
 	"shipp/internal/token"
 	"shipp/internal/vision"
+	"shipp/internal/walmem"
 	"shipp/internal/xhandle"
 )
 
 func main() {
 	log.Printf("-----------------------------------------")
-	log.Printf("🚀 Starting Shipp Telegram Bot")
+	log.Printf("🚀 Starting Jasmine Telegram Bot")
 	log.Printf("-----------------------------------------")
 
 	// 1. Load Config
@@ -67,7 +70,16 @@ func main() {
 
 	// 4. Initialize AI Client & Search Service
 	aiClient := ai.NewClient(cfg.GroqAPIKey, cfg.GroqModel, cfg.GeminiAPIKey, cfg.Owners)
-	log.Printf("[Main] AI Client initialized with Groq model: %s (Gemini Flash fallback active)", cfg.GroqModel)
+	// Fallback chain after the Groq pool. Each provider is skipped when its key is empty.
+	aiClient.AddProvider(ai.Provider{Name: "cerebras", URL: "https://api.cerebras.ai/v1/chat/completions",
+		APIKey: cfg.CerebrasAPIKey, Models: modelList(cfg.CerebrasModels, "qwen-3.8-27b,gpt-oss-120b")})
+	aiClient.AddProvider(ai.Provider{Name: "openrouter", URL: "https://openrouter.ai/api/v1/chat/completions",
+		APIKey: cfg.OpenRouterAPIKey, Models: modelList(cfg.OpenRouterModels, "nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-31b-it:free,nvidia/nemotron-3.5-lightning:free")})
+	aiClient.AddProvider(ai.Provider{Name: "mistral", URL: "https://api.mistral.ai/v1/chat/completions",
+		APIKey: cfg.MistralAPIKey, Models: modelList(cfg.MistralModels, "mistral-small-latest")})
+	aiClient.AddProvider(ai.Provider{Name: "huggingface", URL: "https://router.huggingface.co/v1/chat/completions",
+		APIKey: cfg.HuggingFaceAPIKey, Models: modelList(cfg.HuggingFaceModels, "openai/gpt-oss-120b")})
+	log.Printf("[Main] AI fallback chain: %s", strings.Join(aiClient.ProviderNames(), " -> "))
 
 	searchSvc := search.NewService(cfg.TavilyAPIKey)
 	log.Printf("[Main] Web Search Service initialized (DuckDuckGo + Wikipedia active)")
@@ -92,8 +104,11 @@ func main() {
 	}
 
 	// 5. Initialize Ephemeral Sandbox Service (Blink Compute pattern)
-	sandboxSvc := sandbox.NewService(cfg.GithubPAT, "ShippZero/sandbox", "https://bot.davidnzube.xyz/api/sandbox/callback")
-	log.Printf("[Main] Sandbox Service initialized (ShippZero/sandbox ephemeral VM runner active)")
+	sandboxSvc := sandbox.NewService(cfg.GithubPAT, cfg.SandboxRepo, cfg.SandboxCallbackURL)
+	if cfg.SandboxPrivateRepo != "" {
+		sandboxSvc.SetRepos(sandboxSvc.GetPublicRepo(), cfg.SandboxPrivateRepo)
+	}
+	log.Printf("[Main] Sandbox Service initialized (public: %s, private: %s, callback: %s)", sandboxSvc.GetPublicRepo(), sandboxSvc.GetPrivateRepo(), cfg.SandboxCallbackURL)
 
 	// 6. Initialize Vercel Domain Registrar Service
 	domainSvc := domain.NewService(cfg.VercelToken)
@@ -106,7 +121,7 @@ func main() {
 	// 8. Initialize Moltbook AI Social Network Service
 	moltbookSvc := moltbook.NewClient(cfg.MoltbookAPIKey)
 	if moltbookSvc.IsConfigured() {
-		log.Printf("[Main] Moltbook Service initialized (@shipp AI agent active)")
+		log.Printf("[Main] Moltbook Service initialized")
 	} else {
 		log.Printf("[Main] Moltbook Service not configured (MOLTBOOK_API_KEY missing)")
 	}
@@ -116,6 +131,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("[Main] Failed to initialize Telegram Bot: %v", err)
 	}
+
+	// 10. Walrus Memory: long-term, encrypted, user-owned memory on Walrus mainnet
+	walmemClient, err := walmem.NewClient(cfg.MemwalServerURL, cfg.MemwalAccountID, cfg.MemwalDelegateKey)
+	if err != nil {
+		log.Fatalf("[Main] Walrus Memory config error: %v", err)
+	}
+	if walmemClient != nil {
+		tgBot.SetWalrusMemory(walmemClient)
+		log.Printf("[Main] Walrus Memory active (account %s)", cfg.MemwalAccountID)
+	} else {
+		log.Printf("[Main] Walrus Memory not configured (MEMWAL_ACCOUNT_ID / MEMWAL_DELEGATE_KEY missing)")
+	}
+
+	// 11. Image generation: Pollinations (no key needed) with Gemini fallback
+	tgBot.SetImageGen(imagegen.NewService(cfg.PollinationsAPIKey, cfg.GeminiAPIKey, cfg.GeminiImageModel))
 
 	// 7. Initialize & Start HTTP Server for Render Healthchecks & Webhooks
 	httpServer := server.NewServer(cfg.Port, memStore.GetDB(), memStore.GetRedis())
@@ -150,5 +180,20 @@ func main() {
 	defer shutdownCancel()
 	_ = httpServer.Stop(shutdownCtx)
 
-	log.Printf("[Main] Shipp Bot gracefully stopped. Goodbye!")
+	log.Printf("[Main] Jasmine gracefully stopped. Goodbye!")
+}
+
+// modelList parses a comma-separated model override, falling back to defaults.
+func modelList(override, defaults string) []string {
+	raw := override
+	if strings.TrimSpace(raw) == "" {
+		raw = defaults
+	}
+	var out []string
+	for _, m := range strings.Split(raw, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
 }

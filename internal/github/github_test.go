@@ -199,8 +199,8 @@ func TestGitHubMockEndpoints(t *testing.T) {
 		t.Fatalf("CommitFileWithOptions failed: %v", err)
 	}
 	authorMap, ok := receivedCommitPayload["author"].(map[string]interface{})
-	if !ok || authorMap["name"] != "Shipp" || authorMap["email"] != "shipp@bot.internal" {
-		t.Errorf("expected author to be name=Shipp email=shipp@bot.internal, got: %v", authorMap)
+	if !ok || authorMap["name"] != "davidnzube101" || authorMap["email"] != "shipp@bot.internal" {
+		t.Errorf("expected author to default to the configured account, got: %v", authorMap)
 	}
 
 	// 3. Test CommitFileWithOptions with Custom Credentials

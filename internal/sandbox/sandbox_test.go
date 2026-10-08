@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"strings"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -79,6 +80,7 @@ func TestIsSensitiveCommand(t *testing.T) {
 
 func TestResolveRepo(t *testing.T) {
 	svc := NewService("mock_pat", "ShippZero/sandbox", "http://localhost/callback")
+	svc.SetRepos("", "ShippZero/sandbox-private")
 
 	cases := []struct {
 		name     string
@@ -172,6 +174,7 @@ func TestSandboxCallbackAndWatchdog(t *testing.T) {
 		ID:        taskID,
 		ChatID:    12345,
 		Command:   "go test ./...",
+		Token:     "task-secret",
 		StartTime: time.Now(),
 		Done:      make(chan struct{}),
 	}
@@ -188,7 +191,10 @@ func TestSandboxCallbackAndWatchdog(t *testing.T) {
 		Output:          "PASS: all tests green",
 	}
 
-	err := svc.HandleCallback(svc.GetSecretToken(), payload)
+	if err := svc.HandleCallback("wrong-token", payload); err == nil {
+		t.Fatal("expected a forged callback token to be rejected")
+	}
+	err := svc.HandleCallback("task-secret", payload)
 	if err != nil {
 		t.Fatalf("unexpected callback error: %v", err)
 	}
@@ -200,5 +206,13 @@ func TestSandboxCallbackAndWatchdog(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("callback was not delivered in time")
+	}
+}
+
+func TestSecretCommandsRefusedWithoutPrivateRepo(t *testing.T) {
+	svc := NewService("mock_pat", "owner/public-sandbox", "http://localhost/callback")
+	_, err := svc.DispatchWithPrompt(t.Context(), 1, 0, 0, "echo $PRIVATE_KEY", "", "")
+	if err == nil || !strings.Contains(err.Error(), "private sandbox") {
+		t.Fatalf("expected refusal for secret command with no private repo, got %v", err)
 	}
 }
