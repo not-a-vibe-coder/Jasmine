@@ -40,6 +40,18 @@ type ChatCompletionRequest struct {
 	MaxTokens        int              `json:"max_tokens,omitempty"`
 	FrequencyPenalty float64          `json:"frequency_penalty,omitempty"`
 	PresencePenalty  float64          `json:"presence_penalty,omitempty"`
+
+	// Provider-specific reasoning controls, set per attempt by sendChatCompletion so
+	// chain-of-thought never lands in the reply text.
+	ReasoningFormat  string           `json:"reasoning_format,omitempty"`  // Groq Qwen: "hidden"
+	IncludeReasoning *bool            `json:"include_reasoning,omitempty"` // Groq GPT-OSS: false
+	ReasoningEffort  string           `json:"reasoning_effort,omitempty"`  // Groq: "low"
+	Reasoning        *ReasoningConfig `json:"reasoning,omitempty"`         // OpenRouter
+}
+
+type ReasoningConfig struct {
+	Effort  string `json:"effort,omitempty"`
+	Exclude bool   `json:"exclude"`
 }
 
 type UsageInfo struct {

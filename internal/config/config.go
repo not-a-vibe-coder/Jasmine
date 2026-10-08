@@ -3,14 +3,16 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	// Owners
-	Owners []string
+	// Owners: @usernames, plus numeric Telegram user IDs which survive username changes
+	Owners   []string
+	OwnerIDs []int64
 
 	// Telegram
 	TelegramBotToken    string
@@ -69,6 +71,7 @@ type Config struct {
 
 	// Image generation
 	PollinationsAPIKey string
+	PollinationsModels string
 	GeminiImageModel   string
 
 	// Walrus Memory
@@ -130,6 +133,7 @@ func LoadConfig() (*Config, error) {
 		HuggingFaceAPIKey:   os.Getenv("HF_TOKEN"),
 		HuggingFaceModels:   os.Getenv("HF_MODELS"),
 		PollinationsAPIKey:  os.Getenv("POLLINATIONS_API_KEY"),
+		PollinationsModels:  os.Getenv("POLLINATIONS_MODELS"),
 		GeminiImageModel:    os.Getenv("GEMINI_IMAGE_MODEL"),
 		MemwalServerURL:     os.Getenv("MEMWAL_SERVER_URL"),
 		MemwalAccountID:     os.Getenv("MEMWAL_ACCOUNT_ID"),
@@ -182,11 +186,28 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 
+	for _, raw := range strings.Split(os.Getenv("OWNER_IDS"), ",") {
+		if id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil && id != 0 {
+			cfg.OwnerIDs = append(cfg.OwnerIDs, id)
+		}
+	}
+
 	if cfg.TelegramBotToken == "" {
 		return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
 	}
 
 	return cfg, nil
+}
+
+// IsOwnerID checks a numeric Telegram user ID against OWNER_IDS. IDs never change,
+// so this is the preferred way to identify owners.
+func (c *Config) IsOwnerID(id int64) bool {
+	for _, o := range c.OwnerIDs {
+		if id != 0 && id == o {
+			return true
+		}
+	}
+	return false
 }
 
 // IsOwner checks whether a Telegram @username exactly matches one of the bot owners.

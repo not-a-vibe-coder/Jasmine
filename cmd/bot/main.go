@@ -145,7 +145,13 @@ func main() {
 	}
 
 	// 11. Image generation: Pollinations (no key needed) with Gemini fallback
-	tgBot.SetImageGen(imagegen.NewService(cfg.PollinationsAPIKey, cfg.GeminiAPIKey, cfg.GeminiImageModel))
+	imageModels := modelList(cfg.PollinationsModels, strings.Join(imagegen.DefaultPollinationsModels, ","))
+	tgBot.SetImageGen(imagegen.NewService(cfg.PollinationsAPIKey, cfg.GeminiAPIKey, cfg.GeminiImageModel, imageModels...))
+	if cfg.PollinationsAPIKey != "" {
+		log.Printf("[Main] Image generation: Pollinations %s", strings.Join(imageModels, " -> "))
+	} else {
+		log.Printf("[Main] Image generation: keyless Pollinations only (set POLLINATIONS_API_KEY for better models)")
+	}
 
 	// 7. Initialize & Start HTTP Server for Render Healthchecks & Webhooks
 	httpServer := server.NewServer(cfg.Port, memStore.GetDB(), memStore.GetRedis())

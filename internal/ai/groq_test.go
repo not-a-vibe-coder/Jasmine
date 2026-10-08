@@ -469,3 +469,43 @@ Content here.`
 
 
 
+
+func TestStripReasoning(t *testing.T) {
+	cases := []struct {
+		name, in, finish, want string
+		leaked                 bool
+	}{
+		{"plain reply untouched", "haha fair, see you friday", "stop", "haha fair, see you friday", false},
+		{"tagged block removed", "<think>user wants a joke</think>\nwhy did the walrus...", "stop", "why did the walrus...", true},
+		{"template-opened think", "user wants a joke so\n</think>\n\nhere you go", "stop", "here you go", true},
+		{"unclosed think discarded", "<think>The user is asking me to reply to", "length", "", true},
+		{"untagged thinking cut off", "The user is asking me to reply to the previous context. Looking at the conversation flow", "length", "", true},
+		{"normal reply starting with wait is kept", "wait, you're coming tomorrow?", "stop", "wait, you're coming tomorrow?", false},
+	}
+	for _, tc := range cases {
+		got, leaked := StripReasoning(tc.in, tc.finish)
+		if got != tc.want || leaked != tc.leaked {
+			t.Errorf("%s: got (%q, %v), want (%q, %v)", tc.name, got, leaked, tc.want, tc.leaked)
+		}
+	}
+}
+
+func TestApplyReasoningControls(t *testing.T) {
+	var r ChatCompletionRequest
+	applyReasoningControls(&r, chatAttempt{provider: "groq", model: "qwen/qwen3.8-27b"})
+	if r.ReasoningFormat != "hidden" || r.ReasoningEffort != "none" || r.IncludeReasoning != nil {
+		t.Errorf("qwen controls wrong: %+v", r)
+	}
+	applyReasoningControls(&r, chatAttempt{provider: "groq", model: "openai/gpt-oss-120b"})
+	if r.ReasoningFormat != "" || r.IncludeReasoning == nil || *r.IncludeReasoning || r.ReasoningEffort != "low" {
+		t.Errorf("gpt-oss controls wrong: %+v", r)
+	}
+	applyReasoningControls(&r, chatAttempt{provider: "openrouter", model: "x"})
+	if r.Reasoning == nil || !r.Reasoning.Exclude || r.IncludeReasoning != nil || r.ReasoningFormat != "" {
+		t.Errorf("openrouter controls wrong: %+v", r)
+	}
+	applyReasoningControls(&r, chatAttempt{provider: "mistral", model: "mistral-small-latest"})
+	if r.Reasoning != nil || r.ReasoningEffort != "" {
+		t.Errorf("mistral should get no reasoning params: %+v", r)
+	}
+}

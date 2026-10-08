@@ -39,6 +39,7 @@ and sent as `x-public-key` / `x-signature` / `x-timestamp` / `x-nonce` / `x-acco
 | `/remember <fact>` | Save a fact now and get back its Walrus blob link |
 | `/forget` | Delete everything she remembers about you |
 | `/imagine <prompt>` | Generate an image (also works by asking "jasmine, draw ...") |
+| `/whoami` | Your Telegram ID and whether you're an owner |
 
 ## Models
 
@@ -46,13 +47,13 @@ Jasmine runs on open models, with no Claude or GPT in the chat path. Requests fa
 
 Groq (Qwen 3.8 27B, then GPT-OSS) → Cerebras → OpenRouter free models → Mistral → Hugging Face → Gemini Flash
 
-A provider is used only when its key is set. Images come from Pollinations (no key), falling back to Gemini.
+A provider is used only when its key is set. Images come from Pollinations (Z-Image Turbo, then FLUX models, with a free key), falling back to Gemini, then to Pollinations' keyless model. Reasoning is hidden per provider, and any reply that is the model thinking out loud is discarded and retried on the next model.
 
 ## Other abilities
 
 Web search and page reading, token analytics, Solana and EVM wallets (owner-only sends), GitHub actions, a private GitHub Actions sandbox for running code, document and image understanding, DMs, and spontaneous group check-ins.
 
-Owners are matched by exact Telegram `@username` only. Webhook updates must carry Telegram's secret token, and each sandbox run gets a one-time callback token.
+Owners are matched by permanent Telegram user ID (`OWNER_IDS`) or exact `@username`, never by display name. Webhook updates must carry Telegram's secret token, and each sandbox run gets a one-time callback token.
 
 ## Run it
 

@@ -27,6 +27,7 @@ func TestPollinationsFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// No key: the keyed models are skipped and the legacy keyless endpoint is used.
 	if img.Provider != "pollinations" || img.MIMEType != "image/jpeg" || len(img.Data) != 3 {
 		t.Fatalf("unexpected image: %+v", img)
 	}
@@ -71,5 +72,33 @@ func TestNoFallbackWithoutKey(t *testing.T) {
 	}
 	if _, err := s.Generate(t.Context(), "  "); err == nil {
 		t.Fatal("expected error for empty prompt")
+	}
+}
+
+func TestModelChainAndKey(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		model := r.URL.Query().Get("model")
+		seen = append(seen, model+"|"+r.Header.Get("Authorization"))
+		if model == "first" {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("IMG"))
+	}))
+	defer srv.Close()
+
+	s := NewService("pk_test", "", "", "first", "second")
+	s.SetBaseURLs(srv.URL+"/image/", "")
+	img, err := s.Generate(t.Context(), "a fox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Provider != "pollinations/second" {
+		t.Fatalf("expected fallback to second model, got %s", img.Provider)
+	}
+	if len(seen) != 2 || seen[0] != "first|Bearer pk_test" || seen[1] != "second|Bearer pk_test" {
+		t.Fatalf("unexpected requests: %v", seen)
 	}
 }

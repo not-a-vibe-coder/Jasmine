@@ -894,8 +894,9 @@ func (b *Bot) isSenderOwner(from *tgbotapi.User) bool {
 	if from == nil {
 		return false
 	}
-	// Only the @username identifies an owner; first/last names are user-editable.
-	return b.cfg.IsOwner(from.UserName)
+	// The numeric ID is permanent; the @username is a convenience. First/last names are
+	// user-editable and never trusted.
+	return b.cfg.IsOwnerID(from.ID) || b.cfg.IsOwner(from.UserName)
 }
 
 func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner bool) {
@@ -919,6 +920,17 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, isOwner 
 
 	case "/help":
 		b.sendReply(msg.Chat.ID, msg.MessageID, b.formatHelpMessage(isOwner))
+
+	case "/whoami", "/id":
+		uname := "(no username set)"
+		if msg.From.UserName != "" {
+			uname = "@" + msg.From.UserName
+		}
+		role := "not an owner"
+		if isOwner {
+			role = "owner"
+		}
+		b.sendReply(msg.Chat.ID, msg.MessageID, fmt.Sprintf("you're %s\ntelegram id: `%d`\nrole: %s\n\nto make an account an owner permanently, add its id to OWNER_IDS", uname, msg.From.ID, role))
 
 	case "/memory", "/memories":
 		b.handleMemoryCommand(ctx, msg)
@@ -2023,7 +2035,7 @@ func (b *Bot) tryInterceptSendCrypto(
 				prefix = cand + ". "
 			}
 		}
-		return true, prefix + "i hold my own keys and i'm not moving my bags for you anon, runway is tight"
+		return true, prefix + "i hold my own keys and the treasury is on a strict diet, so that's a no from me"
 	}
 
 	// 2. Owner request: check for recipient wallet address
@@ -2346,7 +2358,7 @@ func (b *Bot) executeToolCall(
 		}
 
 		if !isOwner {
-			return "Declined: I hold my own keys and decide where my bags go. I'm not moving funds for anons."
+			return "Declined: only my owner can move my funds. Say no warmly, in your own words, using their name."
 		}
 
 		return b.executeCryptoSend(ctx, args.Chain, args.Recipient, args.Amount)
@@ -3561,7 +3573,7 @@ func (b *Bot) executeToolCall(
 
 func (b *Bot) handleSendCommand(ctx context.Context, msg *tgbotapi.Message, args []string, isOwner bool) {
 	if !isOwner {
-		b.sendReply(msg.Chat.ID, msg.MessageID, "nice try anon, i hold my own keys and i'm not moving my bags for you.")
+		b.sendReply(msg.Chat.ID, msg.MessageID, "nice try, but only my owner can move my funds")
 		return
 	}
 
@@ -3607,7 +3619,7 @@ func (b *Bot) executeCryptoSend(ctx context.Context, chain, toAddress string, am
 
 func (b *Bot) handleEmailCommand(ctx context.Context, msg *tgbotapi.Message, args []string, isOwner bool) {
 	if !isOwner {
-		b.sendReply(msg.Chat.ID, msg.MessageID, "nice try anon, outbound email is reserved for my creators.")
+		b.sendReply(msg.Chat.ID, msg.MessageID, "nice try, but sending email is reserved for my creators")
 		return
 	}
 
@@ -5170,7 +5182,7 @@ var dynamicChatFallbacks = []string{
 	"whoops, mind blipped for a sec. what's that again?",
 	"glitched out for a second, say that one more time?",
 	"lag spiked on my end, run that by me again?",
-	"lost my train of thought for a sec, hit me again anon",
+	"lost my train of thought for a sec, say that again?",
 	"stuttered for a second there, what'd you say?",
 }
 

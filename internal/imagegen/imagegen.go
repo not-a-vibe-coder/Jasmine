@@ -17,10 +17,19 @@ import (
 )
 
 const (
-	DefaultPollinationsURL = "https://image.pollinations.ai/prompt/"
-	DefaultGeminiModel     = "gemini-2.5-flash-image"
-	maxImageBytes          = 15 << 20
+	// gen.pollinations.ai serves current models; the legacy keyless host only serves a small model.
+	DefaultPollinationsURL       = "https://gen.pollinations.ai/image/"
+	DefaultLegacyPollinationsURL = "https://image.pollinations.ai/prompt/"
+	DefaultGeminiModel           = "gemini-2.5-flash-image"
+	maxImageBytes                = 15 << 20
 )
+
+// DefaultPollinationsModels are free (non paid-only, flat-rate) models, best first.
+var DefaultPollinationsModels = []string{
+	"tongyi-mai/z-image-turbo",
+	"black-forest-labs/flux.2-klein-4b",
+	"black-forest-labs/flux.1-schnell",
+}
 
 type Image struct {
 	Data     []byte
@@ -29,21 +38,28 @@ type Image struct {
 }
 
 type Service struct {
-	pollinationsURL string
-	pollinationsKey string
+	pollinationsURL    string
+	legacyURL          string
+	pollinationsKey    string
+	pollinationsModels []string
 	geminiKey       string
 	geminiModel     string
 	geminiBaseURL   string
 	httpClient      *http.Client
 }
 
-func NewService(pollinationsKey, geminiKey, geminiModel string) *Service {
+func NewService(pollinationsKey, geminiKey, geminiModel string, pollinationsModels ...string) *Service {
 	if geminiModel == "" {
 		geminiModel = DefaultGeminiModel
 	}
+	if len(pollinationsModels) == 0 {
+		pollinationsModels = DefaultPollinationsModels
+	}
 	return &Service{
-		pollinationsURL: DefaultPollinationsURL,
-		pollinationsKey: pollinationsKey,
+		pollinationsURL:    DefaultPollinationsURL,
+		legacyURL:          DefaultLegacyPollinationsURL,
+		pollinationsKey:    pollinationsKey,
+		pollinationsModels: pollinationsModels,
 		geminiKey:       geminiKey,
 		geminiModel:     geminiModel,
 		geminiBaseURL:   "https://generativelanguage.googleapis.com/v1beta/models/",
@@ -54,6 +70,7 @@ func NewService(pollinationsKey, geminiKey, geminiModel string) *Service {
 // SetBaseURLs points the service at test servers.
 func (s *Service) SetBaseURLs(pollinations, gemini string) {
 	s.pollinationsURL = pollinations
+	s.legacyURL = pollinations
 	s.geminiBaseURL = gemini
 }
 
@@ -63,34 +80,54 @@ func (s *Service) Generate(ctx context.Context, prompt string) (*Image, error) {
 	if prompt == "" {
 		return nil, fmt.Errorf("empty image prompt")
 	}
-	img, err := s.pollinations(ctx, prompt)
+	var errs []string
+	// 1. Pollinations' current models, best first. These require a (free) Pollinations key.
+	for _, model := range s.pollinationsModels {
+		if s.pollinationsKey == "" {
+			break
+		}
+		img, err := s.pollinations(ctx, s.pollinationsURL, model, prompt, true)
+		if err == nil {
+			return img, nil
+		}
+		errs = append(errs, fmt.Sprintf("%s: %v", model, err))
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("image generation timed out: %s", strings.Join(errs, "; "))
+		}
+	}
+	// 2. Gemini (needs a key with image quota, i.e. billing enabled).
+	if s.geminiKey != "" {
+		img, err := s.gemini(ctx, prompt)
+		if err == nil {
+			return img, nil
+		}
+		errs = append(errs, "gemini: "+err.Error())
+	}
+	// 3. Legacy keyless endpoint as a last resort.
+	img, err := s.pollinations(ctx, s.legacyURL, "", prompt, false)
 	if err == nil {
 		return img, nil
 	}
-	if s.geminiKey == "" {
-		return nil, err
-	}
-	gImg, gErr := s.gemini(ctx, prompt)
-	if gErr != nil {
-		return nil, fmt.Errorf("pollinations: %v; gemini: %w", err, gErr)
-	}
-	return gImg, nil
+	errs = append(errs, "legacy: "+err.Error())
+	return nil, fmt.Errorf("all image providers failed: %s", strings.Join(errs, "; "))
 }
 
-func (s *Service) pollinations(ctx context.Context, prompt string) (*Image, error) {
+func (s *Service) pollinations(ctx context.Context, baseURL, model, prompt string, withKey bool) (*Image, error) {
 	q := url.Values{}
 	q.Set("width", "1024")
 	q.Set("height", "1024")
 	q.Set("nologo", "true")
-	q.Set("model", "flux")
+	if model != "" {
+		q.Set("model", model)
+	}
 	q.Set("seed", fmt.Sprint(rand.Intn(1_000_000)))
-	reqURL := s.pollinationsURL + url.PathEscape(prompt) + "?" + q.Encode()
+	reqURL := baseURL + url.PathEscape(prompt) + "?" + q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	if s.pollinationsKey != "" {
+	if withKey && s.pollinationsKey != "" {
 		req.Header.Set("Authorization", "Bearer "+s.pollinationsKey)
 	}
 	resp, err := s.httpClient.Do(req)
@@ -106,7 +143,11 @@ func (s *Service) pollinations(ctx context.Context, prompt string) (*Image, erro
 	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(ct, "image/") || len(data) == 0 {
 		return nil, fmt.Errorf("pollinations status %d (%s)", resp.StatusCode, ct)
 	}
-	return &Image{Data: data, MIMEType: ct, Provider: "pollinations"}, nil
+	provider := "pollinations"
+	if model != "" {
+		provider += "/" + model
+	}
+	return &Image{Data: data, MIMEType: ct, Provider: provider}, nil
 }
 
 func (s *Service) gemini(ctx context.Context, prompt string) (*Image, error) {

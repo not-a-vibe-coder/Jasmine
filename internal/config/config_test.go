@@ -69,3 +69,15 @@ func TestRenderExternalURLDerivesWebhookAndCallback(t *testing.T) {
 		t.Errorf("USE_POLLING should keep polling mode, got webhook %q", cfg.WebhookURL)
 	}
 }
+
+func TestOwnerIDs(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "mock_token")
+	t.Setenv("OWNER_IDS", " 12345, notanumber,678 ")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.IsOwnerID(12345) || !cfg.IsOwnerID(678) || cfg.IsOwnerID(999) || cfg.IsOwnerID(0) {
+		t.Errorf("owner IDs parsed wrong: %v", cfg.OwnerIDs)
+	}
+}
