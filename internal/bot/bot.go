@@ -41,6 +41,7 @@ import (
 	"shipp/internal/search"
 	"shipp/internal/token"
 	"shipp/internal/vision"
+	"shipp/internal/voice"
 	"shipp/internal/walmem"
 	"shipp/internal/xhandle"
 	"shipp/internal/xpost"
@@ -109,9 +110,11 @@ type Bot struct {
 	// Telegram sends this in X-Telegram-Bot-Api-Secret-Token on every webhook update
 	webhookSecret string
 
-	// Walrus Memory (nil when not configured) and image generation
+	// Walrus Memory (nil when not configured), image generation, voice and stickers
 	walmem   *walmem.Client
 	imagegen *imagegen.Service
+	voice    *voice.Service
+	stickers stickerCache
 }
 
 type ActiveDialog struct {
@@ -561,7 +564,13 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		b.recordGroup(msg.Chat.ID, msg.Chat.Title, msg.Chat.Type, msg.Chat.UserName)
 	}
 
-	// 0. Handle Photos
+	// 0. Voice notes and audio: transcribe, then handle like typed text
+	if msg.Voice != nil || msg.Audio != nil {
+		b.handleVoiceMessage(ctx, msg)
+		return
+	}
+
+	// 0a. Handle Photos
 	if len(msg.Photo) > 0 {
 		b.handlePhotoMessage(ctx, msg)
 		return
@@ -837,7 +846,7 @@ func (b *Bot) recordActiveDialog(chatID int64, botMessageID int, botReplyText st
 	if chatID > 0 {
 		return // Only track momentum in group/supergroup chats (chatID < 0)
 	}
-	snippet := strings.TrimSpace(stripHTMLTags(cleanNoEmojis(botReplyText)))
+	snippet := strings.TrimSpace(stripHTMLTags(cleanModelArtifacts(botReplyText)))
 	if len(snippet) > 300 {
 		snippet = snippet[:300] + "..."
 	}
@@ -1393,6 +1402,15 @@ func (b *Bot) handleNLPAndChat(
 
 	// Long-term memory: recall what Jasmine knows about this person before replying.
 	chatContext += b.recallMemories(ctx, msg, cleanPrompt)
+
+	turn := turnFromCtx(ctx)
+	if turn == nil {
+		turn = &turnState{}
+		ctx = context.WithValue(ctx, ctxKeyTurn{}, turn)
+	}
+	if turn.voiceIn {
+		chatContext += "\n- They sent you a VOICE NOTE; what you see is its transcript. Answer with 'send_voice_note' (talk the way you would out loud) unless your answer needs links, code, addresses or a list."
+	}
 	if msg.From != nil {
 		ctx = context.WithValue(ctx, ctxKeySenderID{}, msg.From.ID)
 	}
@@ -1426,6 +1444,12 @@ func (b *Bot) handleNLPAndChat(
 					}
 				}
 			}
+			text, send := finishTurn(turn, finalText)
+			if !send {
+				b.recordMediaOnlyTurn(ctx, msg, turn, username, cleanPrompt)
+				return
+			}
+			finalText = text
 			if strings.TrimSpace(finalText) == "" {
 				finalText = b.getRandomEmptyAck()
 			}
@@ -1475,6 +1499,12 @@ func (b *Bot) handleNLPAndChat(
 		}
 	}
 
+	text, send := finishTurn(turn, finalText)
+	if !send {
+		b.recordMediaOnlyTurn(ctx, msg, turn, username, cleanPrompt)
+		return
+	}
+	finalText = text
 	if finalText == "" {
 		finalText = b.getRandomEmptyAck()
 	}
@@ -2124,6 +2154,10 @@ func (b *Bot) executeToolCall(
 ) string {
 	toolName, arguments = ai.NormalizeToolCall(toolName, arguments)
 	log.Printf("[Bot] Executing NLP Tool: %s (args: %s) invoked by @%s", toolName, arguments, username)
+
+	if res, ok := b.executeExpressiveTool(ctx, chatID, toolName, arguments); ok {
+		return res
+	}
 
 	switch toolName {
 	case "generate_image":
@@ -4610,7 +4644,6 @@ func (b *Bot) maybeUpdateUserProfile(ctx context.Context, chatID int64, prompt s
 	}
 }
 
-var emojiPattern = regexp.MustCompile(`[\x{1F600}-\x{1F64F}\x{1F300}-\x{1F5FF}\x{1F680}-\x{1F6FF}\x{1F700}-\x{1F77F}\x{1F780}-\x{1F7FF}\x{1F800}-\x{1F8FF}\x{1F900}-\x{1F9FF}\x{1FA00}-\x{1FAFF}\x{2600}-\x{26FF}\x{2700}-\x{27BF}]`)
 var githubURLRegex = regexp.MustCompile(`(?i)github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)`)
 var repoSlugRegex = regexp.MustCompile(`\b([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)\b`)
 var prRegex = regexp.MustCompile(`(?i)(?:pr|pull\s*request)\s*#?(\d+)`)
@@ -4872,12 +4905,11 @@ func formatEmergencyAddressFallback(toolResult string) string {
 	return fmt.Sprintf("Solana: `%s`\nEVM: `%s`", data.SolanaAddr, data.EVMAddr)
 }
 
-func cleanNoEmojis(text string) string {
+func cleanModelArtifacts(text string) string {
 	cleaned := leakedToolCallRegex.ReplaceAllString(text, "")
 	cleaned = leakedFunctionRegex.ReplaceAllString(cleaned, "")
 	cleaned = leakedDeclarationRegex.ReplaceAllString(cleaned, "")
 	cleaned = eagerPromptRegex.ReplaceAllString(cleaned, "")
-	cleaned = emojiPattern.ReplaceAllString(cleaned, "")
 	// Replace em dashes (—) and en dashes (–) with standard hyphens
 	cleaned = strings.ReplaceAll(cleaned, "—", " - ")
 	cleaned = strings.ReplaceAll(cleaned, "–", " - ")
@@ -4914,8 +4946,26 @@ func (b *Bot) sanitizeThirdPartyMentions(text string) string {
 }
 
 func (b *Bot) cleanOutgoingText(text string) string {
-	cleaned := cleanNoEmojis(text)
+	// Last line of defence: never post a model's chain-of-thought, whatever path produced it.
+	if ai.LooksLikeLeakedReasoning(text) {
+		log.Printf("[Bot] Blocked leaked model reasoning from being sent (%d chars)", len(text))
+		text = b.getRandomEmptyAck()
+	}
+	text = strings.TrimSpace(strings.ReplaceAll(text, NoReply, ""))
+	cleaned := cleanModelArtifacts(text)
 	return b.sanitizeThirdPartyMentions(cleaned)
+}
+
+// recordMediaOnlyTurn keeps chat history and memory in sync when Jasmine answered with
+// a voice note, sticker, GIF or reaction instead of text.
+func (b *Bot) recordMediaOnlyTurn(ctx context.Context, msg *tgbotapi.Message, turn *turnState, username, cleanPrompt string) {
+	summary := turn.mediaSummary()
+	if summary == "" {
+		summary = "[no reply]"
+	}
+	_ = b.memory.SaveMessage(ctx, msg.Chat.ID, b.api.Self.ID, b.api.Self.UserName, "assistant", summary)
+	b.recordActiveDialog(msg.Chat.ID, msg.MessageID, summary, msg.From.ID, username)
+	b.learnFromMessage(msg, cleanPrompt)
 }
 
 func stripLeadingMention(text string, recipientUsername string) string {
@@ -5261,7 +5311,7 @@ func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
 	if payload.ChatID == 0 {
 		return
 	}
-	cleanOutput := strings.TrimSpace(cleanNoEmojis(payload.Output))
+	cleanOutput := strings.TrimSpace(cleanModelArtifacts(payload.Output))
 	if len(cleanOutput) > 3000 {
 		cleanOutput = cleanOutput[:3000] + "\n... (output truncated)"
 	}
@@ -5291,7 +5341,7 @@ func (b *Bot) handleSandboxCompletion(payload sandbox.CallbackPayload) {
 		aiReply, err := b.ai.SynthesizeSandboxResult(ctxAI, taskPrompt, taskCmd, payload.DurationSeconds, payload.ExitCode, cleanOutput)
 		cancel()
 
-		aiReply = strings.TrimSpace(cleanNoEmojis(aiReply))
+		aiReply = strings.TrimSpace(cleanModelArtifacts(aiReply))
 		aiReply = strings.ReplaceAll(aiReply, "```", "")
 		aiReply = strings.Trim(aiReply, "`")
 

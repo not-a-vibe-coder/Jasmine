@@ -1,5 +1,7 @@
 package ai
 
+import "encoding/json"
+
 
 type ChatMessage struct {
 	Role       string     `json:"role"`
@@ -13,6 +15,8 @@ type ToolCall struct {
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
 	Function FunctionCall `json:"function"`
+	// Gemini 3 attaches a thought signature here that must be echoed back on the next turn.
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 type FunctionCall struct {

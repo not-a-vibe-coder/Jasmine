@@ -98,20 +98,21 @@ func TestFormatWalletAddressMessage(t *testing.T) {
 	}
 }
 
-func TestCleanNoEmojisAndEmDashes(t *testing.T) {
+func TestCleanKeepsEmojisAndReplacesEmDashes(t *testing.T) {
+	// Jasmine may use emojis like a person texting; only dashes are normalised.
 	input := "🚀 Pushed straight to main — here's the new description: ✨"
-	expected := "Pushed straight to main - here's the new description:"
-	res := cleanNoEmojis(input)
+	expected := "🚀 Pushed straight to main - here's the new description: ✨"
+	res := cleanModelArtifacts(input)
 	if res != expected {
-		t.Errorf("cleanNoEmojis(%q) = %q; want %q", input, res, expected)
+		t.Errorf("cleanModelArtifacts(%q) = %q; want %q", input, res, expected)
 	}
 
 	// Test en dash
 	inputEn := "Release v1 – latest updates"
 	expectedEn := "Release v1 - latest updates"
-	resEn := cleanNoEmojis(inputEn)
+	resEn := cleanModelArtifacts(inputEn)
 	if resEn != expectedEn {
-		t.Errorf("cleanNoEmojis(%q) = %q; want %q", inputEn, resEn, expectedEn)
+		t.Errorf("cleanModelArtifacts(%q) = %q; want %q", inputEn, resEn, expectedEn)
 	}
 }
 
@@ -129,9 +130,9 @@ func TestEagerPromptScrubbing(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := cleanNoEmojis(tt.input)
+		got := cleanModelArtifacts(tt.input)
 		if got != tt.expected {
-			t.Errorf("cleanNoEmojis(%q) = %q; want %q", tt.input, got, tt.expected)
+			t.Errorf("cleanModelArtifacts(%q) = %q; want %q", tt.input, got, tt.expected)
 		}
 	}
 }
@@ -263,9 +264,9 @@ func TestDeduplicateResponse(t *testing.T) {
 func TestCleanNoEmojisWithDeduplication(t *testing.T) {
 	input := "need the chain, amount and your wallet address to fire it off. — need the chain, amount and your wallet address to fire it off."
 	expected := "need the chain, amount and your wallet address to fire it off."
-	got := cleanNoEmojis(input)
+	got := cleanModelArtifacts(input)
 	if got != expected {
-		t.Errorf("cleanNoEmojis(%q) = %q; want %q", input, got, expected)
+		t.Errorf("cleanModelArtifacts(%q) = %q; want %q", input, got, expected)
 	}
 }
 
@@ -305,25 +306,25 @@ func TestCleanNoEmojisEagerScrubber(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		got := cleanNoEmojis(c.input)
+		got := cleanModelArtifacts(c.input)
 		// Trailing periods may be conditionally trimmed
 		gotTrimmed := strings.TrimSuffix(got, ".")
 		wantTrimmed := strings.TrimSuffix(c.expected, ".")
 		if gotTrimmed != wantTrimmed {
-			t.Errorf("cleanNoEmojis(%q)\n  got:      %q\n  expected: %q", c.input, got, c.expected)
+			t.Errorf("cleanModelArtifacts(%q)\n  got:      %q\n  expected: %q", c.input, got, c.expected)
 		}
 	}
 }
 
 func TestCleanNoEmojisDeclarationScrubber(t *testing.T) {
 	input := "declaration:default_api:get_group_topics{}"
-	got := cleanNoEmojis(input)
+	got := cleanModelArtifacts(input)
 	if strings.TrimSpace(got) != "" {
 		t.Errorf("expected empty string after scrubbing leaked declaration, got: %q", got)
 	}
 
 	mixed := "Here are the topics declaration:default_api:get_group_topics{} for you"
-	gotMixed := cleanNoEmojis(mixed)
+	gotMixed := cleanModelArtifacts(mixed)
 	if strings.Contains(gotMixed, "declaration") || strings.Contains(gotMixed, "default_api") {
 		t.Errorf("expected declaration to be scrubbed from mixed text, got: %q", gotMixed)
 	}

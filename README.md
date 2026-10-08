@@ -43,11 +43,19 @@ and sent as `x-public-key` / `x-signature` / `x-timestamp` / `x-nonce` / `x-acco
 
 ## Models
 
-Jasmine runs on open models, with no Claude or GPT in the chat path. Requests fall through a chain so one provider's rate limit doesn't take her down:
+No Claude or GPT anywhere in the chat path. Requests go through a chain, and each provider is used only when its key is set:
 
-Groq (Qwen 3.8 27B, then GPT-OSS) → Cerebras → OpenRouter free models → Mistral → Hugging Face → Gemini Flash
+Groq (Qwen 3.8 27B, then GPT-OSS) → Gemini 3.5 Flash Lite → OpenRouter free models → Mistral → Hugging Face → native Gemini
 
-A provider is used only when its key is set. Images come from Pollinations (Z-Image Turbo, then FLUX models, with a free key), falling back to Gemini, then to Pollinations' keyless model. Reasoning is hidden per provider, and any reply that is the model thinking out loud is discarded and retried on the next model.
+Groq's free tier allows only 8,000 tokens per minute, so full tool-using requests skip straight to Gemini rather than failing. Reasoning is hidden for each provider, and a final check blocks any reply that is the model thinking out loud, whichever path produced it.
+
+**Images:** Pollinations Z-Image Turbo and FLUX (with a free key) → Hugging Face FLUX.1-schnell → Gemini → Pollinations' keyless model.
+
+## Talking like a person
+
+- **Voice notes in:** she transcribes them (Groq Whisper, Gemini fallback). They wake her like text and go into her Walrus memory, so she remembers what you *said* as well as what you typed.
+- **Voice notes out:** she answers a voice note with one. She uses Groq Orpheus, which can laugh and sigh, once its terms are accepted, or a Microsoft neural voice (`VOICE_NAME`, e.g. Nigerian English `en-NG-EzinneNeural`).
+- **Reactions, stickers, GIFs:** she taps an emoji reaction, sends a sticker from public sets, or searches Giphy. When that says it all, she sends no extra text.
 
 ## Other abilities
 

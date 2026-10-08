@@ -23,7 +23,8 @@ FROM alpine:3.21
 WORKDIR /app
 
 # Install CA certificates for HTTPS / TLS RPCs and bash for script validation
-RUN apk --no-cache add ca-certificates tzdata bash
+# ffmpeg converts Orpheus voice output into Telegram voice-note format (Opus)
+RUN apk --no-cache add ca-certificates tzdata bash ffmpeg
 
 # Copy compiled binary from builder
 COPY --from=builder /app/bin/shipp /app/shipp

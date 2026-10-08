@@ -25,6 +25,7 @@ import (
 	"shipp/internal/server"
 	"shipp/internal/token"
 	"shipp/internal/vision"
+	"shipp/internal/voice"
 	"shipp/internal/walmem"
 	"shipp/internal/xhandle"
 )
@@ -71,6 +72,9 @@ func main() {
 	// 4. Initialize AI Client & Search Service
 	aiClient := ai.NewClient(cfg.GroqAPIKey, cfg.GroqModel, cfg.GeminiAPIKey, cfg.Owners)
 	// Fallback chain after the Groq pool. Each provider is skipped when its key is empty.
+	// Gemini via its OpenAI-compatible endpoint: generous free limits and solid tool calling.
+	aiClient.AddProvider(ai.Provider{Name: "gemini", URL: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+		APIKey: cfg.GeminiAPIKey, Models: modelList(os.Getenv("GEMINI_CHAT_MODELS"), "gemini-3.5-flash-lite,gemini-3.8-flash")})
 	aiClient.AddProvider(ai.Provider{Name: "cerebras", URL: "https://api.cerebras.ai/v1/chat/completions",
 		APIKey: cfg.CerebrasAPIKey, Models: modelList(cfg.CerebrasModels, "qwen-3.8-27b,gpt-oss-120b")})
 	aiClient.AddProvider(ai.Provider{Name: "openrouter", URL: "https://openrouter.ai/api/v1/chat/completions",
@@ -146,7 +150,14 @@ func main() {
 
 	// 11. Image generation: Pollinations (no key needed) with Gemini fallback
 	imageModels := modelList(cfg.PollinationsModels, strings.Join(imagegen.DefaultPollinationsModels, ","))
-	tgBot.SetImageGen(imagegen.NewService(cfg.PollinationsAPIKey, cfg.GeminiAPIKey, cfg.GeminiImageModel, imageModels...))
+	imageSvc := imagegen.NewService(cfg.PollinationsAPIKey, cfg.GeminiAPIKey, cfg.GeminiImageModel, imageModels...)
+	if cfg.HuggingFaceAPIKey != "" {
+		imageSvc.SetHuggingFace(cfg.HuggingFaceAPIKey, cfg.HFImageModel)
+	}
+	tgBot.SetImageGen(imageSvc)
+
+	// 12. Voice notes: Groq Whisper in; Groq Orpheus (if enabled) or Edge neural voices out
+	tgBot.SetVoice(voice.NewService(cfg.GroqAPIKey, cfg.GeminiAPIKey, cfg.VoiceName, cfg.OrpheusVoice))
 	if cfg.PollinationsAPIKey != "" {
 		log.Printf("[Main] Image generation: Pollinations %s", strings.Join(imageModels, " -> "))
 	} else {

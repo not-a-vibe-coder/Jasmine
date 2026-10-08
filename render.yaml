@@ -13,7 +13,8 @@ services:
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:
-      # Optional extras (add later in the dashboard): GEMINI_API_KEY, REDIS_URL, MISTRAL_API_KEY, HF_TOKEN.
+      # Optional extras (add in the dashboard): OWNER_IDS, POLLINATIONS_API_KEY, GIPHY_API_KEY,
+      # HF_TOKEN, VOICE_NAME, MISTRAL_API_KEY, REDIS_URL.
       # WEBHOOK_URL and SANDBOX_CALLBACK_URL are derived from RENDER_EXTERNAL_URL automatically.
       - key: OWNERS_USERNAME
         value: "@jackdotsol_"

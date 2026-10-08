@@ -38,6 +38,9 @@ type Image struct {
 }
 
 type Service struct {
+	hfToken            string
+	hfModel            string
+	hfURL              string
 	pollinationsURL    string
 	legacyURL          string
 	pollinationsKey    string
@@ -65,6 +68,57 @@ func NewService(pollinationsKey, geminiKey, geminiModel string, pollinationsMode
 		geminiBaseURL:   "https://generativelanguage.googleapis.com/v1beta/models/",
 		httpClient:      &http.Client{Timeout: 90 * time.Second},
 	}
+}
+
+// DefaultHFModel is served through Hugging Face's router (nscale provider) and billed
+// against the account's free monthly inference credits.
+const DefaultHFModel = "black-forest-labs/FLUX.1-schnell"
+
+// SetHuggingFace enables FLUX via the Hugging Face router.
+func (s *Service) SetHuggingFace(token, model string) {
+	if model == "" {
+		model = DefaultHFModel
+	}
+	s.hfToken, s.hfModel = token, model
+	if s.hfURL == "" {
+		s.hfURL = "https://router.huggingface.co/nscale/v1/images/generations"
+	}
+}
+
+func (s *Service) huggingFace(ctx context.Context, prompt string) (*Image, error) {
+	body, _ := json.Marshal(map[string]string{"model": s.hfModel, "prompt": prompt, "response_format": "b64_json"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.hfURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.hfToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 3*maxImageBytes))
+	if resp.StatusCode != http.StatusOK {
+		msg := string(raw)
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, msg)
+	}
+	var out struct {
+		Data []struct {
+			B64 string `json:"b64_json"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil || len(out.Data) == 0 || out.Data[0].B64 == "" {
+		return nil, fmt.Errorf("no image in response")
+	}
+	data, err := base64.StdEncoding.DecodeString(out.Data[0].B64)
+	if err != nil {
+		return nil, err
+	}
+	return &Image{Data: data, MIMEType: http.DetectContentType(data), Provider: "huggingface/" + s.hfModel}, nil
 }
 
 // SetBaseURLs points the service at test servers.
@@ -95,7 +149,15 @@ func (s *Service) Generate(ctx context.Context, prompt string) (*Image, error) {
 			return nil, fmt.Errorf("image generation timed out: %s", strings.Join(errs, "; "))
 		}
 	}
-	// 2. Gemini (needs a key with image quota, i.e. billing enabled).
+	// 2. Hugging Face FLUX (free monthly credits).
+	if s.hfToken != "" {
+		img, err := s.huggingFace(ctx, prompt)
+		if err == nil {
+			return img, nil
+		}
+		errs = append(errs, "huggingface: "+err.Error())
+	}
+	// 3. Gemini (needs a key with image quota, i.e. billing enabled).
 	if s.geminiKey != "" {
 		img, err := s.gemini(ctx, prompt)
 		if err == nil {
@@ -103,7 +165,7 @@ func (s *Service) Generate(ctx context.Context, prompt string) (*Image, error) {
 		}
 		errs = append(errs, "gemini: "+err.Error())
 	}
-	// 3. Legacy keyless endpoint as a last resort.
+	// 4. Legacy keyless endpoint as a last resort.
 	img, err := s.pollinations(ctx, s.legacyURL, "", prompt, false)
 	if err == nil {
 		return img, nil

@@ -509,3 +509,43 @@ func TestApplyReasoningControls(t *testing.T) {
 		t.Errorf("mistral should get no reasoning params: %+v", r)
 	}
 }
+
+func TestLooksLikeLeakedReasoning(t *testing.T) {
+	leaks := []string{
+		"The user is telling gunbot to not hold back against jasmine, no filter. But the conversation seems to be about jasmine being roasted. Let me check the context.\n\nLooking at the conversation:",
+		"The user is asking me to reply to the previous context. Looking at the conversation flow:\n1. Message ID 141 was authored by @JasmineMemBot",
+		"<think>hmm",
+		"Actually, looking more carefully: the \"Current speaker is therealgunroar\" tag at the top says this user is a regular chat member. ACTIVE REPLY CONTEXT says",
+	}
+	for _, l := range leaks {
+		if !LooksLikeLeakedReasoning(l) {
+			t.Errorf("should flag leak: %.60q", l)
+		}
+	}
+	fine := []string{
+		"haha gunroar you really built a bot just to roast me? cute",
+		"wait, you're coming tomorrow?",
+		"the user guide is on the repo readme, check it out",
+		"looking at the conversation, i think you two need snacks",
+		"",
+	}
+	for _, f := range fine {
+		if LooksLikeLeakedReasoning(f) {
+			t.Errorf("false positive: %q", f)
+		}
+	}
+}
+
+func TestWithoutExtraContent(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", ExtraContent: []byte(`{"google":{}}`)}}},
+	}
+	out := withoutExtraContent(msgs)
+	if out[1].ToolCalls[0].ExtraContent != nil {
+		t.Error("extra content not stripped")
+	}
+	if msgs[1].ToolCalls[0].ExtraContent == nil {
+		t.Error("original history must not be mutated")
+	}
+}

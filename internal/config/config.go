@@ -69,7 +69,14 @@ type Config struct {
 	HuggingFaceAPIKey string
 	HuggingFaceModels string
 
+	// Voice, stickers and GIFs
+	VoiceName    string   // Microsoft Edge neural voice, e.g. en-US-AvaMultilingualNeural
+	OrpheusVoice string   // Groq Orpheus voice, e.g. tara
+	GiphyAPIKey  string
+	StickerSets  []string // public Telegram sticker set names
+
 	// Image generation
+	HFImageModel       string
 	PollinationsAPIKey string
 	PollinationsModels string
 	GeminiImageModel   string
@@ -132,6 +139,10 @@ func LoadConfig() (*Config, error) {
 		MistralModels:       os.Getenv("MISTRAL_MODELS"),
 		HuggingFaceAPIKey:   os.Getenv("HF_TOKEN"),
 		HuggingFaceModels:   os.Getenv("HF_MODELS"),
+		VoiceName:           os.Getenv("VOICE_NAME"),
+		OrpheusVoice:        os.Getenv("ORPHEUS_VOICE"),
+		GiphyAPIKey:         os.Getenv("GIPHY_API_KEY"),
+		HFImageModel:        os.Getenv("HF_IMAGE_MODEL"),
 		PollinationsAPIKey:  os.Getenv("POLLINATIONS_API_KEY"),
 		PollinationsModels:  os.Getenv("POLLINATIONS_MODELS"),
 		GeminiImageModel:    os.Getenv("GEMINI_IMAGE_MODEL"),
@@ -183,6 +194,12 @@ func LoadConfig() (*Config, error) {
 		cleaned = strings.ToLower(cleaned)
 		if cleaned != "" {
 			cfg.Owners = append(cfg.Owners, cleaned)
+		}
+	}
+
+	for _, raw := range strings.Split(os.Getenv("STICKER_SETS"), ",") {
+		if name := strings.TrimSpace(raw); name != "" {
+			cfg.StickerSets = append(cfg.StickerSets, name)
 		}
 	}
 

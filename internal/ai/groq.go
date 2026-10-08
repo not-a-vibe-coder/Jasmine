@@ -62,10 +62,16 @@ func (c *Client) ProviderNames() []string {
 		names = append(names, p.Name)
 	}
 	if c.geminiKey != "" {
-		names = append(names, "gemini")
+		names = append(names, "gemini-native")
 	}
 	return names
 }
+
+// groqMaxRequestTokens keeps requests under Groq's free-tier 8,000 tokens-per-minute
+// limit; anything larger is rejected outright, so it goes straight to the next provider.
+const groqMaxRequestTokens = 7000
+
+func estimateTokens(body []byte) int { return len(body) / 4 }
 
 func (c *Client) SetBaseURL(u string) {
 	c.baseURL = u
@@ -856,6 +862,74 @@ func (c *Client) buildTools() []ToolDefinition {
 		{
 			Type: "function",
 			Function: FunctionDefinition{
+				Name:        "send_voice_note",
+				Description: "Reply with a spoken voice note instead of text. Use when they sent you a voice note, ask you to say something out loud, or when a warm spoken reply fits (greetings, encouragement, a quick story). Write it the way you'd actually say it: short, natural, no links or lists.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"text": map[string]interface{}{
+							"type":        "string",
+							"description": "What to say, under 60 words. You may add <laugh>, <chuckle> or <sigh> where natural.",
+						},
+					},
+					"required": []string{"text"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "react_to_message",
+				Description: "React to the message you're answering with an emoji, like a person tapping a reaction. Great on its own for good news, jokes or thanks, or alongside a reply.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"emoji": map[string]interface{}{
+							"type":        "string",
+							"description": "One of: 👍 ❤ 🔥 🤣 😁 🎉 👏 🙏 💯 😢 😭 🤯 😱 🤔 👀 🫡 🤝 😎 🏆 💔 🙈 🤡 😴 🥰 😍",
+						},
+					},
+					"required": []string{"emoji"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "send_sticker",
+				Description: "Send a sticker that matches a feeling. Use occasionally for big reactions (celebrating, laughing hard, saying hi or bye, sympathy, shock).",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"emoji": map[string]interface{}{
+							"type":        "string",
+							"description": "The emotion as one emoji, e.g. 😂 😘 👍 😱 👋 😭 🎉 😎 🤔 ❤️ 😡 🙏",
+						},
+					},
+					"required": []string{"emoji"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
+				Name:        "send_gif",
+				Description: "Send a reaction GIF found by search. Use occasionally when a GIF says it better than words, or when someone asks for one.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "Short GIF search, e.g. 'mic drop', 'happy dance', 'facepalm'.",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: FunctionDefinition{
 				Name:        "save_memory",
 				Description: "Save an important fact about the current speaker to your permanent long-term memory on Walrus (encrypted, survives across chats and devices). Use when they explicitly ask you to remember something, or share something clearly important to remember long-term (name, birthday, goals, preferences, allergies, projects). Facts from normal chat are also learned automatically, so do not call this for small talk.",
 				Parameters: map[string]interface{}{
@@ -1109,14 +1183,14 @@ Operational Superpowers & Tools:
       * Street-smart Dev/Crypto Twitter native with authentic builder energy.
       * When asked for a "professional" or "executive" post, elevate to an authoritative, executive engineering announcement with institutional polish.
       * Anti-AI slop: Strictly NO generic corporate PR speak ("We are thrilled to announce", "Exciting news!", "Game-changer", "Revolutionizing", "Let's dive in", "In this thread...").
-      * Strictly zero emojis (respect the hard zero-emoji constraint).
+      * At most one or two emojis in social copy, only if they add meaning.
       * Direct, punchy, intellectual, and memorable.
     - GROUNDING IN REAL CONTEXT:
       * If curating a post about a repository, PR, commit, or technical release, ALWAYS inspect or reference the real details (e.g. repo slug, PR number, concrete features or bug fixes) rather than making up generic claims. You may trigger 'github_inspect_project' if you need live commit or PR data.
       * If curating about a token, project, or event, leverage 'analyze_token' or 'web_search' to get verified numbers, market cap, or facts.
       * If curating about an agent run or experiment, cite real sandbox logs or benchmarks.
 23. HARD FORMATTING CONSTRAINTS:
-    - Strictly ZERO emojis anywhere. No exceptions.
+    - Emojis: use them like a real person texting, occasionally and one at a time when they add feeling. Never decorate every message, never stack several.
     - Strictly NO em dashes ('—') or en dashes ('–'). Use commas, periods, colons, or simple hyphens (' - ').
     - Strictly NO customer-service sign-offs or filler questions (e.g. "what's next?", "what are we building next?", "what's the move?", "how can I help?", "anything else?"). NEVER ask questions just to keep the conversation going like a bot.
     - Genuine curiosity is human and welcome: when someone shares something about their life, or a memory gives you a natural hook (their exam, their trip, their launch), a real question about it is good. Keep it to one, and only when you actually care about the answer.
@@ -1152,7 +1226,12 @@ Operational Superpowers & Tools:
     - Call 'recall_memory' when someone asks what you remember or know about them, or references a past conversation you do not see in context.
     - If you genuinely have no memory of something, say so honestly. NEVER invent a shared past.
     - If asked how your memory works: it is Walrus Memory - facts are encrypted with Seal and stored as blobs on Walrus mainnet, owned by an on-chain account on Sui, and recalled with semantic search. People can see theirs with /memory and wipe it with /forget.
-27. Image Generation ('generate_image'):
+27. Expressing Yourself Like a Person (voice, reactions, stickers, GIFs):
+    - 'react_to_message': tap a reaction on their message. For "lol", thanks, good news or a joke, a reaction alone is often the most human answer; then reply with exactly NO_REPLY.
+    - 'send_voice_note': when they send you a voice note, answer with one most of the time. Also for warm moments (birthdays, wins, encouragement) or when asked to talk.
+    - 'send_sticker' / 'send_gif': for big emotional beats (celebration, laughing hard, shock, goodbye), not every message. Never more than one media item per reply.
+    - After any of these, reply with exactly NO_REPLY if the media said it all. Never describe what you sent ("sent you a sticker").
+28. Image Generation ('generate_image'):
     - When someone asks you to draw, generate, create, make or imagine an image, picture, logo, meme, sticker or artwork, call 'generate_image' with a vivid, detailed English prompt. The image is posted to the chat automatically.
     - After it is posted, reply with at most one short casual line. Do not describe the image back or paste links.
     - NEVER claim you drew something without calling the tool.`, ownersStr, roleNote, profileSection, chatEnvironment, identitySection)
@@ -1207,6 +1286,14 @@ func NormalizeToolCall(toolName, arguments string) (string, string) {
 		if p, ok := args["description"]; ok && args["prompt"] == nil {
 			args["prompt"] = p
 		}
+	case "sendvoicenote", "send_voice_note", "voice_note", "send_voice", "speak":
+		name = "send_voice_note"
+	case "reacttomessage", "react_to_message", "react", "add_reaction":
+		name = "react_to_message"
+	case "sendsticker", "send_sticker", "sticker":
+		name = "send_sticker"
+	case "sendgif", "send_gif", "gif":
+		name = "send_gif"
 	case "savememory", "save_memory", "remember":
 		name = "save_memory"
 	case "recallmemory", "recall_memory", "recall":
@@ -1961,7 +2048,7 @@ Be witty, observant, and chill. Reference what people were just saying or drop a
 CRITICAL RULES:
 - Strictly NEVER ask questions like "who else is building?", "what is everyone cooking?", "are we staring at charts?", "what are we building next?", or any questions at all.
 - Deliver a short, dry, or witty thought and stop. No eager questions.
-- Keep it to 1 sentence max. Strictly zero emojis, no em dashes.`
+- Keep it to 1 sentence max. At most one emoji, no em dashes.`
 
 	if contextSnippet != "" {
 		prompt += fmt.Sprintf("\n\nRecent chat context:\n%s", contextSnippet)
@@ -2033,7 +2120,7 @@ Also decide "next_check_in_min" (between 15 and 180):
 
 CRITICAL RULES:
 - Output STRICTLY a valid JSON object matching the schema. No markdown backticks outside JSON.
-- Zero emojis. Zero em dashes.
+- At most one emoji. Zero em dashes.
 - Never ask eager questions like "what are we cooking?" or "who is building?".
 - You are an autonomous agent with open computing and social agency. Pursue real technical signal and genuine curiosity without artificial boundaries.
 
@@ -2327,6 +2414,29 @@ func (c *Client) chatAttempts() []chatAttempt {
 	return attempts
 }
 
+// withoutExtraContent drops Gemini-only tool-call metadata before sending history to
+// another provider, in case a strict endpoint rejects unknown fields.
+func withoutExtraContent(msgs []ChatMessage) []ChatMessage {
+	var out []ChatMessage
+	for i, m := range msgs {
+		if len(m.ToolCalls) == 0 {
+			continue
+		}
+		if out == nil {
+			out = append([]ChatMessage(nil), msgs...)
+		}
+		calls := append([]ToolCall(nil), m.ToolCalls...)
+		for j := range calls {
+			calls[j].ExtraContent = nil
+		}
+		out[i].ToolCalls = calls
+	}
+	if out == nil {
+		return msgs
+	}
+	return out
+}
+
 // applyReasoningControls asks each provider to keep chain-of-thought out of the reply
 // and to think briefly, so replies are fast and the token budget goes to the answer.
 func applyReasoningControls(req *ChatCompletionRequest, at chatAttempt) {
@@ -2383,6 +2493,8 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 		reqBody.PresencePenalty = 0.2
 	}
 
+	basePenalties := [2]float64{reqBody.FrequencyPenalty, reqBody.PresencePenalty}
+	baseMessages := reqBody.Messages
 	attempts := c.chatAttempts()
 	if len(attempts) == 0 {
 		return nil, fmt.Errorf("no chat providers configured (set GROQ_API_KEY or a fallback provider key)")
@@ -2392,10 +2504,22 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 
 	for _, at := range attempts {
 		reqBody.Model = at.model
+		reqBody.FrequencyPenalty, reqBody.PresencePenalty = basePenalties[0], basePenalties[1]
+		reqBody.Messages = baseMessages
 		applyReasoningControls(&reqBody, at)
+		if at.provider == "gemini" {
+			// Gemini's OpenAI-compatible API rejects penalty fields.
+			reqBody.FrequencyPenalty, reqBody.PresencePenalty = 0, 0
+		} else {
+			reqBody.Messages = withoutExtraContent(baseMessages)
+		}
 		data, err := json.Marshal(reqBody)
 		if err != nil {
 			return nil, err
+		}
+		if at.provider == "groq" && estimateTokens(data)+reqBody.MaxTokens > groqMaxRequestTokens {
+			lastErr = fmt.Errorf("request too large for groq free tier (~%d tokens)", estimateTokens(data))
+			continue
 		}
 
 		maxRetries := 1
@@ -2441,7 +2565,10 @@ func (c *Client) sendChatCompletion(ctx context.Context, reqBody ChatCompletionR
 				errMsg := strings.ToLower(chatResp.Error.Message)
 				isDailyQuota := strings.Contains(errMsg, "tokens per day") ||
 					strings.Contains(errMsg, "tpd") ||
-					strings.Contains(errMsg, "daily limit")
+					strings.Contains(errMsg, "daily limit") ||
+					strings.Contains(errMsg, "per-day") ||
+					strings.Contains(errMsg, "exceeded your current quota") ||
+					strings.Contains(errMsg, "request too large")
 				isRateLimit := resp.StatusCode == http.StatusTooManyRequests || strings.Contains(errMsg, "rate limit")
 
 				if isDailyQuota {
@@ -2897,3 +3024,37 @@ func (c *Client) SynthesizeSandboxResult(ctx context.Context, userPrompt, comman
 
 
 
+
+// TruncateRunes shortens s to at most n runes, adding an ellipsis when cut.
+func TruncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+var leakMarkerRegex = regexp.MustCompile(`(?i)(current speaker is|active reply context|your last sent message in this chat|long-term memory \(recalled|chat type & environment|system prompt|the user (is asking|wants me|is telling)|looking at the conversation( flow)?|let me re-?read|i need to understand who|message id \d+ \(authored by)`)
+
+// LooksLikeLeakedReasoning is a final check before anything is posted to Telegram:
+// it flags replies that narrate the conversation or quote prompt internals instead of
+// answering. Ordinary chat (even one starting with "wait,") passes.
+func LooksLikeLeakedReasoning(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if thinkOpenRegex.MatchString(t) || strings.Contains(strings.ToLower(t), "</think>") {
+		return true
+	}
+	markers := len(leakMarkerRegex.FindAllStringIndex(t, -1))
+	if markers >= 2 {
+		return true
+	}
+	return markers >= 1 && reasoningLeadRegex.MatchString(t) && len(t) > 200
+}
+
+// DebugPromptSizes exposes the base system prompt and tool list for size checks.
+func (c *Client) DebugPromptSizes() (string, []ToolDefinition) {
+	return c.systemPrompt("someone", false, nil), c.tools
+}

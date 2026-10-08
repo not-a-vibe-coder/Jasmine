@@ -102,3 +102,31 @@ func TestModelChainAndKey(t *testing.T) {
 		t.Fatalf("unexpected requests: %v", seen)
 	}
 }
+
+func TestHuggingFaceBeforeLegacy(t *testing.T) {
+	png := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nrest"))
+	hf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer hf_x" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"` + png + `"}]}`))
+	}))
+	defer hf.Close()
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("legacy endpoint should not be called when Hugging Face works")
+	}))
+	defer legacy.Close()
+
+	s := NewService("", "", "")
+	s.SetBaseURLs(legacy.URL+"/prompt/", "")
+	s.hfURL = hf.URL
+	s.SetHuggingFace("hf_x", "")
+	img, err := s.Generate(t.Context(), "a walrus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Provider != "huggingface/"+DefaultHFModel || img.MIMEType != "image/png" {
+		t.Fatalf("unexpected image: %+v", img)
+	}
+}
