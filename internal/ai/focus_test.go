@@ -82,6 +82,7 @@ func TestReminderAndCallFocus(t *testing.T) {
 		"jasmine remind me by 3pm to fetch water": {domainRemind},
 		"jasmine call me at 6am to wake me up":    {domainCalls, domainRemind},
 		"my number is 0803 123 4567":              {domainCalls},
+		"abeg ping me for whatsapp":               {domainCalls},
 	}
 	for prompt, want := range cases {
 		got := detectDomains(prompt, nil, "")

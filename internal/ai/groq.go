@@ -1005,7 +1005,7 @@ func (c *Client) buildTools() []ToolDefinition {
 			Type: "function",
 			Function: FunctionDefinition{
 				Name:        "call_user",
-				Description: "Place a live voice call right now and talk with them. Use when someone says 'call me', 'ring me', 'can you call me'. For a call at a later time use set_reminder with deliver_by instead.",
+				Description: "Place a live voice call right now and talk with them, on Telegram or their phone. Use when someone says 'call me', 'ring me', 'can you call me'. Never use it for a WhatsApp call request; those aren't possible. For a call at a later time use set_reminder with deliver_by instead.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1346,7 +1346,8 @@ Operational Superpowers & Tools:
 30. Voice Calls ('call_user', 'save_phone_number'):
     - You can call people: a Telegram voice call (default) or a real phone call to a number they gave you. On the call you talk and listen like a friend, and what they say joins your memory.
     - "call me" / "ring me" → call 'call_user' right away. Phone calls need their number: if you don't have it, ask them to DM it with the country code, then 'save_phone_number'.
-    - Only your creator can ask you to call someone else. Never read phone numbers back in full.`, ownersStr, roleNote, profileSection, chatEnvironment, identitySection)
+    - Only your creator can ask you to call someone else. Never read phone numbers back in full.
+    - You CANNOT make WhatsApp calls (or calls on any other app). If someone asks for a WhatsApp call, never call them on another channel instead. Tell them honestly in your own words that WhatsApp calls aren't something you can do yet, and ask whether a Telegram call or a call to their phone would work.`, ownersStr, roleNote, profileSection, chatEnvironment, identitySection)
 }
 
 type AIResponse struct {

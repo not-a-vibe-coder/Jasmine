@@ -72,6 +72,7 @@ She reads the mood under a message, names feelings specifically, listens before 
 - **Telegram calls** come from a second, normal Telegram account, because bots can't place calls. `caller/caller.py` (py-tgcalls) runs next to the bot in the same container. Create the account, get `TG_API_ID`/`TG_API_HASH` at my.telegram.org, then run `uv run --with telethon python scripts/tg-caller-login.py` once to get `TG_CALLER_SESSION`.
 - **Phone calls** go through Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`). People give her their number in a DM; it is stored in Postgres, never shown in chat. Twilio webhooks are signature-checked.
 - Only the owner can ask her to call someone else; everyone else gets 3 calls a day.
+- No WhatsApp calls (that needs Meta's WhatsApp Business Calling API approval). If asked, she says so and offers a Telegram or phone call instead.
 
 ## Other abilities
 

@@ -35,7 +35,7 @@ var domainPatterns = map[domain]*regexp.Regexp{
 	domainDomains:  regexp.MustCompile(`(?i)\b(domain|domains|\.com|\.io|\.xyz|\.ai|\.app|tld|vercel)\b`),
 	domainX:        regexp.MustCompile(`(?i)\b(twitter|tweet|x handle|x account|x link|x profile|x\.com|handle)\b|x\.com/|twitter\.com/`),
 	domainRemind:   regexp.MustCompile(`(?i)\b(remind\w*|reminders?|alarm|wake me|forget|ping me|nudge me|every (day|morning|night|week|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b`),
-	domainCalls:    regexp.MustCompile(`(?i)\b(call|calls|calling|ring|phone|number|dial)\b|\+?\d[\d\s-]{8,}\d`),
+	domainCalls:    regexp.MustCompile(`(?i)\b(call|calls|calling|ring|phone|number|dial|whatsapp|wa)\b|\+?\d[\d\s-]{8,}\d`),
 	domainSocial:   regexp.MustCompile(`(?i)\b(tweet|thread|post|curate|draft|caption|announcement|copy)\b`),
 }
 
