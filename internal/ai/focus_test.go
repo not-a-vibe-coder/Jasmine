@@ -76,3 +76,23 @@ func TestFocusPromptAndTools(t *testing.T) {
 		t.Error("crypto tools missing when crypto is active")
 	}
 }
+
+func TestReminderAndCallFocus(t *testing.T) {
+	cases := map[string][]domain{
+		"jasmine remind me by 3pm to fetch water": {domainRemind},
+		"jasmine call me at 6am to wake me up":    {domainCalls, domainRemind},
+		"my number is 0803 123 4567":              {domainCalls},
+	}
+	for prompt, want := range cases {
+		got := detectDomains(prompt, nil, "")
+		for _, d := range want {
+			if !got[d] {
+				t.Errorf("%q should activate %s, got %v", prompt, d, got)
+			}
+		}
+	}
+	casual := detectDomains("lmaooo okay fine", nil, "")
+	if casual[domainRemind] || casual[domainCalls] {
+		t.Errorf("casual chat should not load reminders or calls: %v", casual)
+	}
+}

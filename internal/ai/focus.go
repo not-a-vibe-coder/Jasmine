@@ -22,6 +22,8 @@ const (
 	domainDomains  domain = "domains"
 	domainX        domain = "x"
 	domainSocial   domain = "social"
+	domainRemind   domain = "remind"
+	domainCalls    domain = "calls"
 )
 
 var domainPatterns = map[domain]*regexp.Regexp{
@@ -32,6 +34,8 @@ var domainPatterns = map[domain]*regexp.Regexp{
 	domainMoltbook: regexp.MustCompile(`(?i)\bmoltbook\b`),
 	domainDomains:  regexp.MustCompile(`(?i)\b(domain|domains|\.com|\.io|\.xyz|\.ai|\.app|tld|vercel)\b`),
 	domainX:        regexp.MustCompile(`(?i)\b(twitter|tweet|x handle|x account|x link|x profile|x\.com|handle)\b|x\.com/|twitter\.com/`),
+	domainRemind:   regexp.MustCompile(`(?i)\b(remind\w*|reminders?|alarm|wake me|forget|ping me|nudge me|every (day|morning|night|week|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b`),
+	domainCalls:    regexp.MustCompile(`(?i)\b(call|calls|calling|ring|phone|number|dial)\b|\+?\d[\d\s-]{8,}\d`),
 	domainSocial:   regexp.MustCompile(`(?i)\b(tweet|thread|post|curate|draft|caption|announcement|copy)\b`),
 }
 
@@ -59,6 +63,9 @@ func detectDomains(userPrompt string, history []memory.Message, chatContext stri
 	if active[domainX] {
 		active[domainSocial] = true
 	}
+	if active[domainCalls] {
+		active[domainRemind] = true // "call me at 6am" is a reminder delivered by call
+	}
 	return active
 }
 
@@ -75,6 +82,8 @@ var sectionDomains = map[string]domain{
 	"19": domainX,
 	"21": domainMoltbook,
 	"22": domainSocial,
+	"29": domainRemind,
+	"30": domainCalls,
 }
 
 var sectionHeaderRe = regexp.MustCompile(`^(\d+)\. `)
@@ -124,6 +133,12 @@ var toolDomains = map[string]domain{
 	"moltbook_post":          domainMoltbook,
 	"moltbook_comment":       domainMoltbook,
 	"vercel_search_domains":  domainDomains,
+	"set_reminder":           domainRemind,
+	"list_reminders":         domainRemind,
+	"cancel_reminder":        domainRemind,
+	"call_user":              domainCalls,
+	"save_phone_number":      domainCalls,
+	"forget_phone_number":    domainCalls,
 	"check_x_username":       domainX,
 	"read_x_post":            domainX,
 }
