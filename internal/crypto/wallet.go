@@ -140,7 +140,7 @@ func NewService(
 		bnbRPC = "https://binance.llamarpc.com"
 	}
 	if rhRPC == "" {
-		rhRPC = "https://rpc.robinhood.com"
+		rhRPC = "https://rpc.mainnet.chain.robinhood.com"
 	}
 
 	s.chains["base"] = ChainInfo{
@@ -181,7 +181,7 @@ func NewService(
 		Symbol:       "ETH",
 		ChainID:      4663,
 		RPCURL:       rhRPC,
-		FallbackRPCs: []string{"https://rpc.robinhood.com"},
+		FallbackRPCs: []string{"https://robinhood-rpc.publicnode.com", "https://robinhood.drpc.org", "https://rpc.mainnet.chain.robinhood.com"},
 		Explorer:     "https://robinhoodchain.blockscout.com/tx/",
 	}
 	s.chains["robinhood"] = rhChain
